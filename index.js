@@ -16,9 +16,9 @@ bot
     // 编辑页面，并返回操作结果
     return bot.postWithToken('csrf', {
       action: 'edit',
-      title: 'U:穆斯塔法凯末尔/SandBox',
-      text: '{{About|{{User|穆斯塔法凯末尔}}的沙盒|与其他用户共享的积压工作列表|User:穆斯塔法凯末尔/积压工作}}\n==在本行之下进行测试==',
-      summary: '重置[[U:穆斯塔法凯末尔|穆斯塔法凯末尔]]的沙盒',
+      title: 'User:没有羽翼的格雷塔/SandBox',
+      text: '{{About|{{User|穆斯塔法凯末尔}}的沙盒|与其他用户共享的积压工作列表|User:没有羽翼的格雷塔/积压工作}}\n==在本行之下进行测试==',
+      summary: '重置用户沙盒',
       bot: true, // 别忘了标记本次编辑为机器人编辑
       tags: 'Bot' // 别忘了添加合适的标签
     })
