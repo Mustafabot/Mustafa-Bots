@@ -76,7 +76,7 @@ const api = new MediaWikiApi(config.zh.api, {
 
 		console.log(`${title}: 检测到变更，准备提交`);
 		
-		await api.postWithToken('csrf', {
+		await api.postWithEditToken({
 			action: 'edit',
 			title,
 			text: newContent,
@@ -85,9 +85,6 @@ const api = new MediaWikiApi(config.zh.api, {
 			notminor: true,
 			tags: 'Bot',
 			watchlist: 'nochange',
-		}, {
-			retry: 50,
-			noCache: true,
 		}).then(({ data }) => console.log(JSON.stringify(data)));
 	}
 
