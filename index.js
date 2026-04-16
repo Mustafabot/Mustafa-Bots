@@ -4,13 +4,13 @@ import { MediaWikiApi } from 'wiki-saikou';
 import config from './config.js';
 import clientlogin from './clientlogin.js';
  
-// 初始化实例
+/** @type {import('wiki-saikou').MediaWikiApi} */
 const bot = new MediaWikiApi(config.zh.api, {
 	headers: { cookie: config.useragent },
 });
  
 // 登录账号
-const loginResult = await clientlogin(bot, config.zh.bot.clientUsername, config.zh.bot.clientPassword)
+await clientlogin(bot, config.zh.bot.clientUsername, config.zh.bot.clientPassword)
   .then((result) => { console.log(result); }) // 在“创建您的 bot 账号”步骤中最后一步您得到的账号与密码信息
   // 我们用 then 方法等待登录的成功回调
   .then(() => {

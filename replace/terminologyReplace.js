@@ -147,7 +147,6 @@ async function processPage(title) {
 			.then((result) => { console.log(result); });
 
 		let successCount = 0;
-		let failCount = 0;
 		let skipCount = 0;
 
 		for (const title of PAGE_TITLES) {

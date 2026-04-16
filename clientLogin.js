@@ -5,8 +5,8 @@ import config from './config.js';
  * @param {import('../src').MediaWikiApi} api
  * @param {string} username
  * @param {string} [password=config.password]
+ * @returns {Promise<any>} 登录结果
  */
-// eslint-disable-next-line require-await
 async function clientLogin(api, username, password = config.password) {
 	return api
 		.postWithToken(

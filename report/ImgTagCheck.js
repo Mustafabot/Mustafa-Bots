@@ -43,7 +43,7 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
 			.map(line => {
 				try {
 					return new RegExp(line.trim());
-				} catch (e) {
+				} catch {
 					console.error(`Invalid regex in whitelist: ${line}`);
 					return null;
 				}
