@@ -15,14 +15,17 @@ const loginResult = await clientlogin(bot, config.zh.bot.clientUsername, config.
   // 我们用 then 方法等待登录的成功回调
   .then(() => {
     // 编辑页面，并返回操作结果
-    return bot.postWithEditToken({
+    return bot.postWithToken('csrf',{
       action: 'edit',
       title: 'User:没有羽翼的格雷塔/SandBox',
       text: '{{About|{{User|没有羽翼的格雷塔}}的沙盒|与其他用户共享的积压工作列表|User:没有羽翼的格雷塔/积压工作}}\n==在本行之下进行测试==',
       summary: '重置用户沙盒',
       bot: true, // 别忘了标记本次编辑为机器人编辑
       tags: 'Bot' // 别忘了添加合适的标签
-    })
+    },{
+      retry: 500,
+      noCache: true,
+    });
   })
   //.then((result) => { console.log(result); })
   // 打印编辑操作的结果

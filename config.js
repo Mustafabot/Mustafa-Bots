@@ -11,7 +11,7 @@ const config = {
 	useragent: `moegirlSSOToken=${env.MOEGIRL_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_SSO_USER_ID}`,
 	password: env.MOEGIRL_PASSWORD, // for clientLogin
 	zh: {
-		api: 'https://zh.moegirl.org.cn/api.php',
+		api: 'https://mzh.moegirl.org.cn/api.php',
 		bot: {
 			name: '机娘穆斯塔法@Kemal-Bot',
 			password: env.MOEGIRL_PASSWORD,

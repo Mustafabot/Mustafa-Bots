@@ -4,6 +4,7 @@
   "description": "MustafaKemalBot for MoegirlPedia",
   "main": "index.js",
   "scripts": {
+    "lint": "eslint .",
     "test": "echo \"Error: no test specified\" && exit 1"
   },
   "author": "",
@@ -13,5 +14,10 @@
     "dotenv": "^16.4.5",
     "wiki-saikou": "^3.4.0",
     "wikiparser-node": "^1.37.1"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "eslint": "^10.2.0",
+    "globals": "^17.5.0"
   }
 }
