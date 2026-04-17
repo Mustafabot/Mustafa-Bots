@@ -145,12 +145,13 @@ function generateFilename(url, article, index) {
  * @param {UploadConfig} globalConfig - 全局配置
  * @param {number} index - 文件序号
  * @param {boolean} dryRun - 是否为试运行模式
+ * @param {string} article - 条目标题
  * @returns {Promise<UploadResult>} 上传结果
  */
-async function uploadFromUrl(api, fileConfig, globalConfig, index, dryRun) {
-	const filename = fileConfig.filename || generateFilename(fileConfig.url, globalConfig.article, index);
+async function uploadFromUrl(api, fileConfig, globalConfig, index, dryRun, article) {
+	const filename = fileConfig.filename || generateFilename(fileConfig.url, article, index);
 	const comment = globalConfig.comment || DEFAULT_COMMENT;
-	const text = globalConfig.text || '[[Category:迁移文件]]';
+	const text = globalConfig.text || `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`;
 
 	console.log(`  来源URL: ${fileConfig.url}`);
 
@@ -235,7 +236,7 @@ async function batchUpload(api, uploadConfig, dryRun) {
 
 		console.log(`\n[${index}/${total}] 正在上传: ${fileConfig.filename || '(自动生成)'}`);
 
-		const result = await uploadFromUrl(api, fileConfig, uploadConfig, index, dryRun);
+		const result = await uploadFromUrl(api, fileConfig, uploadConfig, index, dryRun, uploadConfig.article);
 		results.push(result);
 
 		if (result.success) {
