@@ -473,7 +473,7 @@ function buildUseImgTemplateNode(filename, attributes, refNode) {
 	let attrsStr = '';
 	for (const [key, value] of Object.entries(otherAttrs)) {
 		if (value) {
-			attrsStr += ` ${key}${value}`;
+			attrsStr += ` ${key}=${value}`;
 		}
 	}
 	if (attrsStr) {
