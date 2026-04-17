@@ -7,7 +7,7 @@ import clientlogin from '../clientlogin.js';
 Parser.config = 'moegirl';
 const NAMESPACE = '0';//检查的单个命名空间
 const api = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.useragent },
+	headers: { cookie: config.zh.cookie },
 });
 
 const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}`;

@@ -1,6 +1,7 @@
 .env
 
 /.trae
+/.vscode
 
 node_modules/
 

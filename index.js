@@ -5,8 +5,8 @@ import config from './config.js';
 import clientlogin from './clientlogin.js';
  
 /** @type {import('wiki-saikou').MediaWikiApi} */
-const bot = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.useragent },
+  const bot = new MediaWikiApi(config.zh.api, {
+	headers: { cookie: config.zh.cookie },
 });
  
 // 登录账号

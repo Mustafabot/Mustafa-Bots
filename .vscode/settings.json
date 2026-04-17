@@ -1,6 +1,0 @@
-{
-  "javascript.validate.enable": true,
-  "javascript.inlayHints.parameterTypes.enabled": true,
-  "javascript.inlayHints.variableTypes.enabled": true,
-  "javascript.suggest.jsdoc.generateReturns": true
-}

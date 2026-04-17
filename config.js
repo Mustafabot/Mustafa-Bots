@@ -18,23 +18,24 @@ dotenvConfig({ path: path.join(__dirname, '.env') });
 /**
  * @typedef {object} WikiConfig
  * @property {string} api - Wiki API地址
+ * @property {string} [cookie] - Cookie字符串
  * @property {BotConfig} bot - Bot配置
  */
 
 /**
  * @typedef {object} Config
- * @property {string} useragent - User-Agent字符串
+ * @property {string} [useragent] - User-Agent字符串（已废弃，请使用各站点的cookie）
  * @property {string} [password] - 默认密码
- * @property {WikiConfig} zh - 中文维基配置
- * @property {WikiConfig} cm - 共享资源维基配置
+ * @property {WikiConfig} zh - 中文萌娘百科配置
+ * @property {WikiConfig} cm - 萌娘共享配置
  */
 
 /** @type {Config} */
 const config = {
-	useragent: `moegirlSSOToken=${env.MOEGIRL_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_SSO_USER_ID}`,
 	password: env.MOEGIRL_PASSWORD, // for clientLogin
 	zh: {
 		api: 'https://mzh.moegirl.org.cn/api.php',
+		cookie: `moegirlSSOToken=${env.MOEGIRL_ZH_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_ZH_SSO_USER_ID}`,
 		bot: {
 			name: '机娘穆斯塔法@Kemal-Bot',
 			password: env.MOEGIRL_PASSWORD,
@@ -44,9 +45,12 @@ const config = {
 	},
 	cm: {
 		api: 'https://commons.moegirl.org.cn/api.php',
+		cookie: `moegirlSSOToken=${env.MOEGIRL_CM_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_CM_SSO_USER_ID}`,
 		bot: {
 			name: '机娘穆斯塔法@Kemal-Bot',
 			password: env.MOEGIRL_PASSWORD,
+			clientPassword: env.MOEGIRL_CLIENT_PASSWORD,
+			clientUsername: env.MOEGIRL_CLIENT_USERNAME,
 		},
 	},
 };

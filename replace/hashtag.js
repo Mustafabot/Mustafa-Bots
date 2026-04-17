@@ -4,7 +4,7 @@ import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 
 const api = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.useragent },
+	headers: { cookie: config.zh.cookie },
 });
 
 (async () => {

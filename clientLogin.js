@@ -5,9 +5,10 @@ import config from './config.js';
  * @param {import('../src').MediaWikiApi} api
  * @param {string} username
  * @param {string} [password=config.password]
+ * @param {string} [loginreturnurl] - 登录返回URL，默认使用zh站API
  * @returns {Promise<any>} 登录结果
  */
-async function clientLogin(api, username, password = config.password) {
+async function clientLogin(api, username, password = config.password, loginreturnurl = config.zh.api) {
 	return api
 		.postWithToken(
 			'login',
@@ -15,7 +16,7 @@ async function clientLogin(api, username, password = config.password) {
 				action: 'clientlogin',
 				username,
 				password,
-				loginreturnurl: config.zh.api,
+				loginreturnurl,
 			},
 			{
 				tokenName: 'logintoken',
