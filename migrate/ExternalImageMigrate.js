@@ -15,6 +15,7 @@ const cmApi = new MediaWikiApi(config.cm.api, {
 });
 
 const MAX_RETRIES = 3;
+const MAX_RENAME_ATTEMPTS = 10;
 const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
 
 /**
@@ -43,6 +44,8 @@ const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
  * @property {number} imagesUploaded - 成功上传数
  * @property {number} imagesReplaced - 成功替换数
  * @property {UploadResult[]} uploadResults - 上传结果
+ * @property {string} [editError] - 页面编辑错误信息
+ * @property {Array<[string, string]>} [pendingFiles] - 已上传但未替换的文件列表 [url, filename]
  */
 
 /**
@@ -132,14 +135,21 @@ async function processPagesInBatches(api, namespace, processBatch) {
  * @returns {string}
  */
 function extractExtension(url) {
+	const commonImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif'];
 	try {
 		const urlObj = new URL(url);
 		const pathname = urlObj.pathname;
-		const baseName = pathname.split('/').pop() || '';
-		const match = baseName.match(/\.([a-zA-Z0-9]+)$/);
-		return match ? `.${match[1]}` : '';
+		const match = pathname.match(/\.([a-zA-Z0-9]+)$/);
+		if (match && commonImageExts.includes(match[1].toLowerCase())) {
+			return `.${match[1].toLowerCase()}`;
+		}
+		const queryMatch = urlObj.search.match(/[?&](?:file|img|image|src|url)=[^&]*\.([a-zA-Z0-9]+)/i);
+		if (queryMatch && commonImageExts.includes(queryMatch[1].toLowerCase())) {
+			return `.${queryMatch[1].toLowerCase()}`;
+		}
+		return '.png';
 	} catch {
-		return '';
+		return '.png';
 	}
 }
 
@@ -152,8 +162,7 @@ function extractExtension(url) {
  */
 function generateFilename(url, article, index) {
 	const ext = extractExtension(url);
-	const safeArticle = article.replace(/[#/\\[\]{}|]/g, '_');
-	return `File:${safeArticle} ${index}${ext}`;
+	return `File:${article} ${index}${ext}`;
 }
 
 /**
@@ -227,8 +236,7 @@ function parseUploadWarnings(warnings) {
 				existingFile,
 				reason: '文件已存在且内容相同，跳过上传直接替换',
 			};
-		}
-		if (warningKeys.includes('duplicateversions')) {
+		} else if (warningKeys.includes('duplicateversions')) {
 			const existsInfo = warnings.exists;
 			let existingFile = existsInfo;
 			if (Array.isArray(existsInfo) && existsInfo.length > 0) {
@@ -267,6 +275,12 @@ function isWhitelisted(src, whitelist) {
 	}
 	if (src.startsWith('//')) {
 		return whitelist.some(regex => regex.test('https:' + src));
+	}
+	if (src.startsWith('http://')) {
+		const httpsUrl = src.replace('http://', 'https://');
+		if (whitelist.some(regex => regex.test(httpsUrl))) {
+			return true;
+		}
 	}
 	return false;
 }
@@ -320,12 +334,13 @@ function extractExternalImages(content, title, whitelist) {
 async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 	if (dryRun) {
 		console.log(`  [试运行] 将上传: ${filename}`);
-		return { filename, url, success: true };
+		return { filename, url, success: true, isDryRun: true };
 	}
 
 	let lastError = null;
 	let currentFilename = filename;
 	let renameSuffix = 1;
+	let renameAttempts = 0;
 
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 		try {
@@ -384,23 +399,25 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 				}
 
 				if (decision.action === 'rename') {
-				renameSuffix++;
-				currentFilename = generateRenamedFilename(filename, renameSuffix);
-				console.log(`  改名重试: ${currentFilename}`);
-				if (renameSuffix > MAX_RETRIES) {
-					console.log(`  改名次数已用尽，跳过上传`);
-					return {
-						filename: currentFilename,
-						url,
-						success: false,
-						warnings,
-						skipReplace: true,
-						action: decision.action,
-						error: '改名次数已用尽',
-					};
+					renameAttempts++;
+					if (renameAttempts > MAX_RENAME_ATTEMPTS) {
+						console.log(`  改名次数超限（${MAX_RENAME_ATTEMPTS}次），跳过此文件`);
+						return {
+							filename: currentFilename,
+							url,
+							success: false,
+							warnings,
+							skipReplace: true,
+							action: decision.action,
+							error: '改名次数超限',
+						};
+					}
+					renameSuffix++;
+					currentFilename = generateRenamedFilename(filename, renameSuffix);
+					console.log(`  改名重试: ${currentFilename}`);
+					attempt--;
+					continue;
 				}
-				continue;
-			}
 
 				if (decision.action === 'ignore') {
 					console.log('  忽略警告，强制上传...');
@@ -469,9 +486,6 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 				}
 				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
 				continue;
-			}
-			if (isAbuseFilter && attempt >= MAX_RETRIES) {
-				console.log(`  滥用过滤器警告重试次数已用尽，继续尝试下一个文件...`);
 			}
 		}
 	}
@@ -672,10 +686,10 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
 			console.log(`    上传失败: ${uploadResult.error}`);
 		}
 
-		if (i < uniqueSrcs.length - 1) {
+		/*if (i < uniqueSrcs.length - 1) {
 			console.log(`  等待10秒以避免超出请求速率...`);
 			await new Promise(resolve => setTimeout(resolve, 10000));
-		}
+		}*/
 	}
 
 	if (urlToFilename.size > 0) {
@@ -683,11 +697,14 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
 		const newContent = replaceImageNodes(parsed, issues, urlToFilename);
 
 		try {
-			await editPage(editApi, title, newContent, DEFAULT_COMMENT, dryRun);
+			await editPage(editApi, title, newContent, DEFAULT_COMMENT+`（${issues.length}个）`, dryRun);
 			result.imagesReplaced = issues.length;
 			console.log('  页面编辑成功');
 		} catch (error) {
 			console.error(`  页面编辑失败: ${error.message}`);
+			result.editError = error.message;
+			result.pendingFiles = [...urlToFilename.entries()];
+			console.log(`  已记录 ${result.pendingFiles.length} 个待替换文件`);
 		}
 	}
 

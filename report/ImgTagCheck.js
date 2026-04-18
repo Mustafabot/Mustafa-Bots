@@ -65,7 +65,7 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
 				rvprop: 'content',
 				generator: 'allpages',
 				gapnamespace: NAMESPACE,
-				gaplimit: 200,
+				gaplimit: 500,
 				gapcontinue: apcontinue,
 			}, {
 				retry: 15,
