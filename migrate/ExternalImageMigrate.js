@@ -135,7 +135,8 @@ function extractExtension(url) {
 	try {
 		const urlObj = new URL(url);
 		const pathname = urlObj.pathname;
-		const match = pathname.match(/\.([a-zA-Z0-9]+)$/);
+		const baseName = pathname.split('/').pop() || '';
+		const match = baseName.match(/\.([a-zA-Z0-9]+)$/);
 		return match ? `.${match[1]}` : '';
 	} catch {
 		return '';
@@ -151,7 +152,8 @@ function extractExtension(url) {
  */
 function generateFilename(url, article, index) {
 	const ext = extractExtension(url);
-	return `File:${article} ${index}${ext}`;
+	const safeArticle = article.replace(/[#/\\[\]{}|]/g, '_');
+	return `File:${safeArticle} ${index}${ext}`;
 }
 
 /**
