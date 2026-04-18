@@ -15,7 +15,7 @@ const cmApi = new MediaWikiApi(config.cm.api, {
 });
 
 const MAX_RETRIES = 3;
-const DEFAULT_COMMENT = '机器人：（测试）迁移外部图片到本地';
+const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
 
 /**
  * @typedef {object} ImageIssue
@@ -102,7 +102,7 @@ async function processPagesInBatches(api, namespace, processBatch) {
 			rvprop: 'content',
 			generator: 'allpages',
 			gapnamespace: namespace,
-			gaplimit: 200,
+			gaplimit: 500,
 			gapcontinue: apcontinue,
 		}, {
 			retry: 15,
@@ -212,14 +212,32 @@ function parseUploadWarnings(warnings) {
 
 	if (warningKeys.includes('exists')) {
 		if (warningKeys.includes('no-change')) {
+			const existsInfo = warnings.exists;
+			let existingFile = existsInfo;
+			if (Array.isArray(existsInfo) && existsInfo.length > 0) {
+				existingFile = existsInfo[0];
+			}
+			if (typeof existingFile === 'string' && !existingFile.startsWith('File:')) {
+				existingFile = `File:${existingFile}`;
+			}
 			return {
 				action: 'replace',
+				existingFile,
 				reason: '文件已存在且内容相同，跳过上传直接替换',
 			};
 		}
 		if (warningKeys.includes('duplicateversions')) {
+			const existsInfo = warnings.exists;
+			let existingFile = existsInfo;
+			if (Array.isArray(existsInfo) && existsInfo.length > 0) {
+				existingFile = existsInfo[0];
+			}
+			if (typeof existingFile === 'string' && !existingFile.startsWith('File:')) {
+				existingFile = `File:${existingFile}`;
+			}
 			return {
 				action: 'replace',
+				existingFile,
 				reason: '文件已存在（上传的是旧版本），跳过上传直接替换',
 			};
 		}
@@ -364,12 +382,23 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 				}
 
 				if (decision.action === 'rename') {
-					renameSuffix++;
-					currentFilename = generateRenamedFilename(filename, renameSuffix);
-					console.log(`  改名重试: ${currentFilename}`);
-					attempt--;
-					continue;
+				renameSuffix++;
+				currentFilename = generateRenamedFilename(filename, renameSuffix);
+				console.log(`  改名重试: ${currentFilename}`);
+				if (renameSuffix > MAX_RETRIES) {
+					console.log(`  改名次数已用尽，跳过上传`);
+					return {
+						filename: currentFilename,
+						url,
+						success: false,
+						warnings,
+						skipReplace: true,
+						action: decision.action,
+						error: '改名次数已用尽',
+					};
 				}
+				continue;
+			}
 
 				if (decision.action === 'ignore') {
 					console.log('  忽略警告，强制上传...');
@@ -429,9 +458,18 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 				return { filename: currentFilename, url, success: true };
 			}
 			lastError = error;
+			const isAbuseFilter = error.message && error.message.toLowerCase().includes('abusefilter');
 			if (attempt < MAX_RETRIES) {
-				console.log(`  上传失败（${error.message}），第${attempt}次重试...`);
+				if (isAbuseFilter) {
+					console.log(`  遇到滥用过滤器警告，第${attempt}次重试...`);
+				} else {
+					console.log(`  上传失败（${error.message}），第${attempt}次重试...`);
+				}
 				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+				continue;
+			}
+			if (isAbuseFilter && attempt >= MAX_RETRIES) {
+				console.log(`  滥用过滤器警告重试次数已用尽，继续尝试下一个文件...`);
 			}
 		}
 	}
@@ -518,19 +556,39 @@ async function editPage(api, title, content, summary, dryRun) {
 		return;
 	}
 
-	await api.postWithToken('csrf', {
-		action: 'edit',
-		title,
-		text: content,
-		summary,
-		bot: true,
-		notminor: true,
-		tags: 'Bot',
-		watchlist: 'nochange',
-	}, {
-		retry: 500,
-		noCache: true,
-	});
+	let lastError = null;
+	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+		try {
+			await api.postWithToken('csrf', {
+				action: 'edit',
+				title,
+				text: content,
+				summary,
+				bot: true,
+				notminor: true,
+				tags: 'Bot',
+				watchlist: 'nochange',
+			}, {
+				retry: 500,
+				noCache: true,
+			});
+			return;
+		} catch (error) {
+			lastError = error;
+			const isAbuseFilter = error.message && error.message.toLowerCase().includes('abusefilter');
+			if (attempt < MAX_RETRIES) {
+				if (isAbuseFilter) {
+					console.log(`  编辑遇到滥用过滤器警告，第${attempt}次重试...`);
+				} else {
+					console.log(`  编辑失败（${error.message}），第${attempt}次重试...`);
+				}
+				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+				continue;
+			}
+			throw error;
+		}
+	}
+	throw lastError;
 }
 
 /**
@@ -599,10 +657,7 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
 
 		if (uploadResult.skipReplace) {
 			console.log(`    跳过替换: ${uploadResult.error}`);
-			continue;
-		}
-
-		if (uploadResult.success) {
+		} else if (uploadResult.success) {
 			result.imagesUploaded++;
 			const useFilename = uploadResult.existingFile || uploadResult.filename;
 			urlToFilename.set(src, useFilename);
@@ -613,6 +668,11 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
 			}
 		} else {
 			console.log(`    上传失败: ${uploadResult.error}`);
+		}
+
+		if (i < uniqueSrcs.length - 1) {
+			console.log(`  等待10秒以避免超出请求速率...`);
+			await new Promise(resolve => setTimeout(resolve, 10000));
 		}
 	}
 
