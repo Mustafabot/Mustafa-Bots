@@ -2,24 +2,42 @@ import { MediaWikiApi } from 'wiki-saikou';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 
+interface ReplacementRule {
+	name: string;
+	pattern: RegExp;
+	replacement: string;
+}
+
+interface ChangeLogEntry {
+	rule: string;
+	matches: RegExpMatchArray;
+	count: number;
+}
+
+interface QueryPageResponse {
+	query: {
+		pages: Record<string, { revisions?: Array<{ content: string }> }>;
+	};
+}
+
 const api = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.zh.cookie },
+	headers: { cookie: config.zh.cookie! },
 });
 
-const PAGE_TITLES = [
-  "尤里·布莱尔",
-  "由里乌斯·尤克历乌斯",
-  "猿飞阿斯玛",
-  "月咏(银魂)",
-  "葬送的芙莉莲",
-  "正一",
-  "志村团藏",
-  "中须贺艾米",
-  "最强会长黑神",
-  "Mr.Quin"
-]
+const PAGE_TITLES: string[] = [
+	"尤里·布莱尔",
+	"由里乌斯·尤克历乌斯",
+	"猿飞阿斯玛",
+	"月咏(银魂)",
+	"葬送的芙莉莲",
+	"正一",
+	"志村团藏",
+	"中须贺艾米",
+	"最强会长黑神",
+	"Mr.Quin"
+];
 
-const REPLACEMENT_RULES = [
+const REPLACEMENT_RULES: ReplacementRule[] = [
 	{
 		name: '陆/陸替换',
 		pattern: /（[陆陸]((?!地).*?)）/g,
@@ -47,9 +65,9 @@ const REPLACEMENT_RULES = [
 	},
 ];
 
-function applyReplacements(content) {
+function applyReplacements(content: string): { newContent: string; changeLog: ChangeLogEntry[] } {
 	let result = content;
-	const changeLog = [];
+	const changeLog: ChangeLogEntry[] = [];
 
 	for (const rule of REPLACEMENT_RULES) {
 		const matches = result.match(rule.pattern);
@@ -66,19 +84,19 @@ function applyReplacements(content) {
 	return { newContent: result, changeLog };
 }
 
-async function processPage(title) {
+async function processPage(title: string): Promise<boolean> {
 	console.log(`\n========== 处理页面: ${title} ==========`);
 
 	try {
 		console.log(`正在获取页面内容...`);
-		const { data } = await api.post({
+		const { data } = await api.post<QueryPageResponse>({
 			action: 'query',
 			prop: 'revisions',
 			titles: title,
 			rvprop: 'content',
 		}, {
 			retry: 15,
-		});
+		} as any);
 
 		const pages = Object.values(data.query.pages);
 		if (!pages[0] || !pages[0].revisions) {
@@ -86,7 +104,7 @@ async function processPage(title) {
 			return false;
 		}
 
-		const originalContent = pages[0].revisions[0].content;
+		const originalContent: string = pages[0].revisions[0].content;
 		console.log(`成功获取页面内容，长度: ${originalContent.length} 字符`);
 
 		console.log('开始执行正则替换...');
@@ -110,7 +128,7 @@ async function processPage(title) {
 
 		console.log('正在保存页面...');
 		const summary = '机器人：替换历史遗留地区用语';
-		
+
 		await api.postWithEditToken({
 			action: 'edit',
 			title,
@@ -127,12 +145,14 @@ async function processPage(title) {
 
 		return true;
 
-	} catch (error) {
+	} catch (error: unknown) {
 		console.error(`处理页面 "${title}" 时发生错误:`);
-		console.error(`错误类型: ${error.name}`);
-		console.error(`错误信息: ${error.message}`);
-		if (error.stack) {
-			console.error(`错误堆栈: ${error.stack}`);
+		if (error instanceof Error) {
+			console.error(`错误类型: ${error.name}`);
+			console.error(`错误信息: ${error.message}`);
+			if (error.stack) {
+				console.error(`错误堆栈: ${error.stack}`);
+			}
 		}
 		return false;
 	}
@@ -143,7 +163,7 @@ async function processPage(title) {
 
 	try {
 		console.log('正在登录...');
-		await clientlogin(api, config.zh.bot.clientUsername, config.zh.bot.clientPassword)
+		await clientlogin(api, config.zh.bot.clientUsername!, config.zh.bot.clientPassword!)
 			.then((result) => { console.log(result); });
 
 		let successCount = 0;
@@ -163,12 +183,14 @@ async function processPage(title) {
 		console.log(`成功修改: ${successCount} 个`);
 		console.log(`跳过/无变化: ${skipCount} 个`);
 
-	} catch (error) {
+	} catch (error: unknown) {
 		console.error('发生错误:');
-		console.error(`错误类型: ${error.name}`);
-		console.error(`错误信息: ${error.message}`);
-		if (error.stack) {
-			console.error(`错误堆栈: ${error.stack}`);
+		if (error instanceof Error) {
+			console.error(`错误类型: ${error.name}`);
+			console.error(`错误信息: ${error.message}`);
+			if (error.stack) {
+				console.error(`错误堆栈: ${error.stack}`);
+			}
 		}
 		process.exit(1);
 	}

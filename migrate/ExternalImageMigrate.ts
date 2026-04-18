@@ -6,54 +6,72 @@ import clientlogin from '../clientlogin.js';
 
 Parser.config = 'moegirl';
 
+interface ImageIssue {
+	src: string;
+	node: any;
+	attributes: Record<string, string>;
+}
+
+interface UploadResult {
+	filename: string;
+	url: string;
+	success: boolean;
+	error?: string;
+	warnings?: any;
+	skipReplace?: boolean;
+	existingFile?: string;
+	action?: string;
+	isDryRun?: boolean;
+}
+
+interface PageProcessResult {
+	title: string;
+	imagesFound: number;
+	imagesUploaded: number;
+	imagesReplaced: number;
+	uploadResults: UploadResult[];
+	editError?: string;
+	pendingFiles?: Array<[string, string]>;
+}
+
+interface WarningDecision {
+	action: 'skip' | 'replace' | 'rename' | 'ignore';
+	reason: string;
+	existingFile?: string;
+}
+
+interface PageInfo {
+	title: string;
+	content: string;
+}
+
+interface ProcessStats {
+	totalPages: number;
+	totalFound: number;
+	totalUploaded: number;
+	totalReplaced: number;
+	failedUploads: UploadResult[];
+}
+
+interface CliArgs {
+	dryRun: boolean;
+	verbose: boolean;
+	namespace: string;
+}
+
 const zhApi = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.zh.cookie },
+	headers: { cookie: config.zh.cookie! },
 });
 
 const cmApi = new MediaWikiApi(config.cm.api, {
-	headers: { cookie: config.cm.cookie },
+	headers: { cookie: config.cm.cookie! },
 });
 
 const MAX_RETRIES = 3;
 const MAX_RENAME_ATTEMPTS = 10;
 const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
 
-/**
- * @typedef {object} ImageIssue
- * @property {string} src - 图片URL
- * @property {object} node - wikiparser-node AST节点引用
- * @property {Record<string, string>} attributes - img标签的所有属性
- */
-
-/**
- * @typedef {object} UploadResult
- * @property {string} filename - 新文件名
- * @property {string} url - 源URL
- * @property {boolean} success - 是否成功
- * @property {string} [error] - 错误信息
- * @property {object} [warnings] - 收到的警告信息
- * @property {boolean} [skipReplace] - 是否跳过替换
- * @property {string} [existingFile] - 已存在的文件名（用于duplicate情况）
- * @property {string} [action] - 采取的处理策略
- */
-
-/**
- * @typedef {object} PageProcessResult
- * @property {string} title - 页面标题
- * @property {number} imagesFound - 发现的外部图片数
- * @property {number} imagesUploaded - 成功上传数
- * @property {number} imagesReplaced - 成功替换数
- * @property {UploadResult[]} uploadResults - 上传结果
- * @property {string} [editError] - 页面编辑错误信息
- * @property {Array<[string, string]>} [pendingFiles] - 已上传但未替换的文件列表 [url, filename]
- */
-
-/**
- * 读取外部图像白名单
- * @param {import('wiki-saikou').MediaWikiApi} api
- * @returns {Promise<RegExp[]>}
- */
-async function fetchWhitelist(api) {
+async function fetchWhitelist(api: MediaWikiApi): Promise<RegExp[]> {
 	const { data } = await api.post({
 		action: 'query',
 		prop: 'revisions',
@@ -61,15 +79,15 @@ async function fetchWhitelist(api) {
 		titles: 'MediaWiki:External_image_whitelist',
 	}, {
 		retry: 15,
-	});
+	} as any);
 
-	const page = Object.values(data.query.pages)[0];
+	const page = Object.values(data.query.pages)[0] as any;
 	if (!page || !page.revisions) {
 		console.error('Failed to get external image whitelist');
 		return [];
 	}
 
-	const content = page.revisions[0].content;
+	const content: string = page.revisions[0].content;
 	const regexes = content
 		.split('\n')
 		.filter(line => line.trim() && !line.trim().startsWith('#'))
@@ -81,21 +99,19 @@ async function fetchWhitelist(api) {
 				return null;
 			}
 		})
-		.filter(Boolean);
+		.filter(Boolean) as RegExp[];
 
 	console.log(`Loaded ${regexes.length} whitelist regexes`);
 	return regexes;
 }
 
-/**
- * 分批遍历并处理页面
- * @param {import('wiki-saikou').MediaWikiApi} api
- * @param {string} namespace
- * @param {function(Array<{title: string, content: string}>): Promise<void>} processBatch - 处理批次的回调函数
- */
-async function processPagesInBatches(api, namespace, processBatch) {
+async function processPagesInBatches(
+	api: MediaWikiApi,
+	namespace: string,
+	processBatch: (pages: PageInfo[]) => Promise<void>
+): Promise<void> {
 	const eol = Symbol();
-	let apcontinue = undefined;
+	let apcontinue: string | symbol | undefined = undefined;
 	let batchIndex = 0;
 
 	while (apcontinue !== eol) {
@@ -106,19 +122,19 @@ async function processPagesInBatches(api, namespace, processBatch) {
 			generator: 'allpages',
 			gapnamespace: namespace,
 			gaplimit: 500,
-			gapcontinue: apcontinue,
+			gapcontinue: apcontinue as string | undefined,
 		}, {
 			retry: 15,
-		});
+		} as any) as any;
 
-		apcontinue = data.continue?.gapcontinue ?? eol;
+		apcontinue = (data as any).continue?.gapcontinue ?? eol;
 		batchIndex++;
 		console.log(`\n=== 批次 ${batchIndex} ===`);
-		console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : apcontinue}`);
+		console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : String(apcontinue)}`);
 
-		const pages = Object.values(data.query.pages)
-			.filter(page => page.revisions?.length)
-			.map(page => ({
+		const pages: PageInfo[] = Object.values(data.query.pages)
+			.filter((page: any) => page.revisions?.length)
+			.map((page: any) => ({
 				title: page.title,
 				content: page.revisions[0].content,
 			}));
@@ -129,12 +145,7 @@ async function processPagesInBatches(api, namespace, processBatch) {
 	}
 }
 
-/**
- * 从URL中提取文件扩展名
- * @param {string} url
- * @returns {string}
- */
-function extractExtension(url) {
+function extractExtension(url: string): string {
 	const commonImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif'];
 	try {
 		const urlObj = new URL(url);
@@ -153,25 +164,12 @@ function extractExtension(url) {
 	}
 }
 
-/**
- * 生成目标文件名
- * @param {string} url
- * @param {string} article
- * @param {number} index
- * @returns {string}
- */
-function generateFilename(url, article, index) {
+function generateFilename(url: string, article: string, index: number): string {
 	const ext = extractExtension(url);
 	return `File:${article} ${index}${ext}`;
 }
 
-/**
- * 生成改名后的文件名
- * @param {string} originalFilename - 原文件名（含File:前缀）
- * @param {number} suffix - 后缀数字
- * @returns {string}
- */
-function generateRenamedFilename(originalFilename, suffix) {
+function generateRenamedFilename(originalFilename: string, suffix: number): string {
 	const match = originalFilename.match(/^(File:)(.+)(\.[a-zA-Z0-9]+)$/);
 	if (match) {
 		return `${match[1]}${match[2]} ${suffix}${match[3]}`;
@@ -179,16 +177,7 @@ function generateRenamedFilename(originalFilename, suffix) {
 	return `${originalFilename} ${suffix}`;
 }
 
-/**
- * 解析上传警告并决定处理策略
- * @param {object} warnings - API返回的警告对象
- * @returns {{
- *   action: 'skip' | 'replace' | 'rename' | 'ignore',
- *   existingFile?: string,
- *   reason: string
- * }}
- */
-function parseUploadWarnings(warnings) {
+function parseUploadWarnings(warnings: Record<string, any>): WarningDecision {
 	const warningKeys = Object.keys(warnings);
 
 	if (warningKeys.includes('was-deleted')) {
@@ -207,7 +196,7 @@ function parseUploadWarnings(warnings) {
 
 	if (warningKeys.includes('duplicate')) {
 		const duplicateInfo = warnings.duplicate;
-		let existingFile = duplicateInfo;
+		let existingFile: string = duplicateInfo;
 		if (Array.isArray(duplicateInfo) && duplicateInfo.length > 0) {
 			existingFile = duplicateInfo[0];
 		}
@@ -224,7 +213,7 @@ function parseUploadWarnings(warnings) {
 	if (warningKeys.includes('exists')) {
 		if (warningKeys.includes('no-change')) {
 			const existsInfo = warnings.exists;
-			let existingFile = existsInfo;
+			let existingFile: string = existsInfo;
 			if (Array.isArray(existsInfo) && existsInfo.length > 0) {
 				existingFile = existsInfo[0];
 			}
@@ -238,7 +227,7 @@ function parseUploadWarnings(warnings) {
 			};
 		} else if (warningKeys.includes('duplicateversions')) {
 			const existsInfo = warnings.exists;
-			let existingFile = existsInfo;
+			let existingFile: string = existsInfo;
 			if (Array.isArray(existsInfo) && existsInfo.length > 0) {
 				existingFile = existsInfo[0];
 			}
@@ -263,13 +252,7 @@ function parseUploadWarnings(warnings) {
 	};
 }
 
-/**
- * 检查URL是否在白名单中
- * @param {string} src
- * @param {RegExp[]} whitelist
- * @returns {boolean}
- */
-function isWhitelisted(src, whitelist) {
+function isWhitelisted(src: string, whitelist: RegExp[]): boolean {
 	if (whitelist.some(regex => regex.test(src))) {
 		return true;
 	}
@@ -285,18 +268,11 @@ function isWhitelisted(src, whitelist) {
 	return false;
 }
 
-/**
- * 从页面内容中提取不合规的外部图片，并返回解析后的AST
- * @param {string} content
- * @param {string} title
- * @param {RegExp[]} whitelist
- * @returns {{ parsed: object, issues: ImageIssue[] }}
- */
-function extractExternalImages(content, title, whitelist) {
-	const issues = [];
+function extractExternalImages(content: string, title: string, whitelist: RegExp[]): { parsed: any; issues: ImageIssue[] } {
+	const issues: ImageIssue[] = [];
 	const parsed = Parser.parse(content, title);
 
-	function traverse(node) {
+	function traverse(node: any): void {
 		if (!node) return;
 
 		if (node.type === 'ext' && node.name === 'img') {
@@ -321,23 +297,20 @@ function extractExternalImages(content, title, whitelist) {
 	return { parsed, issues };
 }
 
-/**
- * 上传单个文件
- * @param {import('wiki-saikou').MediaWikiApi} api
- * @param {string} url
- * @param {string} filename
- * @param {string} comment
- * @param {boolean} dryRun
- * @param {string} article - 文章标题
- * @returns {Promise<UploadResult>}
- */
-async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
+async function uploadFromUrl(
+	api: MediaWikiApi,
+	url: string,
+	filename: string,
+	comment: string,
+	dryRun: boolean,
+	article: string
+): Promise<UploadResult> {
 	if (dryRun) {
 		console.log(`  [试运行] 将上传: ${filename}`);
 		return { filename, url, success: true, isDryRun: true };
 	}
 
-	let lastError = null;
+	let lastError: Error | null = null;
 	let currentFilename = filename;
 	let renameSuffix = 1;
 	let renameAttempts = 0;
@@ -359,15 +332,15 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 				noCache: true,
 			});
 
-			if (data.upload && data.upload.result === 'Success') {
-				if (data.upload.warnings) {
+			if ((data as any).upload && (data as any).upload.result === 'Success') {
+				if ((data as any).upload.warnings) {
 					console.log('  警告: 文件已存在，已被覆盖');
 				}
 				return { filename: currentFilename, url, success: true };
 			}
 
-			if (data.upload && data.upload.result === 'Warning' && data.upload.warnings) {
-				const warnings = data.upload.warnings;
+			if ((data as any).upload && (data as any).upload.result === 'Warning' && (data as any).upload.warnings) {
+				const warnings = (data as any).upload.warnings;
 				const decision = parseUploadWarnings(warnings);
 
 				console.log(`  收到警告: ${Object.keys(warnings).join(', ')}`);
@@ -437,7 +410,7 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 							noCache: true,
 						});
 
-						if (forceData.upload && forceData.upload.result === 'Success') {
+						if ((forceData as any).upload && (forceData as any).upload.result === 'Success') {
 							console.log('  强制上传成功');
 							return { filename: currentFilename, url, success: true, warnings, action: decision.action };
 						}
@@ -453,7 +426,7 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 							warnings,
 							error: `强制上传失败: ${JSON.stringify(forceData)}`,
 						};
-					} catch (forceError) {
+					} catch (forceError: any) {
 						if (forceError.message && forceError.message.includes('moderation-image-queued')) {
 							console.log('  文件已进入审核队列');
 							return { filename: currentFilename, url, success: true, warnings, action: decision.action };
@@ -471,7 +444,7 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 			}
 
 			throw new Error(JSON.stringify(data));
-		} catch (error) {
+		} catch (error: any) {
 			if (error.message && error.message.includes('moderation-image-queued')) {
 				console.log('  文件已进入审核队列');
 				return { filename: currentFilename, url, success: true };
@@ -498,25 +471,18 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
 	};
 }
 
-/**
- * 构建 {{UseImg}} 模板节点
- * @param {string} filename - 文件名（含 File: 前缀）
- * @param {Record<string, string>} attributes - img标签的属性
- * @param {object} refNode - 用于获取config的参考节点
- * @returns {import('wikiparser-node').TranscludeToken}
- */
-function buildUseImgTemplateNode(filename, attributes, refNode) {
+function buildUseImgTemplateNode(filename: string, attributes: Record<string, string>, refNode: any): any {
 	const imgName = filename.replace(/^File:/i, '');
 	const style = attributes.style || '';
 	const title = attributes.title || '';
-	const otherAttrs = { ...attributes };
+	const otherAttrs: Record<string, string> = { ...attributes };
 	delete otherAttrs.src;
 	delete otherAttrs.style;
 	delete otherAttrs.title;
 
-	const config = refNode.getAttribute('config');
-	const templateNode = Parser.parse('{{useImg}}', refNode.getAttribute('include'), 7, config)
-		.querySelector('template');
+	const nodeConfig = refNode.getAttribute('config');
+	const templateNode = Parser.parse('{{useImg}}', refNode.getAttribute('include'), 7, nodeConfig)
+		.querySelector('template') as any;
 	templateNode.setValue('img', imgName);
 	if (style) {
 		templateNode.setValue('style', style);
@@ -539,14 +505,7 @@ function buildUseImgTemplateNode(filename, attributes, refNode) {
 	return templateNode;
 }
 
-/**
- * 使用AST操作替换外部图片节点为{{UseImg}}模板
- * @param {object} parsed - wikiparser-node解析后的AST根节点
- * @param {ImageIssue[]} issues - 图片问题列表
- * @param {Map<string, string>} urlToFilename - 原URL -> 新文件名的映射
- * @returns {string} 替换后的页面内容
- */
-function replaceImageNodes(parsed, issues, urlToFilename) {
+function replaceImageNodes(parsed: any, issues: ImageIssue[], urlToFilename: Map<string, string>): string {
 	for (const issue of issues) {
 		const filename = urlToFilename.get(issue.src);
 		if (!filename) continue;
@@ -558,21 +517,13 @@ function replaceImageNodes(parsed, issues, urlToFilename) {
 	return parsed.toString();
 }
 
-/**
- * 编辑页面
- * @param {import('wiki-saikou').MediaWikiApi} api
- * @param {string} title
- * @param {string} content
- * @param {string} summary
- * @param {boolean} dryRun
- */
-async function editPage(api, title, content, summary, dryRun) {
+async function editPage(api: MediaWikiApi, title: string, content: string, summary: string, dryRun: boolean): Promise<void> {
 	if (dryRun) {
 		console.log(`  [试运行] 将编辑页面: ${title}`);
 		return;
 	}
 
-	let lastError = null;
+	let lastError: Error | null = null;
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 		try {
 			await api.postWithToken('csrf', {
@@ -589,7 +540,7 @@ async function editPage(api, title, content, summary, dryRun) {
 				noCache: true,
 			});
 			return;
-		} catch (error) {
+		} catch (error: any) {
 			lastError = error;
 			const isAbuseFilter = error.message && error.message.toLowerCase().includes('abusefilter');
 			if (attempt < MAX_RETRIES) {
@@ -607,18 +558,15 @@ async function editPage(api, title, content, summary, dryRun) {
 	throw lastError;
 }
 
-/**
- * 处理单个页面
- * @param {import('wiki-saikou').MediaWikiApi} uploadApi
- * @param {import('wiki-saikou').MediaWikiApi} editApi
- * @param {{title: string, content: string}} page
- * @param {RegExp[]} whitelist
- * @param {boolean} dryRun
- * @returns {Promise<PageProcessResult>}
- */
-async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
+async function processPage(
+	uploadApi: MediaWikiApi,
+	editApi: MediaWikiApi,
+	page: PageInfo,
+	whitelist: RegExp[],
+	dryRun: boolean
+): Promise<PageProcessResult> {
 	const { title, content } = page;
-	const result = {
+	const result: PageProcessResult = {
 		title,
 		imagesFound: 0,
 		imagesUploaded: 0,
@@ -638,18 +586,18 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
 
 	console.log(`  发现 ${issues.length} 个外部图片标签`);
 
-	const srcToNodes = new Map();
+	const srcToNodes = new Map<string, ImageIssue[]>();
 	for (const issue of issues) {
 		if (!srcToNodes.has(issue.src)) {
 			srcToNodes.set(issue.src, []);
 		}
-		srcToNodes.get(issue.src).push(issue);
+		srcToNodes.get(issue.src)!.push(issue);
 	}
 
 	const uniqueSrcs = [...srcToNodes.keys()];
 	console.log(`  去重后需上传 ${uniqueSrcs.length} 张图片`);
 
-	const urlToFilename = new Map();
+	const urlToFilename = new Map<string, string>();
 
 	for (let i = 0; i < uniqueSrcs.length; i++) {
 		const src = uniqueSrcs[i];
@@ -658,7 +606,7 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
 
 		console.log(`  [${index}/${uniqueSrcs.length}] 上传: ${filename}`);
 		console.log(`    来源: ${src}`);
-		console.log(`    页面内引用次数: ${srcToNodes.get(src).length}`);
+		console.log(`    页面内引用次数: ${srcToNodes.get(src)!.length}`);
 
 		const uploadResult = await uploadFromUrl(
 			uploadApi,
@@ -685,11 +633,6 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
 		} else {
 			console.log(`    上传失败: ${uploadResult.error}`);
 		}
-
-		/*if (i < uniqueSrcs.length - 1) {
-			console.log(`  等待10秒以避免超出请求速率...`);
-			await new Promise(resolve => setTimeout(resolve, 10000));
-		}*/
 	}
 
 	if (urlToFilename.size > 0) {
@@ -697,10 +640,10 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
 		const newContent = replaceImageNodes(parsed, issues, urlToFilename);
 
 		try {
-			await editPage(editApi, title, newContent, DEFAULT_COMMENT+`（${issues.length}个）`, dryRun);
+			await editPage(editApi, title, newContent, DEFAULT_COMMENT + `（${issues.length}个）`, dryRun);
 			result.imagesReplaced = issues.length;
 			console.log('  页面编辑成功');
-		} catch (error) {
+		} catch (error: any) {
 			console.error(`  页面编辑失败: ${error.message}`);
 			result.editError = error.message;
 			result.pendingFiles = [...urlToFilename.entries()];
@@ -711,13 +654,8 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
 	return result;
 }
 
-/**
- * 解析命令行参数
- * @param {string[]} args
- * @returns {{ dryRun: boolean, verbose: boolean, namespace: string }}
- */
-function parseArgs(args) {
-	const result = {
+function parseArgs(args: string[]): CliArgs {
+	const result: CliArgs = {
 		dryRun: false,
 		verbose: false,
 		namespace: '0',
@@ -738,20 +676,17 @@ function parseArgs(args) {
 	return result;
 }
 
-/**
- * 主函数
- */
-async function main() {
+async function main(): Promise<void> {
 	console.log(`Start time: ${new Date().toISOString()}`);
 
 	const args = parseArgs(process.argv.slice(2));
 
 	console.log('正在登录zh站...');
-	await clientlogin(zhApi, config.zh.bot.clientUsername, config.zh.bot.clientPassword)
+	await clientlogin(zhApi, config.zh.bot.clientUsername!, config.zh.bot.clientPassword!)
 		.then((result) => { console.log('zh站登录成功', result); });
 
 	console.log('正在登录commons站...');
-	await clientlogin(cmApi, config.cm.bot.clientUsername, config.cm.bot.clientPassword, config.cm.api)
+	await clientlogin(cmApi, config.cm.bot.clientUsername!, config.cm.bot.clientPassword!, config.cm.api)
 		.then((result) => { console.log('commons站登录成功', result); });
 
 	console.log('\n正在读取外部图片白名单...');
@@ -763,7 +698,7 @@ async function main() {
 
 	console.log(`\n正在遍历命名空间 ${args.namespace} 的页面...`);
 
-	const stats = {
+	const stats: ProcessStats = {
 		totalPages: 0,
 		totalFound: 0,
 		totalUploaded: 0,

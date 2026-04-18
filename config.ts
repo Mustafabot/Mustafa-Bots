@@ -3,36 +3,31 @@ import { config as dotenvConfig } from 'dotenv';
 import { fileURLToPath } from 'url';
 import path from 'path';
 
-// Load environment variables from .env file
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 dotenvConfig({ path: path.join(__dirname, '.env') });
 
-/**
- * @typedef {object} BotConfig
- * @property {string} name - Bot显示名称
- * @property {string} [password] - Bot密码
- * @property {string} [clientUsername] - 客户端登录用户名
- * @property {string} [clientPassword] - 客户端登录密码
- */
+interface BotConfig {
+	name: string;
+	password?: string;
+	clientUsername?: string;
+	clientPassword?: string;
+}
 
-/**
- * @typedef {object} WikiConfig
- * @property {string} api - Wiki API地址
- * @property {string} [cookie] - Cookie字符串
- * @property {BotConfig} bot - Bot配置
- */
+interface WikiConfig {
+	api: string;
+	cookie?: string;
+	bot: BotConfig;
+}
 
-/**
- * @typedef {object} Config
- * @property {string} [useragent] - User-Agent字符串（已废弃，请使用各站点的cookie）
- * @property {string} [password] - 默认密码
- * @property {WikiConfig} zh - 中文萌娘百科配置
- * @property {WikiConfig} cm - 萌娘共享配置
- */
+interface Config {
+	useragent?: string;
+	password?: string;
+	zh: WikiConfig;
+	cm: WikiConfig;
+}
 
-/** @type {Config} */
-const config = {
-	password: env.MOEGIRL_PASSWORD, // for clientLogin
+const config: Config = {
+	password: env.MOEGIRL_PASSWORD,
 	zh: {
 		api: 'https://mzh.moegirl.org.cn/api.php',
 		cookie: `moegirlSSOToken=${env.MOEGIRL_ZH_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_ZH_SSO_USER_ID}`,
@@ -54,6 +49,5 @@ const config = {
 		},
 	},
 };
-
 
 export default config;

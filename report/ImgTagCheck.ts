@@ -4,24 +4,31 @@ import { writeFile } from 'fs/promises';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 
+interface Issue {
+	title: string;
+	message: string;
+	line: number;
+	col: number;
+	src: string;
+}
+
 Parser.config = 'moegirl';
-const NAMESPACE = '0';//检查的单个命名空间
+const NAMESPACE = '0';
 const api = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.zh.cookie },
+	headers: { cookie: config.zh.cookie! },
 });
 
 const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}`;
 
 (async () => {
 	console.log(`Start time: ${new Date().toISOString()}`);
-	
+
 	await clientlogin(api,
-		config.zh.bot.clientUsername,
-		config.zh.bot.clientPassword,
+		config.zh.bot.clientUsername!,
+		config.zh.bot.clientPassword!,
 	).then(console.log);
 
-	// 读取外部图像白名单
-	const whitelistRegexes = await (async () => {
+	const whitelistRegexes: RegExp[] = await (async () => {
 		const { data } = await api.post({
 			action: 'query',
 			prop: 'revisions',
@@ -29,18 +36,17 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
 			titles: 'MediaWiki:External_image_whitelist',
 		}, {
 			retry: 15,
-		});
-		const page = Object.values(data.query.pages)[0];
+		} as any);
+		const page = Object.values(data.query.pages)[0] as any;
 		if (!page || !page.revisions) {
 			console.error('Failed to get external image whitelist');
 			return [];
 		}
-		const content = page.revisions[0].content;
-		// 解析白名单，提取每行的正则表达式
+		const content: string = page.revisions[0].content;
 		const regexes = content
 			.split('\n')
-			.filter(line => line.trim() && !line.trim().startsWith('#'))
-			.map(line => {
+			.filter((line: string) => line.trim() && !line.trim().startsWith('#'))
+			.map((line: string) => {
 				try {
 					return new RegExp(line.trim());
 				} catch {
@@ -48,47 +54,47 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
 					return null;
 				}
 			})
-			.filter(Boolean);
+			.filter(Boolean) as RegExp[];
 		console.log(regexes);
 		console.log(`Loaded ${regexes.length} whitelist regexes`);
 		return regexes;
 	})();
 
 	const pages = await (async () => {
-		const result = [];
-		const eol = Symbol();
-		let apcontinue = undefined;
+		const result: any[] = [];
+		const eol: symbol = Symbol();
+		let apcontinue: string | symbol | undefined = undefined;
 		while (apcontinue !== eol) {
 			const { data } = await api.post({
-				action: 'query',
-				prop: 'revisions',
-				rvprop: 'content',
-				generator: 'allpages',
-				gapnamespace: NAMESPACE,
-				gaplimit: 500,
-				gapcontinue: apcontinue,
-			}, {
-				retry: 15,
-			});
+			action: 'query',
+			prop: 'revisions',
+			rvprop: 'content',
+			generator: 'allpages',
+			gapnamespace: NAMESPACE,
+			gaplimit: 500,
+			gapcontinue: apcontinue as string | undefined,
+		}, {
+			retry: 15,
+		} as any) as any;
 			apcontinue = data.continue?.gapcontinue ?? eol;
-			console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : apcontinue}`);
-			result.push(...Object.values(data.query.pages).filter((page) => page.revisions?.length));
+			console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : String(apcontinue)}`);
+			result.push(...Object.values(data.query.pages).filter((page: any) => page.revisions?.length));
 		}
 		console.log(`Total pages: ${result.length}`);
 		return result;
 	})();
 
-	const issues = [];
+	const issues: Issue[] = [];
 
-	function traverse(node, title, issues, whitelistRegexes) {
+	function traverse(node: any, title: string, issues: Issue[], whitelistRegexes: RegExp[]): void {
 		if (!node) return;
 
 		if (node.type === 'ext' && node.name === 'img') {
-			let src = node.attributes?.src;
+			const src: string | undefined = node.attributes?.src;
 			if (src) {
-				let isWhitelisted = whitelistRegexes.some(regex => regex.test(src));
+				let isWhitelisted = whitelistRegexes.some(regex => regex.test(src!));
 				if (!isWhitelisted && src.startsWith('//')) {
-					isWhitelisted = whitelistRegexes.some(regex => regex.test('https:' + src));
+					isWhitelisted = whitelistRegexes.some(regex => regex.test('https:' + src!));
 				}
 				if (!isWhitelisted) {
 					issues.push({
@@ -110,17 +116,17 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
 	}
 
 	for (const page of pages) {
-		const { title, revisions: [{ content }] } = page;
+		const { title, revisions: [{ content }] }: { title: string; revisions: { content: string }[] } = page;
 		console.log(`Checking ${title}`);
 
-		const parsed = Parser.parse(content, title);
+		const parsed: any = Parser.parse(content, title);
 
 		traverse(parsed, title, issues, whitelistRegexes);
 	}
 
 	console.log(`Found ${issues.length} issues`);
 
-	const reportContent = generateReport(issues, pages.length);
+	const reportContent: string = generateReport(issues, pages.length);
 
 	const localReportPath = new URL(`./Ns${NAMESPACE}ImgTagCheck_report.txt`, import.meta.url);
 	await writeFile(localReportPath, reportContent, 'utf-8');
@@ -128,18 +134,18 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
 
 	const BATCH_SIZE = 200;
 	const totalBatches = Math.ceil(issues.length / BATCH_SIZE);
-	
+
 	for (let batchIndex = 0; batchIndex < totalBatches; batchIndex++) {
 		const start = batchIndex * BATCH_SIZE;
 		const end = Math.min(start + BATCH_SIZE, issues.length);
 		const batchIssues = issues.slice(start, end);
 		const batchReportContent = generateBatchReport(batchIssues, pages.length, batchIndex, totalBatches);
-		
-		const batchTitle = `${REPORT_TITLE}/${batchIndex + 1}` ;
-		
+
+		const batchTitle = `${REPORT_TITLE}/${batchIndex + 1}`;
+
 		console.log(`Submitting batch ${batchIndex + 1}/${totalBatches} (${batchIssues.length} issues)`);
-		
-		await api.postWithToken('csrf',{
+
+		await api.postWithToken('csrf', {
 			action: 'edit',
 			title: batchTitle,
 			text: batchReportContent,
@@ -148,7 +154,7 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
 			notminor: true,
 			tags: 'Bot',
 			watchlist: 'nochange',
-		},{
+		}, {
 			retry: 500,
 			noCache: true,
 		}).then(({ data }) => console.log(JSON.stringify(data)));
@@ -157,7 +163,7 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
 	console.log(`End time: ${new Date().toISOString()}`);
 })();
 
-function generateReport(issues, totalPages) {
+function generateReport(issues: Issue[], totalPages: number): string {
 	const now = new Date();
 	const timestamp = now.toISOString();
 	const dateStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });
@@ -201,7 +207,7 @@ function generateReport(issues, totalPages) {
 	return report;
 }
 
-function generateBatchReport(batchIssues, totalPages, batchIndex, totalBatches) {
+function generateBatchReport(batchIssues: Issue[], totalPages: number, batchIndex: number, totalBatches: number): string {
 	const now = new Date();
 	const timestamp = now.toISOString();
 	const dateStr = now.toLocaleString('zh-CN', { timeZone: 'Asia/Shanghai' });

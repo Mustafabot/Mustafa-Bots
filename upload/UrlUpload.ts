@@ -3,47 +3,48 @@ import { URL } from 'url';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 
+interface FileConfig {
+	url: string;
+	filename?: string;
+}
+
+interface UploadConfig {
+	files: FileConfig[];
+	article?: string;
+	comment?: string;
+	text?: string;
+}
+
+interface UploadResult {
+	filename: string;
+	url: string;
+	success: boolean;
+	error?: string;
+}
+
+interface ValidationResult {
+	valid: boolean;
+	errors: string[];
+}
+
+interface CliArgs {
+	dryRun: boolean;
+	verbose: boolean;
+}
+
 const zhApi = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.zh.cookie },
+	headers: { cookie: config.zh.cookie! },
 });
 
 const cmApi = new MediaWikiApi(config.cm.api, {
-	headers: { cookie: config.cm.cookie },
+	headers: { cookie: config.cm.cookie! },
 });
 
 const MAX_RETRIES = 3;
 const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
 const CONFIG_PAGE = 'User:没有羽翼的格雷塔/BotConfig/UrlUpload.json';
 
-/**
- * @typedef {object} FileConfig
- * @property {string} url - 源文件URL
- * @property {string} [filename] - 目标文件名
- */
-
-/**
- * @typedef {object} UploadConfig
- * @property {FileConfig[]} files - 文件列表
- * @property {string} [article] - 所在条目
- * @property {string} [comment] - 上传摘要
- * @property {string} [text] - 文件描述页面内容
- */
-
-/**
- * @typedef {object} UploadResult
- * @property {string} filename - 文件名
- * @property {string} url - 源URL
- * @property {boolean} success - 是否成功
- * @property {string} [error] - 错误信息
- */
-
-/**
- * 从wiki获取JSON配置文件
- * @param {import('wiki-saikou').MediaWikiApi} api - API实例
- * @param {string} pageTitle - 配置页面标题
- * @returns {Promise<UploadConfig>} 配置对象
- */
-async function fetchJsonConfig(api, pageTitle) {
+async function fetchJsonConfig(api: MediaWikiApi, pageTitle: string): Promise<UploadConfig> {
 	const { data } = await api.post({
 		action: 'query',
 		prop: 'revisions',
@@ -51,45 +52,41 @@ async function fetchJsonConfig(api, pageTitle) {
 		titles: pageTitle,
 	}, {
 		retry: 15,
-	});
+	} as any);
 
-	const page = Object.values(data.query.pages)[0];
+	const pages = data.query.pages as Record<string, { revisions?: { content: string }[] }>;
+	const page = Object.values(pages)[0];
 	if (!page || !page.revisions) {
 		throw new Error(`配置页面 "${pageTitle}" 不存在或无法获取内容`);
 	}
 
 	const content = page.revisions[0].content;
 	try {
-		return JSON.parse(content);
+		return JSON.parse(content) as UploadConfig;
 	} catch (e) {
-		throw new Error(`JSON解析失败: ${e.message}`, { cause: e });
+		throw new Error(`JSON解析失败: ${(e as Error).message}`, { cause: e });
 	}
 }
 
-/**
- * 验证配置格式
- * @param {UploadConfig} config - 配置对象
- * @returns {{ valid: boolean, errors: string[] }} 验证结果
- */
-function validateConfig(config) {
-	const errors = [];
+function validateConfig(uploadConfig: UploadConfig): ValidationResult {
+	const errors: string[] = [];
 
-	if (!config || typeof config !== 'object') {
+	if (!uploadConfig || typeof uploadConfig !== 'object') {
 		errors.push('配置必须是一个对象');
 		return { valid: false, errors };
 	}
 
-	if (!Array.isArray(config.files) || config.files.length === 0) {
+	if (!Array.isArray(uploadConfig.files) || uploadConfig.files.length === 0) {
 		errors.push('files必须是非空数组');
 		return { valid: false, errors };
 	}
 
-	const hasMissingFilename = config.files.some(f => !f.filename);
-	if (hasMissingFilename && !config.article) {
+	const hasMissingFilename = uploadConfig.files.some(f => !f.filename);
+	if (hasMissingFilename && !uploadConfig.article) {
 		errors.push('当filename未指定时，article为必填项');
 	}
 
-	config.files.forEach((file, index) => {
+	uploadConfig.files.forEach((file, index) => {
 		if (!file.url) {
 			errors.push(`files[${index}]: url为必填项`);
 		} else {
@@ -110,12 +107,7 @@ function validateConfig(config) {
 	};
 }
 
-/**
- * 从URL中提取文件扩展名
- * @param {string} url - 文件URL
- * @returns {string} 扩展名（包含点号）
- */
-function extractExtension(url) {
+function extractExtension(url: string): string {
 	try {
 		const urlObj = new URL(url);
 		const pathname = urlObj.pathname;
@@ -126,30 +118,20 @@ function extractExtension(url) {
 	}
 }
 
-/**
- * 自动生成文件名
- * @param {string} url - 源文件URL
- * @param {string} article - 条目名称
- * @param {number} index - 序号（从1开始）
- * @returns {string} 生成的文件名
- */
-function generateFilename(url, article, index) {
+function generateFilename(url: string, article: string, index: number): string {
 	const ext = extractExtension(url);
 	return `File:${article} ${index}${ext}`;
 }
 
-/**
- * 通过URL上传单个文件
- * @param {import('wiki-saikou').MediaWikiApi} api - API实例
- * @param {FileConfig} fileConfig - 文件配置
- * @param {UploadConfig} globalConfig - 全局配置
- * @param {number} index - 文件序号
- * @param {boolean} dryRun - 是否为试运行模式
- * @param {string} article - 条目标题
- * @returns {Promise<UploadResult>} 上传结果
- */
-async function uploadFromUrl(api, fileConfig, globalConfig, index, dryRun, article) {
-	const filename = fileConfig.filename || generateFilename(fileConfig.url, article, index);
+async function uploadFromUrl(
+	api: MediaWikiApi,
+	fileConfig: FileConfig,
+	globalConfig: UploadConfig,
+	index: number,
+	dryRun: boolean,
+	article: string | undefined,
+): Promise<UploadResult> {
+	const filename = fileConfig.filename || generateFilename(fileConfig.url, article ?? '', index);
 	const comment = globalConfig.comment || DEFAULT_COMMENT;
 	const text = globalConfig.text || `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`;
 
@@ -164,7 +146,7 @@ async function uploadFromUrl(api, fileConfig, globalConfig, index, dryRun, artic
 		};
 	}
 
-	let lastError = null;
+	let lastError: Error | null = null;
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 		try {
 			const { data } = await api.postWithToken('csrf', {
@@ -195,7 +177,8 @@ async function uploadFromUrl(api, fileConfig, globalConfig, index, dryRun, artic
 				throw new Error(JSON.stringify(data));
 			}
 		} catch (error) {
-			if (error.message && error.message.includes('moderation-image-queued')) {
+			const errMessage = (error as Error).message;
+			if (errMessage && errMessage.includes('moderation-image-queued')) {
 				console.log('  文件已进入审核队列');
 				return {
 					filename,
@@ -203,9 +186,9 @@ async function uploadFromUrl(api, fileConfig, globalConfig, index, dryRun, artic
 					success: true,
 				};
 			}
-			lastError = error;
+			lastError = error as Error;
 			if (attempt < MAX_RETRIES) {
-				console.log(`  上传失败（${error.message}），第${attempt}次重试...`);
+				console.log(`  上传失败（${errMessage}），第${attempt}次重试...`);
 				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
 			}
 		}
@@ -219,15 +202,12 @@ async function uploadFromUrl(api, fileConfig, globalConfig, index, dryRun, artic
 	};
 }
 
-/**
- * 批量上传文件
- * @param {import('wiki-saikou').MediaWikiApi} api - API实例
- * @param {UploadConfig} uploadConfig - 上传配置
- * @param {boolean} dryRun - 是否为试运行模式
- * @returns {Promise<UploadResult[]>} 上传结果数组
- */
-async function batchUpload(api, uploadConfig, dryRun) {
-	const results = [];
+async function batchUpload(
+	api: MediaWikiApi,
+	uploadConfig: UploadConfig,
+	dryRun: boolean,
+): Promise<UploadResult[]> {
+	const results: UploadResult[] = [];
 	const total = uploadConfig.files.length;
 
 	for (let i = 0; i < total; i++) {
@@ -249,13 +229,8 @@ async function batchUpload(api, uploadConfig, dryRun) {
 	return results;
 }
 
-/**
- * 解析命令行参数
- * @param {string[]} args - 命令行参数数组
- * @returns {{ dryRun: boolean, verbose: boolean }}
- */
-function parseArgs(args) {
-	const result = {
+function parseArgs(args: string[]): CliArgs {
+	const result: CliArgs = {
 		dryRun: false,
 		verbose: false,
 	};
@@ -271,28 +246,25 @@ function parseArgs(args) {
 	return result;
 }
 
-/**
- * 主函数
- */
-async function main() {
+async function main(): Promise<void> {
 	console.log(`Start time: ${new Date().toISOString()}`);
 
 	const args = parseArgs(process.argv.slice(2));
 
 	console.log('正在登录zh站...');
-	await clientlogin(zhApi, config.zh.bot.clientUsername, config.zh.bot.clientPassword)
+	await clientlogin(zhApi, config.zh.bot.clientUsername!, config.zh.bot.clientPassword!)
 		.then((result) => { console.log('zh站登录成功', result); });
 
 	console.log('正在登录commons站...');
-	await clientlogin(cmApi, config.cm.bot.clientUsername, config.cm.bot.clientPassword, config.cm.api)
+	await clientlogin(cmApi, config.cm.bot.clientUsername!, config.cm.bot.clientPassword!, config.cm.api)
 		.then((result) => { console.log('commons站登录成功', result); });
 
 	console.log(`\n正在读取配置文件: ${CONFIG_PAGE}`);
-	let uploadConfig;
+	let uploadConfig: UploadConfig;
 	try {
 		uploadConfig = await fetchJsonConfig(zhApi, CONFIG_PAGE);
 	} catch (error) {
-		console.error(`读取配置失败: ${error.message}`);
+		console.error(`读取配置失败: ${(error as Error).message}`);
 		process.exit(1);
 	}
 
@@ -329,7 +301,7 @@ async function main() {
 	console.log(`\nEnd time: ${new Date().toISOString()}`);
 }
 
-main().catch((error) => {
+main().catch((error: unknown) => {
 	console.error('发生错误:', error);
 	process.exit(1);
 });

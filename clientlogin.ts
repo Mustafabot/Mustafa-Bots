@@ -1,16 +1,24 @@
 import process from 'process';
+import { MediaWikiApi } from 'wiki-saikou';
 import config from './config.js';
 
-/**
- * @param {import('../src').MediaWikiApi} api
- * @param {string} username
- * @param {string} [password=config.password]
- * @param {string} [loginreturnurl] - 登录返回URL，默认使用zh站API
- * @returns {Promise<any>} 登录结果
- */
-async function clientLogin(api, username, password = config.password, loginreturnurl = config.zh.api) {
+interface ClientLoginData {
+	clientlogin: {
+		status: string;
+		message?: string;
+		[key: string]: unknown;
+	};
+	[key: string]: unknown;
+}
+
+async function clientLogin(
+	api: MediaWikiApi,
+	username: string,
+	password: string = config.password!,
+	loginreturnurl: string = config.zh.api,
+): Promise<ClientLoginData> {
 	return api
-		.postWithToken(
+		.postWithToken<ClientLoginData>(
 			'login',
 			{
 				action: 'clientlogin',
@@ -22,7 +30,7 @@ async function clientLogin(api, username, password = config.password, loginretur
 				tokenName: 'logintoken',
 				retry: 15,
 				noCache: true,
-			},
+			} as Parameters<typeof api.postWithToken>[2],
 		)
 		.then(({ data }) => {
 			if (data.clientlogin.status === 'PASS') {
