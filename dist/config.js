@@ -1,14 +1,18 @@
 import { env } from 'process';
 import { config as dotenvConfig } from 'dotenv';
 import { fileURLToPath } from 'url';
+import { existsSync } from 'fs';
 import path from 'path';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-dotenvConfig({ path: path.join(__dirname, '.env') });
+const envPath = existsSync(path.join(__dirname, '.env'))
+    ? path.join(__dirname, '.env')
+    : path.join(__dirname, '..', '.env');
+dotenvConfig({ path: envPath });
 const config = {
     password: env.MOEGIRL_PASSWORD,
     zh: {
-        api: 'https://mzh.moegirl.org.cn/api.php',
-        cookie: `moegirlSSOToken=${env.MOEGIRL_ZH_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_ZH_SSO_USER_ID}`,
+        api: 'https://zh.moegirl.org.cn/api.php',
+        cookie: `moegirlSSOToken=${env.MOEGIRL_ZH_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_SSO_USER_ID}`,
         bot: {
             name: '机娘穆斯塔法@Kemal-Bot',
             password: env.MOEGIRL_PASSWORD,
@@ -18,7 +22,7 @@ const config = {
     },
     cm: {
         api: 'https://commons.moegirl.org.cn/api.php',
-        cookie: `moegirlSSOToken=${env.MOEGIRL_CM_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_CM_SSO_USER_ID}`,
+        cookie: `moegirlSSOToken=${env.MOEGIRL_CM_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_SSO_USER_ID}`,
         bot: {
             name: '机娘穆斯塔法@Kemal-Bot',
             password: env.MOEGIRL_PASSWORD,

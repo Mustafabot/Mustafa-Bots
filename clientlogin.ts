@@ -22,8 +22,8 @@ async function clientLogin(
 			'login',
 			{
 				action: 'clientlogin',
-				username,
-				password,
+				username: username,
+				password: password,
 				loginreturnurl,
 			},
 			{
@@ -33,6 +33,10 @@ async function clientLogin(
 			} as Parameters<typeof api.postWithToken>[2],
 		)
 		.then(({ data }) => {
+			if (!data.clientlogin) {
+				console.error('登录异常: 响应中缺少 clientlogin 数据', data);
+				throw new Error('登录响应格式异常');
+			}
 			if (data.clientlogin.status === 'PASS') {
 				console.log('登录成功', data);
 				return data;
