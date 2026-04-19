@@ -211,37 +211,43 @@ function parseUploadWarnings(warnings) {
             reason: `文件已以其他名称存在: ${existingFile}，跳过上传直接替换`,
         };
     }
+    if (warningKeys.includes('duplicateversions')) {
+        const existsInfo = warnings.exists;
+        let existingFile;
+        if (existsInfo) {
+            existingFile = existsInfo;
+            if (Array.isArray(existsInfo) && existsInfo.length > 0) {
+                existingFile = existsInfo[0];
+            }
+            if (typeof existingFile === 'string' && !existingFile.startsWith('File:')) {
+                existingFile = `File:${existingFile}`;
+            }
+        }
+        return {
+            action: 'replace',
+            existingFile,
+            reason: '文件版本已存在（上传的是旧版本），跳过上传直接替换',
+        };
+    }
+    if (warningKeys.includes('nochange')) {
+        const existsInfo = warnings.exists;
+        let existingFile;
+        if (existsInfo) {
+            existingFile = existsInfo;
+            if (Array.isArray(existsInfo) && existsInfo.length > 0) {
+                existingFile = existsInfo[0];
+            }
+            if (typeof existingFile === 'string' && !existingFile.startsWith('File:')) {
+                existingFile = `File:${existingFile}`;
+            }
+        }
+        return {
+            action: 'replace',
+            existingFile,
+            reason: '文件内容相同，跳过上传直接替换',
+        };
+    }
     if (warningKeys.includes('exists')) {
-        if (warningKeys.includes('no-change')) {
-            const existsInfo = warnings.exists;
-            let existingFile = existsInfo;
-            if (Array.isArray(existsInfo) && existsInfo.length > 0) {
-                existingFile = existsInfo[0];
-            }
-            if (typeof existingFile === 'string' && !existingFile.startsWith('File:')) {
-                existingFile = `File:${existingFile}`;
-            }
-            return {
-                action: 'replace',
-                existingFile,
-                reason: '文件已存在且内容相同，跳过上传直接替换',
-            };
-        }
-        else if (warningKeys.includes('duplicateversions')) {
-            const existsInfo = warnings.exists;
-            let existingFile = existsInfo;
-            if (Array.isArray(existsInfo) && existsInfo.length > 0) {
-                existingFile = existsInfo[0];
-            }
-            if (typeof existingFile === 'string' && !existingFile.startsWith('File:')) {
-                existingFile = `File:${existingFile}`;
-            }
-            return {
-                action: 'replace',
-                existingFile,
-                reason: '文件已存在（上传的是旧版本），跳过上传直接替换',
-            };
-        }
         return {
             action: 'rename',
             reason: '文件已存在但内容不同，需要改名上传',
