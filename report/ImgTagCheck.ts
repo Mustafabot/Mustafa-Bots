@@ -14,11 +14,91 @@ interface Issue {
 
 Parser.config = 'moegirl';
 const NAMESPACE = '0';
+const CONCURRENCY = 10;
 const api = new MediaWikiApi(config.zh.api, {
 	headers: { cookie: config.zh.cookie! },
 });
 
 const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}`;
+
+function isWhitelisted(src: string, whitelistRegexes: RegExp[]): boolean {
+	if (whitelistRegexes.some(regex => regex.test(src))) {
+		return true;
+	}
+	if (src.startsWith('//')) {
+		return whitelistRegexes.some(regex => regex.test('https:' + src));
+	}
+	return false;
+}
+
+function processPage(
+	title: string,
+	content: string,
+	whitelistRegexes: RegExp[],
+): Issue[] {
+	const issues: Issue[] = [];
+	const parsed = Parser.parse(content, title);
+	const imgNodes = parsed.querySelectorAll('ext#img') as any[];
+
+	for (const node of imgNodes) {
+		const src: string | undefined = node.attributes?.src;
+		if (src && !isWhitelisted(src, whitelistRegexes)) {
+			issues.push({
+				title,
+				message: 'img标签src属性不符合外部图像白名单',
+				line: 0,
+				col: 0,
+				src,
+			});
+		}
+	}
+
+	return issues;
+}
+
+async function processPagesParallel(
+	pages: Array<{ title: string; revisions: Array<{ content: string }> }>,
+	whitelistRegexes: RegExp[],
+	concurrency: number,
+): Promise<Issue[]> {
+	const allIssues: Issue[] = [];
+	const queue = [...pages];
+	let activeCount = 0;
+	let resolveAll: () => void;
+	const allDone = new Promise<void>(resolve => {
+		resolveAll = resolve;
+	});
+
+	const processNext = async (): Promise<void> => {
+		while (queue.length > 0) {
+			const page = queue.shift();
+			if (!page) break;
+
+			activeCount++;
+			try {
+				const { title, revisions: [{ content }] } = page;
+				const issues = processPage(title, content, whitelistRegexes);
+				allIssues.push(...issues);
+			} finally {
+				activeCount--;
+				if (queue.length === 0 && activeCount === 0) {
+					resolveAll();
+				} else {
+					processNext();
+				}
+			}
+		}
+	};
+
+	const workers = Array.from({ length: Math.min(concurrency, pages.length) }, () =>
+		processNext(),
+	);
+
+	await Promise.all(workers);
+	await allDone;
+
+	return allIssues;
+}
 
 (async () => {
 	console.log(`Start time: ${new Date().toISOString()}`);
@@ -84,45 +164,8 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
 		return result;
 	})();
 
-	const issues: Issue[] = [];
-
-	function traverse(node: any, title: string, issues: Issue[], whitelistRegexes: RegExp[]): void {
-		if (!node) return;
-
-		if (node.type === 'ext' && node.name === 'img') {
-			const src: string | undefined = node.attributes?.src;
-			if (src) {
-				let isWhitelisted = whitelistRegexes.some(regex => regex.test(src!));
-				if (!isWhitelisted && src.startsWith('//')) {
-					isWhitelisted = whitelistRegexes.some(regex => regex.test('https:' + src!));
-				}
-				if (!isWhitelisted) {
-					issues.push({
-						title,
-						message: 'img标签src属性不符合外部图像白名单',
-						line: 0,
-						col: 0,
-						src,
-					});
-				}
-			}
-		}
-
-		if (node.children && Array.isArray(node.children)) {
-			for (const child of node.children) {
-				traverse(child, title, issues, whitelistRegexes);
-			}
-		}
-	}
-
-	for (const page of pages) {
-		const { title, revisions: [{ content }] }: { title: string; revisions: { content: string }[] } = page;
-		console.log(`Checking ${title}`);
-
-		const parsed: any = Parser.parse(content, title);
-
-		traverse(parsed, title, issues, whitelistRegexes);
-	}
+	console.log(`Starting parallel processing with concurrency: ${CONCURRENCY}`);
+	const issues = await processPagesParallel(pages, whitelistRegexes, CONCURRENCY);
 
 	console.log(`Found ${issues.length} issues`);
 

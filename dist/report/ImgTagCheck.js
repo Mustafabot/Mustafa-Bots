@@ -5,10 +5,73 @@ import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 Parser.config = 'moegirl';
 const NAMESPACE = '0';
+const CONCURRENCY = 10;
 const api = new MediaWikiApi(config.zh.api, {
     headers: { cookie: config.zh.cookie },
 });
 const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}`;
+function isWhitelisted(src, whitelistRegexes) {
+    if (whitelistRegexes.some(regex => regex.test(src))) {
+        return true;
+    }
+    if (src.startsWith('//')) {
+        return whitelistRegexes.some(regex => regex.test('https:' + src));
+    }
+    return false;
+}
+function processPage(title, content, whitelistRegexes) {
+    const issues = [];
+    const parsed = Parser.parse(content, title);
+    const imgNodes = parsed.querySelectorAll('ext#img');
+    for (const node of imgNodes) {
+        const src = node.attributes?.src;
+        if (src && !isWhitelisted(src, whitelistRegexes)) {
+            issues.push({
+                title,
+                message: 'img标签src属性不符合外部图像白名单',
+                line: 0,
+                col: 0,
+                src,
+            });
+        }
+    }
+    return issues;
+}
+async function processPagesParallel(pages, whitelistRegexes, concurrency) {
+    const allIssues = [];
+    const queue = [...pages];
+    let activeCount = 0;
+    let resolveAll;
+    const allDone = new Promise(resolve => {
+        resolveAll = resolve;
+    });
+    const processNext = async () => {
+        while (queue.length > 0) {
+            const page = queue.shift();
+            if (!page)
+                break;
+            activeCount++;
+            try {
+                const { title, revisions: [{ content }] } = page;
+                const issues = processPage(title, content, whitelistRegexes);
+                allIssues.push(...issues);
+            }
+            finally {
+                activeCount--;
+                if (queue.length === 0 && activeCount === 0) {
+                    resolveAll();
+                }
+                else {
+                    processNext();
+                }
+            }
+        }
+    };
+    const workers = Array.from({ length: Math.min(concurrency, pages.length) }, () => processNext());
+    await Promise.all(workers);
+    await allDone;
+    return allIssues;
+}
 (async () => {
     console.log(`Start time: ${new Date().toISOString()}`);
     await clientlogin(api, config.zh.bot.clientUsername, config.zh.bot.clientPassword).then(console.log);
@@ -67,40 +130,8 @@ const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}
         console.log(`Total pages: ${result.length}`);
         return result;
     })();
-    const issues = [];
-    function traverse(node, title, issues, whitelistRegexes) {
-        if (!node)
-            return;
-        if (node.type === 'ext' && node.name === 'img') {
-            const src = node.attributes?.src;
-            if (src) {
-                let isWhitelisted = whitelistRegexes.some(regex => regex.test(src));
-                if (!isWhitelisted && src.startsWith('//')) {
-                    isWhitelisted = whitelistRegexes.some(regex => regex.test('https:' + src));
-                }
-                if (!isWhitelisted) {
-                    issues.push({
-                        title,
-                        message: 'img标签src属性不符合外部图像白名单',
-                        line: 0,
-                        col: 0,
-                        src,
-                    });
-                }
-            }
-        }
-        if (node.children && Array.isArray(node.children)) {
-            for (const child of node.children) {
-                traverse(child, title, issues, whitelistRegexes);
-            }
-        }
-    }
-    for (const page of pages) {
-        const { title, revisions: [{ content }] } = page;
-        console.log(`Checking ${title}`);
-        const parsed = Parser.parse(content, title);
-        traverse(parsed, title, issues, whitelistRegexes);
-    }
+    console.log(`Starting parallel processing with concurrency: ${CONCURRENCY}`);
+    const issues = await processPagesParallel(pages, whitelistRegexes, CONCURRENCY);
     console.log(`Found ${issues.length} issues`);
     const reportContent = generateReport(issues, pages.length);
     const localReportPath = new URL(`./Ns${NAMESPACE}ImgTagCheck_report.txt`, import.meta.url);
