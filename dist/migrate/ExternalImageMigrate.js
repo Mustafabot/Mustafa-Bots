@@ -12,7 +12,67 @@ const cmApi = new MediaWikiApi(config.cm.api, {
 });
 const MAX_RETRIES = 3;
 const MAX_RENAME_ATTEMPTS = 10;
+const FORCE_UPLOAD_RETRIES = 3;
 const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
+const MIME_TO_EXT = {
+    'image/png': '.png',
+    'image/jpeg': '.jpg',
+    'image/gif': '.gif',
+    'image/webp': '.webp',
+    'image/svg+xml': '.svg',
+    'image/jp2': '.jp2',
+    'image/jpx': '.jp2',
+    'image/bmp': '.bmp',
+    'image/x-icon': '.ico',
+    'image/avif': '.avif',
+    'image/heic': '.heic',
+    'image/heif': '.heif',
+    'image/tiff': '.tiff',
+    'image/x-tiff': '.tiff',
+    'application/pdf': '.pdf',
+    'audio/mpeg': '.mp3',
+    'audio/mp3': '.mp3',
+    'audio/ogg': '.ogg',
+    'audio/x-ogg': '.ogg',
+    'audio/flac': '.flac',
+    'audio/x-flac': '.flac',
+    'audio/opus': '.opus',
+    'audio/wav': '.wav',
+    'audio/x-wav': '.wav',
+    'audio/midi': '.mid',
+    'audio/x-midi': '.mid',
+    'video/ogg': '.ogv',
+    'video/webm': '.webm',
+    'audio/webm': '.webm',
+    'video/mpeg': '.mpg',
+    'video/mpg': '.mpg',
+    'font/ttf': '.ttf',
+    'font/otf': '.ttf',
+    'application/x-font-ttf': '.ttf',
+    'application/x-font-otf': '.ttf',
+    'font/woff2': '.woff2',
+    'application/font-woff2': '.woff2',
+};
+function changeFileExtension(filename, newExt) {
+    const match = filename.match(/^(File:.+)(\.[a-zA-Z0-9]+)$/);
+    if (match) {
+        return `${match[1]}${newExt}`;
+    }
+    return `${filename}${newExt}`;
+}
+async function detectMimeFromUrl(url) {
+    try {
+        const response = await fetch(url, { method: 'HEAD' });
+        const contentType = response.headers.get('content-type');
+        if (contentType) {
+            return contentType.split(';')[0].trim().toLowerCase();
+        }
+    }
+    catch {
+        console.error('  从URL检测MIME类型失败');
+    }
+    return null;
+}
 async function fetchWhitelist(api) {
     const { data } = await api.post({
         action: 'query',
@@ -75,7 +135,7 @@ async function processPagesInBatches(api, namespace, processBatch) {
     }
 }
 function extractExtension(url) {
-    const commonImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'bmp', 'ico', 'avif', 'heic', 'heif'];
+    const commonImageExts = ['png', 'jpg', 'jpeg', 'gif', 'webp', 'svg', 'jp2', 'bmp', 'ico', 'avif', 'heic', 'heif'];
     try {
         const urlObj = new URL(url);
         const pathname = urlObj.pathname;
@@ -106,6 +166,24 @@ function generateRenamedFilename(originalFilename, suffix) {
 }
 function parseUploadWarnings(warnings) {
     const warningKeys = Object.keys(warnings);
+    if (warningKeys.includes('filetype-mime')) {
+        const mimeInfo = warnings['filetype-mime'];
+        let detectedMime;
+        if (Array.isArray(mimeInfo) && mimeInfo.length >= 2) {
+            detectedMime = String(mimeInfo[1]).toLowerCase();
+        }
+        else if (typeof mimeInfo === 'string') {
+            const mimeMatch = mimeInfo.match(/(image\/[a-z+-]+)/i);
+            if (mimeMatch) {
+                detectedMime = mimeMatch[1].toLowerCase();
+            }
+        }
+        return {
+            action: 'fix-extension',
+            reason: `文件扩展名与MIME类型不匹配${detectedMime ? `，检测到MIME类型: ${detectedMime}` : ''}`,
+            detectedMime,
+        };
+    }
     if (warningKeys.includes('was-deleted')) {
         return {
             action: 'skip',
@@ -214,6 +292,76 @@ function extractExternalImages(content, title, whitelist) {
     traverse(parsed);
     return { parsed, issues };
 }
+function parseMimeMismatchError(error) {
+    try {
+        const errorObj = JSON.parse(error.message);
+        const errors = errorObj?.errors;
+        if (Array.isArray(errors)) {
+            for (const err of errors) {
+                if (err.code === 'verification-error' && err.data?.details?.[0] === 'filetype-mime-mismatch') {
+                    const detectedMime = err.data.details[2];
+                    if (typeof detectedMime === 'string') {
+                        return { isMimeMismatch: true, detectedMime: detectedMime.toLowerCase() };
+                    }
+                }
+            }
+        }
+    }
+    catch {
+        console.error('  解析MIME不匹配错误失败');
+    }
+    return { isMimeMismatch: false };
+}
+async function forceUploadWithRetry(api, url, filename, comment, article, warnings) {
+    console.log('  忽略警告，强制上传...');
+    let forceLastError = null;
+    for (let forceAttempt = 1; forceAttempt <= FORCE_UPLOAD_RETRIES; forceAttempt++) {
+        try {
+            const { data: forceData } = await api.postWithToken('csrf', {
+                action: 'upload',
+                filename,
+                url,
+                comment,
+                text: `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`,
+                ignorewarnings: true,
+                bot: true,
+                tags: 'Bot',
+                watchlist: 'nochange',
+            }, {
+                retry: 500,
+                noCache: true,
+            });
+            if (forceData.upload && forceData.upload.result === 'Success') {
+                console.log('  强制上传成功');
+                return { filename, url, success: true, warnings, action: 'ignore' };
+            }
+            if (JSON.stringify(forceData).includes('moderation-image-queued')) {
+                console.log('  文件已进入审核队列');
+                return { filename, url, success: true, warnings, action: 'ignore' };
+            }
+            console.log(`  强制上传失败: ${JSON.stringify(forceData)}`);
+            forceLastError = new Error(`强制上传失败: ${JSON.stringify(forceData)}`);
+        }
+        catch (forceError) {
+            if (forceError.message && forceError.message.includes('moderation-image-queued')) {
+                console.log('  文件已进入审核队列');
+                return { filename, url, success: true, warnings, action: 'ignore' };
+            }
+            forceLastError = forceError;
+        }
+        if (forceAttempt < FORCE_UPLOAD_RETRIES) {
+            console.log(`  强制上传第${forceAttempt}次重试...`);
+            await new Promise(resolve => setTimeout(resolve, 1000 * forceAttempt));
+        }
+    }
+    return {
+        filename,
+        url,
+        success: false,
+        warnings,
+        error: `强制上传失败: ${forceLastError?.message || '未知错误'}`,
+    };
+}
 async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
     if (dryRun) {
         console.log(`  [试运行] 将上传: ${filename}`);
@@ -293,54 +441,30 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
                     attempt--;
                     continue;
                 }
+                if (decision.action === 'fix-extension') {
+                    let detectedMime = decision.detectedMime;
+                    if (!detectedMime) {
+                        console.log('  警告中未包含MIME类型，尝试从URL检测...');
+                        detectedMime = (await detectMimeFromUrl(url)) || undefined;
+                    }
+                    if (detectedMime && MIME_TO_EXT[detectedMime]) {
+                        const newExt = MIME_TO_EXT[detectedMime];
+                        const newFilename = changeFileExtension(currentFilename, newExt);
+                        if (newFilename !== currentFilename) {
+                            console.log(`  修正扩展名: ${currentFilename} -> ${newFilename} (MIME: ${detectedMime})`);
+                            currentFilename = newFilename;
+                            attempt--;
+                            continue;
+                        }
+                        console.log(`  扩展名已与MIME类型匹配(${newExt})，尝试强制上传...`);
+                    }
+                    else {
+                        console.log(`  无法确定正确的扩展名${detectedMime ? ` (MIME: ${detectedMime})` : ''}，尝试强制上传...`);
+                    }
+                    return await forceUploadWithRetry(api, url, currentFilename, comment, article, warnings);
+                }
                 if (decision.action === 'ignore') {
-                    console.log('  忽略警告，强制上传...');
-                    try {
-                        const { data: forceData } = await api.postWithToken('csrf', {
-                            action: 'upload',
-                            filename: currentFilename,
-                            url,
-                            comment,
-                            text: `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`,
-                            ignorewarnings: true,
-                            bot: true,
-                            tags: 'Bot',
-                            watchlist: 'nochange',
-                        }, {
-                            retry: 500,
-                            noCache: true,
-                        });
-                        if (forceData.upload && forceData.upload.result === 'Success') {
-                            console.log('  强制上传成功');
-                            return { filename: currentFilename, url, success: true, warnings, action: decision.action };
-                        }
-                        if (JSON.stringify(forceData).includes('moderation-image-queued')) {
-                            console.log('  文件已进入审核队列');
-                            return { filename: currentFilename, url, success: true, warnings, action: decision.action };
-                        }
-                        console.log(`  强制上传失败: ${JSON.stringify(forceData)}`);
-                        return {
-                            filename: currentFilename,
-                            url,
-                            success: false,
-                            warnings,
-                            error: `强制上传失败: ${JSON.stringify(forceData)}`,
-                        };
-                    }
-                    catch (forceError) {
-                        if (forceError.message && forceError.message.includes('moderation-image-queued')) {
-                            console.log('  文件已进入审核队列');
-                            return { filename: currentFilename, url, success: true, warnings, action: decision.action };
-                        }
-                        console.log(`  强制上传失败: ${forceError.message}`);
-                        return {
-                            filename: currentFilename,
-                            url,
-                            success: false,
-                            warnings,
-                            error: `强制上传失败: ${forceError.message}`,
-                        };
-                    }
+                    return await forceUploadWithRetry(api, url, currentFilename, comment, article, warnings);
                 }
             }
             throw new Error(JSON.stringify(data));
@@ -349,6 +473,17 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
             if (error.message && error.message.includes('moderation-image-queued')) {
                 console.log('  文件已进入审核队列');
                 return { filename: currentFilename, url, success: true };
+            }
+            const mimeMismatch = parseMimeMismatchError(error);
+            if (mimeMismatch.isMimeMismatch && mimeMismatch.detectedMime && MIME_TO_EXT[mimeMismatch.detectedMime]) {
+                const newExt = MIME_TO_EXT[mimeMismatch.detectedMime];
+                const newFilename = changeFileExtension(currentFilename, newExt);
+                if (newFilename !== currentFilename) {
+                    console.log(`  扩展名与MIME不匹配，修正: ${currentFilename} -> ${newFilename} (MIME: ${mimeMismatch.detectedMime})`);
+                    currentFilename = newFilename;
+                    attempt--;
+                    continue;
+                }
             }
             lastError = error;
             const isAbuseFilter = error.message && error.message.toLowerCase().includes('abusefilter');

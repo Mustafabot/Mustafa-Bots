@@ -40,36 +40,26 @@ function processPage(title, content, whitelistRegexes) {
 async function processPagesParallel(pages, whitelistRegexes, concurrency) {
     const allIssues = [];
     const queue = [...pages];
-    let activeCount = 0;
-    let resolveAll;
-    const allDone = new Promise(resolve => {
-        resolveAll = resolve;
-    });
-    const processNext = async () => {
+    const total = pages.length;
+    let processed = 0;
+    const startTime = Date.now();
+    async function worker() {
         while (queue.length > 0) {
             const page = queue.shift();
             if (!page)
                 break;
-            activeCount++;
-            try {
-                const { title, revisions: [{ content }] } = page;
-                const issues = processPage(title, content, whitelistRegexes);
-                allIssues.push(...issues);
-            }
-            finally {
-                activeCount--;
-                if (queue.length === 0 && activeCount === 0) {
-                    resolveAll();
-                }
-                else {
-                    processNext();
-                }
-            }
+            const { title, revisions: [{ content }] } = page;
+            const issues = processPage(title, content, whitelistRegexes);
+            allIssues.push(...issues);
+            processed++;
+            const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
+            const percent = ((processed / total) * 100).toFixed(1);
+            const remaining = queue.length;
+            console.log(`[${processed}/${total}] ${percent}% | ${remaining} remaining | ${elapsed}s elapsed | ${title}`);
         }
-    };
-    const workers = Array.from({ length: Math.min(concurrency, pages.length) }, () => processNext());
+    }
+    const workers = Array.from({ length: Math.min(concurrency, pages.length) }, () => worker());
     await Promise.all(workers);
-    await allDone;
     return allIssues;
 }
 (async () => {
@@ -118,7 +108,7 @@ async function processPagesParallel(pages, whitelistRegexes, concurrency) {
                 rvprop: 'content',
                 generator: 'allpages',
                 gapnamespace: NAMESPACE,
-                gaplimit: 500,
+                gaplimit: 200,
                 gapcontinue: apcontinue,
             }, {
                 retry: 15,
