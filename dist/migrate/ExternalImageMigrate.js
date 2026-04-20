@@ -512,34 +512,27 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
         error: lastError?.message || '未知错误',
     };
 }
-function buildUseImgTemplateNode(filename, attributes, refNode) {
+function buildImageTemplateNode(filename, attributes, refNode) {
     const imgName = filename.replace(/^File:/i, '');
     const style = attributes.style || '';
     const title = attributes.title || '';
-    const otherAttrs = { ...attributes };
-    delete otherAttrs.src;
-    delete otherAttrs.style;
-    delete otherAttrs.title;
+    const width = attributes.width || '';
+    const height = attributes.height || '';
     const nodeConfig = refNode.getAttribute('config');
-    const templateNode = Parser.parse('{{useImg}}', refNode.getAttribute('include'), 7, nodeConfig)
+    const templateNode = Parser.parse('{{Image}}', refNode.getAttribute('include'), 7, nodeConfig)
         .querySelector('template');
-    templateNode.setValue('img', imgName);
+    templateNode.setValue('图片', imgName);
+    if (width) {
+        templateNode.setValue('宽', width);
+    }
+    if (height) {
+        templateNode.setValue('高', height);
+    }
     if (style) {
-        templateNode.setValue('style', style);
+        templateNode.setValue('样式', style);
     }
     if (title) {
-        templateNode.setValue('title', title);
-    }
-    let attrsStr = '';
-    for (const [key, value] of Object.entries(otherAttrs)) {
-        if (value) {
-            attrsStr += ` ${key}=${value}`;
-        }
-    }
-    if (attrsStr) {
-        const attrsParam = templateNode.newAnonArg(attrsStr.trim());
-        attrsParam.rename('attrs');
-        attrsParam.escape();
+        templateNode.setValue('描述', title);
     }
     return templateNode;
 }
@@ -548,7 +541,7 @@ function replaceImageNodes(parsed, issues, urlToFilename) {
         const filename = urlToFilename.get(issue.src);
         if (!filename)
             continue;
-        const templateNode = buildUseImgTemplateNode(filename, issue.attributes, parsed);
+        const templateNode = buildImageTemplateNode(filename, issue.attributes, parsed);
         issue.node.replaceWith(templateNode);
     }
     return parsed.toString();

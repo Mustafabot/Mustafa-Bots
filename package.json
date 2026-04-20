@@ -15,14 +15,14 @@
   "license": "ISC",
   "dependencies": {
     "@bhsd/nodejs": "^1.0.0",
-    "dotenv": "^16.4.5",
-    "wiki-saikou": "^3.4.0",
-    "wikiparser-node": "^1.37.1"
+    "dotenv": "^16.6.1",
+    "wiki-saikou": "^7.6.0",
+    "wikiparser-node": "^1.38.1"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
-    "eslint": "^10.2.0",
+    "eslint": "^10.2.1",
     "eslint-plugin-jsdoc": "^62.9.0",
     "globals": "^17.5.0",
     "jiti": "^2.6.1",
