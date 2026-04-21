@@ -1,6 +1,9 @@
 import { MediaWikiApi } from 'wiki-saikou';
 import Parser from 'wikiparser-node';
 import { URL } from 'url';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
+import { resolve, dirname } from 'path';
+import { fileURLToPath } from 'url';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 
@@ -58,6 +61,7 @@ interface CliArgs {
 	dryRun: boolean;
 	verbose: boolean;
 	namespace: string;
+	reset: boolean;
 }
 
 const zhApi = new MediaWikiApi(config.zh.api, {
@@ -72,6 +76,63 @@ const MAX_RETRIES = 3;
 const MAX_RENAME_ATTEMPTS = 10;
 const FORCE_UPLOAD_RETRIES = 3;
 const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const CHECKPOINT_DIR = resolve(__dirname, '../.checkpoint');
+const CHECKPOINT_FILE = (namespace: string) => resolve(CHECKPOINT_DIR, `external_image_migrate_${namespace}.json`);
+
+interface CheckpointData {
+	namespace: string;
+	apcontinue: string;
+	lastUpdate: string;
+}
+
+function saveCheckpoint(namespace: string, apcontinue: string): void {
+	try {
+		if (!existsSync(CHECKPOINT_DIR)) {
+			mkdirSync(CHECKPOINT_DIR, { recursive: true });
+		}
+		const data: CheckpointData = {
+			namespace,
+			apcontinue,
+			lastUpdate: new Date().toISOString(),
+		};
+		writeFileSync(CHECKPOINT_FILE(namespace), JSON.stringify(data, null, 2), 'utf-8');
+		console.log(`  断点已保存: ${apcontinue}`);
+	} catch (error) {
+		console.error('  保存断点失败:', error);
+	}
+}
+
+function loadCheckpoint(namespace: string): string | null {
+	try {
+		const filePath = CHECKPOINT_FILE(namespace);
+		if (existsSync(filePath)) {
+			const data: CheckpointData = JSON.parse(readFileSync(filePath, 'utf-8'));
+			if (data.namespace === namespace && data.apcontinue) {
+				console.log(`  发现断点文件，将从 ${data.apcontinue} 继续`);
+				console.log(`  断点时间: ${data.lastUpdate}`);
+				return data.apcontinue;
+			}
+		}
+	} catch (error) {
+		console.error('  读取断点失败:', error);
+	}
+	return null;
+}
+
+function clearCheckpoint(namespace: string): void {
+	try {
+		const filePath = CHECKPOINT_FILE(namespace);
+		if (existsSync(filePath)) {
+			unlinkSync(filePath);
+			console.log(`  已清除断点文件: ${filePath}`);
+		}
+	} catch (error) {
+		console.error('  清除断点失败:', error);
+	}
+}
 
 const MIME_TO_EXT: Record<string, string> = {
 	'image/png': '.png',
@@ -171,11 +232,16 @@ async function fetchWhitelist(api: MediaWikiApi): Promise<RegExp[]> {
 async function processPagesInBatches(
 	api: MediaWikiApi,
 	namespace: string,
-	processBatch: (pages: PageInfo[]) => Promise<void>
+	processBatch: (pages: PageInfo[]) => Promise<void>,
+	initialApcontinue?: string | null
 ): Promise<void> {
 	const eol = Symbol();
-	let apcontinue: string | symbol | undefined = undefined;
+	let apcontinue: string | symbol | undefined = initialApcontinue ?? undefined;
 	let batchIndex = 0;
+
+	if (initialApcontinue) {
+		console.log(`\n从断点继续: ${initialApcontinue}`);
+	}
 
 	while (apcontinue !== eol) {
 		const { data } = await api.post({
@@ -190,10 +256,10 @@ async function processPagesInBatches(
 			retry: 15,
 		} as any) as any;
 
-		apcontinue = (data as any).continue?.gapcontinue ?? eol;
+		const nextApcontinue: string | symbol = (data as any).continue?.gapcontinue ?? eol;
 		batchIndex++;
 		console.log(`\n=== 批次 ${batchIndex} ===`);
-		console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : String(apcontinue)}`);
+		console.log(`gapcontinue: ${nextApcontinue === eol ? 'END_OF_LIST' : String(nextApcontinue)}`);
 
 		const pages: PageInfo[] = Object.values(data.query.pages)
 			.filter((page: any) => page.revisions?.length)
@@ -205,7 +271,16 @@ async function processPagesInBatches(
 		console.log(`本批次页面数: ${pages.length}`);
 
 		await processBatch(pages);
+
+		if (nextApcontinue !== eol && typeof nextApcontinue === 'string') {
+			saveCheckpoint(namespace, nextApcontinue);
+		}
+
+		apcontinue = nextApcontinue;
 	}
+
+	clearCheckpoint(namespace);
+	console.log('\n处理完成，已清除断点文件');
 }
 
 function extractExtension(url: string): string {
@@ -229,7 +304,8 @@ function extractExtension(url: string): string {
 
 function generateFilename(url: string, article: string, index: number): string {
 	const ext = extractExtension(url);
-	return `File:${article} ${index}${ext}`;
+	const safeArticle = article.replace(/\//g, '-');
+	return `File:${safeArticle} ${index}${ext}`;
 }
 
 function generateRenamedFilename(originalFilename: string, suffix: number): string {
@@ -633,31 +709,25 @@ async function uploadFromUrl(
 
 function buildImageTemplateNode(filename: string, attributes: Record<string, string>, refNode: any): any {
 	const imgName = filename.replace(/^File:/i, '');
-	const style = attributes.style || '';
-	const title = attributes.title || '';
-	const width = attributes.width || '';
-	const height = attributes.height || '';
-
+	
+	// 构建{{#img:文件名|参数=值|...}}格式的字符串
+	let imgParserTag = `{{#img:${imgName}`;
+	
+	// 添加其他属性作为参数（排除src属性）
+	for (const [key, value] of Object.entries(attributes)) {
+		if (key !== 'src') {
+			imgParserTag += `|${key}=${value}`;
+		}
+	}
+	
+	imgParserTag += '}}';
+	
+	// 解析并返回节点
 	const nodeConfig = refNode.getAttribute('config');
-	const templateNode = Parser.parse('{{Image}}', refNode.getAttribute('include'), 7, nodeConfig)
-		.querySelector('template') as any;
-
-	templateNode.setValue('图片', imgName);
-
-	if (width) {
-		templateNode.setValue('宽', width);
-	}
-	if (height) {
-		templateNode.setValue('高', height);
-	}
-	if (style) {
-		templateNode.setValue('样式', style);
-	}
-	if (title) {
-		templateNode.setValue('描述', title);
-	}
-
-	return templateNode;
+	const root = Parser.parse(imgParserTag, refNode.getAttribute('include'), 7, nodeConfig);
+	const parserNode = root.children[0] as any;
+	
+	return parserNode;
 }
 
 function replaceImageNodes(parsed: any, issues: ImageIssue[], urlToFilename: Map<string, string>): string {
@@ -729,7 +799,7 @@ async function processPage(
 		uploadResults: [],
 	};
 
-	console.log(`\n处理页面: ${title}`);
+	console.log(`处理页面: ${title}`);
 
 	const { parsed, issues } = extractExternalImages(content, title, whitelist);
 	result.imagesFound = issues.length;
@@ -814,6 +884,7 @@ function parseArgs(args: string[]): CliArgs {
 		dryRun: false,
 		verbose: false,
 		namespace: '0',
+		reset: false,
 	};
 
 	for (let i = 0; i < args.length; i++) {
@@ -825,6 +896,8 @@ function parseArgs(args: string[]): CliArgs {
 		} else if (arg === '--namespace' && args[i + 1]) {
 			result.namespace = args[i + 1];
 			i++;
+		} else if (arg === '--reset') {
+			result.reset = true;
 		}
 	}
 
@@ -853,6 +926,12 @@ async function main(): Promise<void> {
 
 	console.log(`\n正在遍历命名空间 ${args.namespace} 的页面...`);
 
+	if (args.reset) {
+		clearCheckpoint(args.namespace);
+	}
+
+	const initialApcontinue = args.reset ? null : loadCheckpoint(args.namespace);
+
 	const stats: ProcessStats = {
 		totalPages: 0,
 		totalFound: 0,
@@ -875,7 +954,7 @@ async function main(): Promise<void> {
 				stats.failedUploads.push(...result.uploadResults.filter(u => !u.success));
 			}
 		}
-	});
+	}, initialApcontinue);
 
 	console.log('\n========== 处理完成 ==========');
 	console.log(`处理页面数: ${stats.totalPages}`);

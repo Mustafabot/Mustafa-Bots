@@ -8,3 +8,4 @@ node_modules/
 /report/*.txt
 dist/report/*.txt
 AGENTS.md
+dist/.checkpoint/
