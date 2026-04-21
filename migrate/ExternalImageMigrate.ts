@@ -505,7 +505,7 @@ async function forceUploadWithRetry(
 				filename,
 				url,
 				comment,
-				text: `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`,
+				text: `{{Copyright}}{{非链入使用|[[zhmoe:${article}]]}}[[Category:${article}]][[Category:迁移文件]]`,
 				ignorewarnings: true,
 				bot: true,
 				tags: 'Bot',
@@ -711,7 +711,7 @@ function buildImageTemplateNode(filename: string, attributes: Record<string, str
 	const imgName = filename.replace(/^File:/i, '');
 	
 	// 构建{{#img:文件名|参数=值|...}}格式的字符串
-	let imgParserTag = `{{#img:${imgName}`;
+	let imgParserTag = `{{#img:{{filepath:${imgName}}}`;
 	
 	// 添加其他属性作为参数（排除src属性）
 	for (const [key, value] of Object.entries(attributes)) {

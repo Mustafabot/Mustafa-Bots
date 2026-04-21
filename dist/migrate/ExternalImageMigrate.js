@@ -391,7 +391,7 @@ async function forceUploadWithRetry(api, url, filename, comment, article, warnin
                 filename,
                 url,
                 comment,
-                text: `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`,
+                text: `{{Copyright}}{{非链入使用|[[zhmoe:${article}]]}}[[Category:${article}]][[Category:迁移文件]]`,
                 ignorewarnings: true,
                 bot: true,
                 tags: 'Bot',
