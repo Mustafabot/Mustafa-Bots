@@ -124,7 +124,7 @@ async function uploadFromFile(api, filePath, filename, comment, article, mimeTyp
                 filename,
                 file,
                 comment,
-                text: `{{Copyright}}{{非链入使用|[[zhmoe:${article}]]}}[[Category:${article}]][[Category:迁移文件]]`,
+                text: `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`,
                 ignorewarnings: true,
                 bot: true,
                 tags: 'Bot',
@@ -265,7 +265,7 @@ async function processPagesInBatches(api, namespace, processBatch, initialApcont
             rvprop: 'content',
             generator: 'allpages',
             gapnamespace: namespace,
-            gaplimit: 100,
+            gaplimit: 500,
             gapcontinue: apcontinue,
         }, {
             retry: 15,
@@ -309,9 +309,18 @@ function extractExtension(url) {
         return '.png';
     }
 }
-function generateFilename(url, article, index) {
+function generateFilename(url, article, index, titleAttr) {
     const ext = extractExtension(url);
     const safeArticle = article.replace(/\//g, '-');
+    if (titleAttr) {
+        const safeTitle = titleAttr
+            .replace(/[<>:"/\\|?*[\]{}#]/g, '')
+            .replace(/\s+/g, ' ')
+            .trim();
+        if (safeTitle) {
+            return `File:${safeArticle} ${safeTitle}${ext}`;
+        }
+    }
     return `File:${safeArticle} ${index}${ext}`;
 }
 function generateRenamedFilename(originalFilename, suffix) {
@@ -485,7 +494,7 @@ async function forceUploadWithRetry(api, url, filename, comment, article, warnin
                 filename,
                 url,
                 comment,
-                text: `{{Copyright}}{{非链入使用|[[zhmoe:${article}]]}}[[Category:${article}]][[Category:迁移文件]]`,
+                text: `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`,
                 ignorewarnings: true,
                 bot: true,
                 tags: 'Bot',
@@ -541,7 +550,7 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
                 filename: currentFilename,
                 url,
                 comment,
-                text: `{{Copyright}}{{非链入使用|[[zhmoe:${article}]]}}[[Category:${article}]][[Category:迁移文件]]`,
+                text: `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`,
                 ignorewarnings: false,
                 bot: true,
                 tags: 'Bot',
@@ -693,20 +702,96 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
         error: errorMessage || '未知错误',
     };
 }
-function buildImageTemplateNode(filename, attributes, refNode) {
-    const imgName = filename.replace(/^File:/i, '');
-    // 构建{{#img:文件名|参数=值|...}}格式的字符串
-    let imgParserTag = `{{#img:{{filepath:${imgName}}}`;
-    // 添加其他属性作为参数（排除src属性）
-    for (const [key, value] of Object.entries(attributes)) {
-        if (key !== 'src') {
-            imgParserTag += `|${key}=${value}`;
+function canMapStyleToWiki(style) {
+    if (!style)
+        return true;
+    const mappableProps = ['float', 'vertical-align', 'width', 'height'];
+    const props = style.split(';').map(s => s.trim()).filter(Boolean);
+    for (const prop of props) {
+        const [name] = prop.split(':').map(s => s.trim().toLowerCase());
+        if (name && !mappableProps.includes(name)) {
+            return false;
         }
     }
-    imgParserTag += '}}';
-    // 解析并返回节点
+    return true;
+}
+function extractSizeFromStyle(style) {
+    const result = {};
+    if (!style)
+        return result;
+    const widthMatch = style.match(/width\s*:\s*(\d+)(?:px)?/i);
+    if (widthMatch) {
+        result.width = parseInt(widthMatch[1], 10);
+    }
+    const heightMatch = style.match(/height\s*:\s*(\d+)(?:px)?/i);
+    if (heightMatch) {
+        result.height = parseInt(heightMatch[1], 10);
+    }
+    return result;
+}
+function buildImgParserFunction(filename, attributes, refNode) {
+    const imgName = filename.replace(/^File:/i, '');
+    let wikitext = `{{#img:{{filepath:${imgName}}}`;
+    for (const [key, value] of Object.entries(attributes)) {
+        if (key !== 'src') {
+            wikitext += `|${key}=${value}`;
+        }
+    }
+    wikitext += '}}';
     const nodeConfig = refNode.getAttribute('config');
-    const root = Parser.parse(imgParserTag, refNode.getAttribute('include'), 7, nodeConfig);
+    const root = Parser.parse(wikitext, refNode.getAttribute('include'), 7, nodeConfig);
+    return root.children[0];
+}
+function buildInternalFileLink(filename, attributes, refNode) {
+    if (!canMapStyleToWiki(attributes.style)) {
+        return buildImgParserFunction(filename, attributes, refNode);
+    }
+    const imgName = filename.replace(/^File:/i, '');
+    const options = [];
+    let caption = '';
+    if (attributes.style) {
+        const style = attributes.style;
+        if (/\bfloat\s*:\s*left\b/i.test(style)) {
+            options.push('left');
+        }
+        else if (/\bfloat\s*:\s*right\b/i.test(style)) {
+            options.push('right');
+        }
+        const vAlignMatch = style.match(/vertical-align\s*:\s*(baseline|sub|super|top|text-top|middle|text-bottom|bottom)/i);
+        if (vAlignMatch) {
+            options.push(vAlignMatch[1].toLowerCase());
+        }
+    }
+    const attrWidth = parseInt(attributes.width, 10);
+    const attrHeight = parseInt(attributes.height, 10);
+    const styleSize = extractSizeFromStyle(attributes.style);
+    const widthVal = attrWidth || styleSize.width;
+    const heightVal = attrHeight || styleSize.height;
+    if (widthVal && heightVal) {
+        options.push(`${widthVal}x${heightVal}px`);
+    }
+    else if (widthVal) {
+        options.push(`${widthVal}px`);
+    }
+    else if (heightVal) {
+        options.push(`x${heightVal}px`);
+    }
+    if (attributes.alt) {
+        options.push(`alt=${attributes.alt}`);
+    }
+    if (attributes.link) {
+        options.push(`link=${attributes.link}`);
+    }
+    if (attributes.title) {
+        caption = attributes.title;
+    }
+    const parts = ['File:' + imgName, ...options];
+    if (caption) {
+        parts.push(caption);
+    }
+    const wikitext = `[[${parts.join('|')}]]`;
+    const nodeConfig = refNode.getAttribute('config');
+    const root = Parser.parse(wikitext, refNode.getAttribute('include'), 7, nodeConfig);
     const parserNode = root.children[0];
     return parserNode;
 }
@@ -715,8 +800,8 @@ function replaceImageNodes(parsed, issues, urlToFilename) {
         const filename = urlToFilename.get(issue.src);
         if (!filename)
             continue;
-        const templateNode = buildImageTemplateNode(filename, issue.attributes, parsed);
-        issue.node.replaceWith(templateNode);
+        const fileNode = buildInternalFileLink(filename, issue.attributes, parsed);
+        issue.node.replaceWith(fileNode);
     }
     return parsed.toString();
 }
@@ -788,10 +873,21 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
     const uniqueSrcs = [...srcToNodes.keys()];
     console.log(`  去重后需上传 ${uniqueSrcs.length} 张图片`);
     const urlToFilename = new Map();
+    const usedFilenames = new Set();
     for (let i = 0; i < uniqueSrcs.length; i++) {
         const src = uniqueSrcs[i];
         const index = i + 1;
-        const filename = generateFilename(src, title, index);
+        const nodes = srcToNodes.get(src);
+        const titleAttr = nodes[0].attributes.title;
+        let filename = generateFilename(src, title, index, titleAttr);
+        if (usedFilenames.has(filename)) {
+            let suffix = 2;
+            while (usedFilenames.has(generateRenamedFilename(filename, suffix))) {
+                suffix++;
+            }
+            filename = generateRenamedFilename(filename, suffix);
+        }
+        usedFilenames.add(filename);
         console.log(`  [${index}/${uniqueSrcs.length}] 上传: ${filename}`);
         console.log(`    来源: ${src}`);
         console.log(`    页面内引用次数: ${srcToNodes.get(src).length}`);
