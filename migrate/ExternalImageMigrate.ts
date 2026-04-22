@@ -382,11 +382,9 @@ async function processPagesInBatches(
 	}
 
 	while (apcontinue !== eol) {
-		const data = await withRetry(async () => {
+		const titlesData = await withRetry(async () => {
 			const { data } = await api.post({
 				action: 'query',
-				prop: 'revisions',
-				rvprop: 'content',
 				generator: 'allpages',
 				gapnamespace: namespace,
 				gaplimit: 500,
@@ -395,19 +393,40 @@ async function processPagesInBatches(
 			return (data as any);
 		});
 
-		const nextApcontinue: string | symbol = (data as any).continue?.gapcontinue ?? eol;
+		const nextApcontinue: string | symbol = titlesData.continue?.gapcontinue ?? eol;
 		batchIndex++;
 		console.log(`\n=== 批次 ${batchIndex} ===`);
 		console.log(`gapcontinue: ${nextApcontinue === eol ? 'END_OF_LIST' : String(nextApcontinue)}`);
 
-		const pages: PageInfo[] = Object.values(data.query.pages)
-			.filter((page: any) => page.revisions?.length)
-			.map((page: any) => ({
-				title: page.title,
-				content: page.revisions[0].content,
-			}));
+		const batchTitles: string[] = Object.values(titlesData.query.pages).map((page: any) => page.title);
+		console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
 
-		console.log(`本批次页面数: ${pages.length}`);
+		const pages: PageInfo[] = [];
+		const CONTENT_BATCH_SIZE = 50;
+
+		for (let i = 0; i < batchTitles.length; i += CONTENT_BATCH_SIZE) {
+			const contentBatch = batchTitles.slice(i, i + CONTENT_BATCH_SIZE);
+			const contentData = await withRetry(async () => {
+				const { data } = await api.post({
+					action: 'query',
+					prop: 'revisions',
+					rvprop: 'content',
+					titles: contentBatch.join('|'),
+				});
+				return (data as any);
+			});
+
+			const batchPages: PageInfo[] = Object.values(contentData.query.pages)
+				.filter((page: any) => page.revisions?.length)
+				.map((page: any) => ({
+					title: page.title,
+					content: page.revisions[0].content,
+				}));
+
+			pages.push(...batchPages);
+		}
+
+		console.log(`本批次有效页面数: ${pages.length}`);
 
 		await processBatch(pages);
 

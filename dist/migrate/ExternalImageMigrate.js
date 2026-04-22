@@ -284,11 +284,9 @@ async function processPagesInBatches(api, namespace, processBatch, initialApcont
         console.log(`\n从断点继续: ${initialApcontinue}`);
     }
     while (apcontinue !== eol) {
-        const data = await withRetry(async () => {
+        const titlesData = await withRetry(async () => {
             const { data } = await api.post({
                 action: 'query',
-                prop: 'revisions',
-                rvprop: 'content',
                 generator: 'allpages',
                 gapnamespace: namespace,
                 gaplimit: 500,
@@ -296,17 +294,34 @@ async function processPagesInBatches(api, namespace, processBatch, initialApcont
             });
             return data;
         });
-        const nextApcontinue = data.continue?.gapcontinue ?? eol;
+        const nextApcontinue = titlesData.continue?.gapcontinue ?? eol;
         batchIndex++;
         console.log(`\n=== 批次 ${batchIndex} ===`);
         console.log(`gapcontinue: ${nextApcontinue === eol ? 'END_OF_LIST' : String(nextApcontinue)}`);
-        const pages = Object.values(data.query.pages)
-            .filter((page) => page.revisions?.length)
-            .map((page) => ({
-            title: page.title,
-            content: page.revisions[0].content,
-        }));
-        console.log(`本批次页面数: ${pages.length}`);
+        const batchTitles = Object.values(titlesData.query.pages).map((page) => page.title);
+        console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
+        const pages = [];
+        const CONTENT_BATCH_SIZE = 50;
+        for (let i = 0; i < batchTitles.length; i += CONTENT_BATCH_SIZE) {
+            const contentBatch = batchTitles.slice(i, i + CONTENT_BATCH_SIZE);
+            const contentData = await withRetry(async () => {
+                const { data } = await api.post({
+                    action: 'query',
+                    prop: 'revisions',
+                    rvprop: 'content',
+                    titles: contentBatch.join('|'),
+                });
+                return data;
+            });
+            const batchPages = Object.values(contentData.query.pages)
+                .filter((page) => page.revisions?.length)
+                .map((page) => ({
+                title: page.title,
+                content: page.revisions[0].content,
+            }));
+            pages.push(...batchPages);
+        }
+        console.log(`本批次有效页面数: ${pages.length}`);
         await processBatch(pages);
         if (nextApcontinue !== eol && typeof nextApcontinue === 'string') {
             saveCheckpoint(namespace, nextApcontinue);

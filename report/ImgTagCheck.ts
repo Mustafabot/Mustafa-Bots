@@ -134,25 +134,50 @@ async function processPagesParallel(
 	})();
 
 	const pages = await (async () => {
-		const result: any[] = [];
+		const allPageTitles: string[] = [];
 		const eol: symbol = Symbol();
 		let apcontinue: string | symbol | undefined = undefined;
+
 		while (apcontinue !== eol) {
 			const { data } = await api.post({
-			action: 'query',
-			prop: 'revisions',
-			rvprop: 'content',
-			generator: 'allpages',
-			gapnamespace: NAMESPACE,
-			gaplimit: 200,
-			gapcontinue: apcontinue as string | undefined,
-		}, {
-			retry: 15,
-		} as any) as any;
+				action: 'query',
+				generator: 'allpages',
+				gapnamespace: NAMESPACE,
+				gaplimit: 500,
+				gapcontinue: apcontinue as string | undefined,
+			}, {
+				retry: 15,
+			} as any) as any;
+
 			apcontinue = data.continue?.gapcontinue ?? eol;
 			console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : String(apcontinue)}`);
-			result.push(...Object.values(data.query.pages).filter((page: any) => page.revisions?.length));
+
+			const batchTitles = Object.values(data.query.pages).map((page: any) => page.title);
+			allPageTitles.push(...batchTitles);
+			console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
 		}
+
+		console.log(`共获取 ${allPageTitles.length} 个页面标题，开始获取页面内容...`);
+
+		const result: any[] = [];
+		const BATCH_SIZE = 50;
+
+		for (let i = 0; i < allPageTitles.length; i += BATCH_SIZE) {
+			const batch = allPageTitles.slice(i, i + BATCH_SIZE);
+			const { data } = await api.post({
+				action: 'query',
+				prop: 'revisions',
+				rvprop: 'content',
+				titles: batch.join('|'),
+			}, {
+				retry: 15,
+			} as any) as any;
+
+			const batchPages = Object.values(data.query.pages).filter((page: any) => page.revisions?.length);
+			result.push(...batchPages);
+			console.log(`获取内容进度: ${Math.min(i + BATCH_SIZE, allPageTitles.length)}/${allPageTitles.length} (本批次 ${batchPages.length} 个有效页面)`);
+		}
+
 		console.log(`Total pages: ${result.length}`);
 		return result;
 	})();
