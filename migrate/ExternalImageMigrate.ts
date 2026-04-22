@@ -9,6 +9,36 @@ import clientlogin from '../clientlogin.js';
 
 Parser.config = 'moegirl';
 
+const MAX_API_RETRIES = 5;
+const API_RETRY_DELAY = 3000;
+
+async function withRetry<T>(
+	fn: () => Promise<T>,
+	options?: { maxRetries?: number; delay?: number }
+): Promise<T> {
+	const { maxRetries = MAX_API_RETRIES, delay = API_RETRY_DELAY } = options ?? {};
+	let lastError: Error | null = null;
+	for (let attempt = 1; attempt <= maxRetries; attempt++) {
+		try {
+			return await fn();
+		} catch (err) {
+			lastError = err instanceof Error ? err : new Error(String(err));
+			const isNetworkError = lastError.message.includes('ECONNRESET') ||
+				lastError.message.includes('BODY_TRANSFORM_ERROR') ||
+				lastError.message.includes('NETWORK_ERROR') ||
+				lastError.message.includes('terminated');
+			if (isNetworkError && attempt < maxRetries) {
+				console.error(`  网络错误 (尝试 ${attempt}/${maxRetries}): ${lastError.message}`);
+				console.log(`  等待 ${delay}ms 后重试...`);
+				await new Promise(resolve => setTimeout(resolve, delay));
+			} else {
+				throw lastError;
+			}
+		}
+	}
+	throw lastError;
+}
+
 interface ImageIssue {
 	src: string;
 	node: any;
@@ -306,16 +336,14 @@ async function detectMimeFromUrl(url: string): Promise<string | null> {
 }
 
 async function fetchWhitelist(api: MediaWikiApi): Promise<RegExp[]> {
-	const { data } = await api.post({
+	const { data } = await withRetry(() => api.post({
 		action: 'query',
 		prop: 'revisions',
 		rvprop: 'content',
 		titles: 'MediaWiki:External_image_whitelist',
-	}, {
-		retry: 15,
-	} as any);
+	}));
 
-	const page = Object.values(data.query.pages)[0] as any;
+	const page = Object.values((data as any).query.pages)[0] as any;
 	if (!page || !page.revisions) {
 		console.error('Failed to get external image whitelist');
 		return [];
@@ -354,17 +382,18 @@ async function processPagesInBatches(
 	}
 
 	while (apcontinue !== eol) {
-		const { data } = await api.post({
-			action: 'query',
-			prop: 'revisions',
-			rvprop: 'content',
-			generator: 'allpages',
-			gapnamespace: namespace,
-			gaplimit: 500,
-			gapcontinue: apcontinue as string | undefined,
-		}, {
-			retry: 15,
-		} as any) as any;
+		const data = await withRetry(async () => {
+			const { data } = await api.post({
+				action: 'query',
+				prop: 'revisions',
+				rvprop: 'content',
+				generator: 'allpages',
+				gapnamespace: namespace,
+				gaplimit: 500,
+				gapcontinue: apcontinue as string | undefined,
+			});
+			return (data as any);
+		});
 
 		const nextApcontinue: string | symbol = (data as any).continue?.gapcontinue ?? eol;
 		batchIndex++;
@@ -928,6 +957,10 @@ function buildInternalFileLink(filename: string, attributes: Record<string, stri
 
 	if (attributes.alt) {
 		options.push(`alt=${attributes.alt}`);
+	}
+
+	if (attributes['class']) {
+		options.push(`class=${attributes['class']}`);
 	}
 
 	if (attributes.link) {

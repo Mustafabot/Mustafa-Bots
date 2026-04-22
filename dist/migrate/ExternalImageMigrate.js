@@ -7,6 +7,33 @@ import { fileURLToPath } from 'url';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 Parser.config = 'moegirl';
+const MAX_API_RETRIES = 5;
+const API_RETRY_DELAY = 3000;
+async function withRetry(fn, options) {
+    const { maxRetries = MAX_API_RETRIES, delay = API_RETRY_DELAY } = options ?? {};
+    let lastError = null;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+        try {
+            return await fn();
+        }
+        catch (err) {
+            lastError = err instanceof Error ? err : new Error(String(err));
+            const isNetworkError = lastError.message.includes('ECONNRESET') ||
+                lastError.message.includes('BODY_TRANSFORM_ERROR') ||
+                lastError.message.includes('NETWORK_ERROR') ||
+                lastError.message.includes('terminated');
+            if (isNetworkError && attempt < maxRetries) {
+                console.error(`  网络错误 (尝试 ${attempt}/${maxRetries}): ${lastError.message}`);
+                console.log(`  等待 ${delay}ms 后重试...`);
+                await new Promise(resolve => setTimeout(resolve, delay));
+            }
+            else {
+                throw lastError;
+            }
+        }
+    }
+    throw lastError;
+}
 const zhApi = new MediaWikiApi(config.zh.api, {
     headers: { cookie: config.zh.cookie },
 });
@@ -221,14 +248,12 @@ async function detectMimeFromUrl(url) {
     return null;
 }
 async function fetchWhitelist(api) {
-    const { data } = await api.post({
+    const { data } = await withRetry(() => api.post({
         action: 'query',
         prop: 'revisions',
         rvprop: 'content',
         titles: 'MediaWiki:External_image_whitelist',
-    }, {
-        retry: 15,
-    });
+    }));
     const page = Object.values(data.query.pages)[0];
     if (!page || !page.revisions) {
         console.error('Failed to get external image whitelist');
@@ -259,16 +284,17 @@ async function processPagesInBatches(api, namespace, processBatch, initialApcont
         console.log(`\n从断点继续: ${initialApcontinue}`);
     }
     while (apcontinue !== eol) {
-        const { data } = await api.post({
-            action: 'query',
-            prop: 'revisions',
-            rvprop: 'content',
-            generator: 'allpages',
-            gapnamespace: namespace,
-            gaplimit: 500,
-            gapcontinue: apcontinue,
-        }, {
-            retry: 15,
+        const data = await withRetry(async () => {
+            const { data } = await api.post({
+                action: 'query',
+                prop: 'revisions',
+                rvprop: 'content',
+                generator: 'allpages',
+                gapnamespace: namespace,
+                gaplimit: 500,
+                gapcontinue: apcontinue,
+            });
+            return data;
         });
         const nextApcontinue = data.continue?.gapcontinue ?? eol;
         batchIndex++;
@@ -778,6 +804,9 @@ function buildInternalFileLink(filename, attributes, refNode) {
     }
     if (attributes.alt) {
         options.push(`alt=${attributes.alt}`);
+    }
+    if (attributes['class']) {
+        options.push(`class=${attributes['class']}`);
     }
     if (attributes.link) {
         options.push(`link=${attributes.link}`);
