@@ -1,7 +1,7 @@
 import { MediaWikiApi } from 'wiki-saikou';
 import Parser from 'wikiparser-node';
 import { URL } from 'url';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import config from '../config.js';
@@ -21,6 +21,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const CHECKPOINT_DIR = resolve(__dirname, '../.checkpoint');
 const CHECKPOINT_FILE = (namespace) => resolve(CHECKPOINT_DIR, `external_image_migrate_${namespace}.json`);
+const TEMP_DIR = resolve(__dirname, '../.temp');
 function saveCheckpoint(namespace, apcontinue) {
     try {
         if (!existsSync(CHECKPOINT_DIR)) {
@@ -66,6 +67,99 @@ function clearCheckpoint(namespace) {
     catch (error) {
         console.error('  清除断点失败:', error);
     }
+}
+function ensureTempDir() {
+    if (!existsSync(TEMP_DIR)) {
+        mkdirSync(TEMP_DIR, { recursive: true });
+    }
+}
+function cleanupTempFile(filePath) {
+    try {
+        if (existsSync(filePath)) {
+            unlinkSync(filePath);
+        }
+    }
+    catch (error) {
+        console.error(`  清理临时文件失败: ${filePath}`, error);
+    }
+}
+function cleanupTempDir() {
+    try {
+        if (existsSync(TEMP_DIR)) {
+            const files = readdirSync(TEMP_DIR);
+            for (const file of files) {
+                const filePath = resolve(TEMP_DIR, file);
+                unlinkSync(filePath);
+            }
+            console.log(`  已清理临时目录: ${TEMP_DIR}`);
+        }
+    }
+    catch (error) {
+        console.error('  清理临时目录失败:', error);
+    }
+}
+async function downloadImage(url, filePath) {
+    const response = await fetch(url);
+    if (!response.ok) {
+        throw new Error(`下载失败: HTTP ${response.status}`);
+    }
+    const buffer = Buffer.from(await response.arrayBuffer());
+    writeFileSync(filePath, buffer);
+    const contentType = response.headers.get('content-type');
+    const mimeType = contentType ? contentType.split(';')[0].trim().toLowerCase() : 'image/png';
+    return mimeType;
+}
+async function uploadFromFile(api, filePath, filename, comment, article, mimeType, dryRun) {
+    if (dryRun) {
+        console.log(`  [试运行] 将从本地上传: ${filename}`);
+        return { filename, url: `file://${filePath}`, success: true, isDryRun: true };
+    }
+    const fileBuffer = readFileSync(filePath);
+    const file = new File([fileBuffer], filename.replace(/^File:/i, ''), { type: mimeType });
+    let lastError = null;
+    for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+            const { data } = await api.postWithToken('csrf', {
+                action: 'upload',
+                filename,
+                file,
+                comment,
+                text: `{{Copyright}}{{非链入使用|[[zhmoe:${article}]]}}[[Category:${article}]][[Category:迁移文件]]`,
+                ignorewarnings: true,
+                bot: true,
+                tags: 'Bot',
+                watchlist: 'nochange',
+            }, {
+                retry: 500,
+                noCache: true,
+            });
+            if (data.upload && data.upload.result === 'Success') {
+                return { filename, url: `file://${filePath}`, success: true };
+            }
+            if (JSON.stringify(data).includes('moderation-image-queued')) {
+                console.log('  文件已进入审核队列');
+                return { filename, url: `file://${filePath}`, success: true };
+            }
+            throw new Error(JSON.stringify(data));
+        }
+        catch (error) {
+            if (error.message && error.message.includes('moderation-image-queued')) {
+                console.log('  文件已进入审核队列');
+                return { filename, url: `file://${filePath}`, success: true };
+            }
+            lastError = error;
+            if (attempt < MAX_RETRIES) {
+                console.log(`  本地上传失败（${error.message}），第${attempt}次重试...`);
+                await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
+            }
+        }
+    }
+    return {
+        filename,
+        url: `file://${filePath}`,
+        success: false,
+        error: lastError?.message || '未知错误',
+    };
 }
 const MIME_TO_EXT = {
     'image/png': '.png',
@@ -171,7 +265,7 @@ async function processPagesInBatches(api, namespace, processBatch, initialApcont
             rvprop: 'content',
             generator: 'allpages',
             gapnamespace: namespace,
-            gaplimit: 500,
+            gaplimit: 100,
             gapcontinue: apcontinue,
         }, {
             retry: 15,
@@ -447,7 +541,7 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
                 filename: currentFilename,
                 url,
                 comment,
-                text: `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`,
+                text: `{{Copyright}}{{非链入使用|[[zhmoe:${article}]]}}[[Category:${article}]][[Category:迁移文件]]`,
                 ignorewarnings: false,
                 bot: true,
                 tags: 'Bot',
@@ -568,11 +662,35 @@ async function uploadFromUrl(api, url, filename, comment, dryRun, article) {
             }
         }
     }
+    const errorMessage = lastError?.message || '';
+    if (errorMessage.includes('http-bad-status')) {
+        console.log('  URL上传失败，尝试本地下载后上传...');
+        ensureTempDir();
+        const sanitizedFilename = currentFilename.replace(/[<>:"/\\|?*]/g, '_');
+        const tempFilePath = resolve(TEMP_DIR, `${Date.now()}_${sanitizedFilename.replace(/^File:/i, '')}`);
+        try {
+            const mimeType = await downloadImage(url, tempFilePath);
+            const uploadResult = await uploadFromFile(api, tempFilePath, currentFilename, comment, article, mimeType, dryRun);
+            return uploadResult;
+        }
+        catch (downloadError) {
+            console.log(`  本地下载上传失败: ${downloadError.message}`);
+            return {
+                filename: currentFilename,
+                url,
+                success: false,
+                error: `URL上传失败且备用渠道失败: ${errorMessage}; 备用渠道: ${downloadError.message}`,
+            };
+        }
+        finally {
+            cleanupTempFile(tempFilePath);
+        }
+    }
     return {
         filename: currentFilename,
         url,
         success: false,
-        error: lastError?.message || '未知错误',
+        error: errorMessage || '未知错误',
     };
 }
 function buildImageTemplateNode(filename, attributes, refNode) {
@@ -741,6 +859,7 @@ function parseArgs(args) {
 }
 async function main() {
     console.log(`Start time: ${new Date().toISOString()}`);
+    cleanupTempDir();
     const args = parseArgs(process.argv.slice(2));
     console.log('正在登录zh站...');
     await clientlogin(zhApi, config.zh.bot.clientUsername, config.zh.bot.clientPassword)
