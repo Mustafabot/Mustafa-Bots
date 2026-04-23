@@ -12,6 +12,7 @@ interface WikiConfig {
 interface Config {
     useragent?: string;
     password?: string;
+    userAgent: string;
     zh: WikiConfig;
     cm: WikiConfig;
 }

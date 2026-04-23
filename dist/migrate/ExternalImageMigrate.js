@@ -126,7 +126,11 @@ function cleanupTempDir() {
     }
 }
 async function downloadImage(url, filePath) {
-    const response = await fetch(url);
+    const response = await fetch(url, {
+        headers: {
+            'User-Agent': config.userAgent,
+        },
+    });
     if (!response.ok) {
         throw new Error(`下载失败: HTTP ${response.status}`);
     }
@@ -236,7 +240,12 @@ function changeFileExtension(filename, newExt) {
 }
 async function detectMimeFromUrl(url) {
     try {
-        const response = await fetch(url, { method: 'HEAD' });
+        const response = await fetch(url, {
+            method: 'HEAD',
+            headers: {
+                'User-Agent': config.userAgent,
+            },
+        });
         const contentType = response.headers.get('content-type');
         if (contentType) {
             return contentType.split(';')[0].trim().toLowerCase();
@@ -760,11 +769,11 @@ function extractSizeFromStyle(style) {
     const result = {};
     if (!style)
         return result;
-    const widthMatch = style.match(/width\s*:\s*(\d+)(?:px)?/i);
+    const widthMatch = style.match(/width\s*:\s*(\d+)(?:px)?(?=\s|;|$)/i);
     if (widthMatch) {
         result.width = parseInt(widthMatch[1], 10);
     }
-    const heightMatch = style.match(/height\s*:\s*(\d+)(?:px)?/i);
+    const heightMatch = style.match(/height\s*:\s*(\d+)(?:px)?(?=\s|;|$)/i);
     if (heightMatch) {
         result.height = parseInt(heightMatch[1], 10);
     }

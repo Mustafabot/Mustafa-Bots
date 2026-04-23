@@ -120,7 +120,11 @@ function cleanupTempDir() {
     }
 }
 async function downloadImage(url, filePath) {
-    const response = await fetch(url);
+    const response = await fetch(url, {
+        headers: {
+            'User-Agent': config.userAgent,
+        },
+    });
     if (!response.ok) {
         throw new Error(`下载失败: HTTP ${response.status}`);
     }

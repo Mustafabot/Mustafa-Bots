@@ -26,14 +26,17 @@ interface WikiConfig {
 interface Config {
 	useragent?: string;
 	password?: string;
+	userAgent: string;
 	zh: WikiConfig;
 	cm: WikiConfig;
 }
+const DEFAULT_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/147.0.0.0 Safari/537.36 Edg/147.0.0.0';
 
 const config: Config = {
 	password: env.MOEGIRL_PASSWORD,
+	userAgent: env.USER_AGENT || DEFAULT_USER_AGENT,
 	zh: {
-		api: 'https://zh.moegirl.org.cn/api.php',
+		api: 'https://mzh.moegirl.org.cn/api.php',
 		cookie: `moegirlSSOToken=${env.MOEGIRL_ZH_SSO_TOKEN},moegirlSSOUserID=${env.MOEGIRL_SSO_USER_ID}`,
 		bot: {
 			name: '机娘穆斯塔法@Kemal-Bot',
