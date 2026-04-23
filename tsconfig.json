@@ -23,7 +23,8 @@
 		"report/**/*.ts",
 		"migrate/**/*.ts",
 		"replace/**/*.ts",
-		"upload/**/*.ts"
+		"upload/**/*.ts",
+		"restore/**/*.ts"
 	],
 	"exclude": [
 		"node_modules",
