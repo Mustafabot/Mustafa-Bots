@@ -5,6 +5,7 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
+import { withApiRetry, checkModerationQueued, checkModerationQueuedError } from '../utils/retry.js';
 
 interface FileConfig {
 	url: string;
@@ -194,10 +195,9 @@ async function uploadFromFile(
 	const fileBuffer = readFileSync(filePath);
 	const file = new File([fileBuffer], filename.replace(/^File:/i, ''), { type: mimeType });
 
-	let lastError: Error | null = null;
-	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-		try {
-			const { data } = await api.postWithToken('csrf', {
+	try {
+		return await withApiRetry(
+			() => api.postWithToken('csrf', {
 				action: 'upload',
 				filename,
 				file,
@@ -210,37 +210,38 @@ async function uploadFromFile(
 			}, {
 				retry: 500,
 				noCache: true,
-			});
+			}),
+			{
+				maxRetries: MAX_RETRIES,
+				baseDelay: 1000,
+				onSuccess: (data) => {
+					if (data.upload && data.upload.result === 'Success') {
+						return { filename, url: `file://${filePath}`, success: true };
+					}
 
-			if ((data as any).upload && (data as any).upload.result === 'Success') {
-				return { filename, url: `file://${filePath}`, success: true };
-			}
+					if (checkModerationQueued(data, '  文件已进入审核队列')) {
+						return { filename, url: `file://${filePath}`, success: true };
+					}
 
-			if (JSON.stringify(data).includes('moderation-image-queued')) {
-				console.log('  文件已进入审核队列');
-				return { filename, url: `file://${filePath}`, success: true };
+					return null;
+				},
+				onError: (error, attempt) => {
+					if (checkModerationQueuedError(error, '  文件已进入审核队列')) {
+						throw error;
+					}
+					console.log(`  本地上传失败（${error.message}），第${attempt}次重试...`);
+				},
+				shouldRetry: () => true
 			}
-
-			throw new Error(JSON.stringify(data));
-		} catch (error: any) {
-			if (error.message && error.message.includes('moderation-image-queued')) {
-				console.log('  文件已进入审核队列');
-				return { filename, url: `file://${filePath}`, success: true };
-			}
-			lastError = error;
-			if (attempt < MAX_RETRIES) {
-				console.log(`  本地上传失败（${error.message}），第${attempt}次重试...`);
-				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-			}
-		}
+		);
+	} catch (error: any) {
+		return {
+			filename,
+			url: `file://${filePath}`,
+			success: false,
+			error: error?.message || '未知错误',
+		};
 	}
-
-	return {
-		filename,
-		url: `file://${filePath}`,
-		success: false,
-		error: lastError?.message || '未知错误',
-	};
 }
 
 async function uploadFromUrl(
@@ -266,10 +267,9 @@ async function uploadFromUrl(
 		};
 	}
 
-	let lastError: Error | null = null;
-	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-		try {
-			const { data } = await api.postWithToken('csrf', {
+	try {
+		const result = await withApiRetry(
+			() => api.postWithToken('csrf', {
 				action: 'upload',
 				filename,
 				url: fileConfig.url,
@@ -282,68 +282,83 @@ async function uploadFromUrl(
 			}, {
 				retry: 500,
 				noCache: true,
-			});
+			}),
+			{
+				maxRetries: MAX_RETRIES,
+				baseDelay: 1000,
+				onSuccess: (data) => {
+					if (data.upload && data.upload.result === 'Success') {
+						if (data.upload.warnings) {
+							console.log('  警告: 文件已存在，已被覆盖');
+						}
+						return {
+							filename,
+							url: fileConfig.url,
+							success: true,
+						};
+					}
 
-			if (data.upload && data.upload.result === 'Success') {
-				if (data.upload.warnings) {
-					console.log('  警告: 文件已存在，已被覆盖');
-				}
-				return {
-					filename,
-					url: fileConfig.url,
-					success: true,
-				};
-			} else {
-				throw new Error(JSON.stringify(data));
-			}
-		} catch (error) {
-			const errMessage = (error as Error).message;
-			if (errMessage && errMessage.includes('moderation-image-queued')) {
-				console.log('  文件已进入审核队列');
-				return {
-					filename,
-					url: fileConfig.url,
-					success: true,
-				};
-			}
-			lastError = error as Error;
-			if (attempt < MAX_RETRIES) {
-				console.log(`  上传失败（${errMessage}），第${attempt}次重试...`);
-				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-			}
-		}
-	}
+					if (checkModerationQueued(data, '  文件已进入审核队列')) {
+						return {
+							filename,
+							url: fileConfig.url,
+							success: true,
+						};
+					}
 
-	const errorMessage = lastError?.message || '';
-	if (errorMessage.includes('http-bad-status')) {
-		console.log('  URL上传失败，尝试本地下载后上传...');
-		ensureTempDir();
-		const sanitizedFilename = filename.replace(/[<>:"/\\|?*]/g, '_');
-		const tempFilePath = resolve(TEMP_DIR, `${Date.now()}_${sanitizedFilename.replace(/^File:/i, '')}`);
+					return null;
+				},
+				onError: (error, attempt) => {
+					if (checkModerationQueuedError(error, '  文件已进入审核队列')) {
+						throw error;
+					}
+					console.log(`  上传失败（${error.message}），第${attempt}次重试...`);
+				},
+				shouldRetry: () => true
+			}
+		);
 
-		try {
-			const mimeType = await downloadImage(fileConfig.url, tempFilePath);
-			const uploadResult = await uploadFromFile(api, tempFilePath, filename, comment, text, mimeType, dryRun);
-			return uploadResult;
-		} catch (downloadError: any) {
-			console.log(`  本地下载上传失败: ${downloadError.message}`);
+		return result;
+	} catch (error: any) {
+		const errorMessage = error?.message || '';
+		if (errorMessage.includes('moderation-image-queued')) {
+			console.log('  文件已进入审核队列');
 			return {
 				filename,
 				url: fileConfig.url,
-				success: false,
-				error: `URL上传失败且备用渠道失败: ${errorMessage}; 备用渠道: ${downloadError.message}`,
+				success: true,
 			};
-		} finally {
-			cleanupTempFile(tempFilePath);
 		}
-	}
+		if (errorMessage.includes('http-bad-status')) {
+			console.log('  URL上传失败，尝试本地下载后上传...');
+			ensureTempDir();
+			const sanitizedFilename = filename.replace(/[<>:"/\\|?*]/g, '_');
+			const tempFilePath = resolve(TEMP_DIR, `${Date.now()}_${sanitizedFilename.replace(/^File:/i, '')}`);
 
-	return {
-		filename,
-		url: fileConfig.url,
-		success: false,
-		error: errorMessage || '未知错误',
-	};
+			try {
+				const mimeType = await downloadImage(fileConfig.url, tempFilePath);
+				const uploadResult = await uploadFromFile(api, tempFilePath, filename, comment, text, mimeType, dryRun);
+				return uploadResult;
+			} catch (downloadError: any) {
+				console.log(`  本地下载上传失败: ${downloadError.message}`);
+				return {
+					filename,
+					url: fileConfig.url,
+					success: false,
+					error: `URL上传失败且备用渠道失败: ${errorMessage}; 备用渠道: ${downloadError.message}`,
+				};
+			} finally {
+				cleanupTempFile(tempFilePath);
+			}
+		}
+
+		return {
+			filename,
+			url: fileConfig.url,
+			success: false,
+			error: errorMessage || '未知错误',
+		};
+	}
 }
 
 async function batchUpload(

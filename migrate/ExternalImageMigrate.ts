@@ -6,6 +6,7 @@ import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
+import { withApiRetry, checkModerationQueued, checkModerationQueuedError, isAbuseFilterError } from '../utils/retry.js';
 
 Parser.config = 'moegirl';
 
@@ -229,10 +230,9 @@ async function uploadFromFile(
 	const fileBuffer = readFileSync(filePath);
 	const file = new File([fileBuffer], filename.replace(/^File:/i, ''), { type: mimeType });
 
-	let lastError: Error | null = null;
-	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-		try {
-			const { data } = await api.postWithToken('csrf', {
+	try {
+		return await withApiRetry(
+			() => api.postWithToken('csrf', {
 				action: 'upload',
 				filename,
 				file,
@@ -245,37 +245,38 @@ async function uploadFromFile(
 			}, {
 				retry: 500,
 				noCache: true,
-			});
+			}),
+			{
+				maxRetries: MAX_RETRIES,
+				baseDelay: 1000,
+				onSuccess: (data) => {
+					if (data.upload && data.upload.result === 'Success') {
+						return { filename, url: `file://${filePath}`, success: true };
+					}
 
-			if ((data as any).upload && (data as any).upload.result === 'Success') {
-				return { filename, url: `file://${filePath}`, success: true };
-			}
+					if (checkModerationQueued(data, '  文件已进入审核队列')) {
+						return { filename, url: `file://${filePath}`, success: true };
+					}
 
-			if (JSON.stringify(data).includes('moderation-image-queued')) {
-				console.log('  文件已进入审核队列');
-				return { filename, url: `file://${filePath}`, success: true };
+					return null;
+				},
+				onError: (error, attempt) => {
+					if (checkModerationQueuedError(error, '  文件已进入审核队列')) {
+						throw error;
+					}
+					console.log(`  本地上传失败（${error.message}），第${attempt}次重试...`);
+				},
+				shouldRetry: () => true
 			}
-
-			throw new Error(JSON.stringify(data));
-		} catch (error: any) {
-			if (error.message && error.message.includes('moderation-image-queued')) {
-				console.log('  文件已进入审核队列');
-				return { filename, url: `file://${filePath}`, success: true };
-			}
-			lastError = error;
-			if (attempt < MAX_RETRIES) {
-				console.log(`  本地上传失败（${error.message}），第${attempt}次重试...`);
-				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-			}
-		}
+		);
+	} catch (error: any) {
+		return {
+			filename,
+			url: `file://${filePath}`,
+			success: false,
+			error: error?.message || '未知错误',
+		};
 	}
-
-	return {
-		filename,
-		url: `file://${filePath}`,
-		success: false,
-		error: lastError?.message || '未知错误',
-	};
 }
 
 const MIME_TO_EXT: Record<string, string> = {
@@ -673,10 +674,10 @@ async function forceUploadWithRetry(
 	warnings: any
 ): Promise<UploadResult> {
 	console.log('  忽略警告，强制上传...');
-	let forceLastError: Error | null = null;
-	for (let forceAttempt = 1; forceAttempt <= FORCE_UPLOAD_RETRIES; forceAttempt++) {
-		try {
-			const { data: forceData } = await api.postWithToken('csrf', {
+
+	try {
+		return await withApiRetry(
+			() => api.postWithToken('csrf', {
 				action: 'upload',
 				filename,
 				url,
@@ -689,37 +690,41 @@ async function forceUploadWithRetry(
 			}, {
 				retry: 500,
 				noCache: true,
-			});
+			}),
+			{
+				maxRetries: FORCE_UPLOAD_RETRIES,
+				baseDelay: 1000,
+				onSuccess: (forceData) => {
+					if (forceData.upload && forceData.upload.result === 'Success') {
+						console.log('  强制上传成功');
+						return { filename, url, success: true, warnings, action: 'ignore' };
+					}
 
-			if ((forceData as any).upload && (forceData as any).upload.result === 'Success') {
-				console.log('  强制上传成功');
-				return { filename, url, success: true, warnings, action: 'ignore' };
+					if (checkModerationQueued(forceData, '  文件已进入审核队列')) {
+						return { filename, url, success: true, warnings, action: 'ignore' };
+					}
+
+					console.log(`  强制上传失败: ${JSON.stringify(forceData)}`);
+					throw new Error(`强制上传失败: ${JSON.stringify(forceData)}`);
+				},
+				onError: (error, attempt) => {
+					if (checkModerationQueuedError(error, '  文件已进入审核队列')) {
+						throw error;
+					}
+					console.log(`  强制上传第${attempt}次重试...`);
+				},
+				shouldRetry: () => true
 			}
-			if (JSON.stringify(forceData).includes('moderation-image-queued')) {
-				console.log('  文件已进入审核队列');
-				return { filename, url, success: true, warnings, action: 'ignore' };
-			}
-			console.log(`  强制上传失败: ${JSON.stringify(forceData)}`);
-			forceLastError = new Error(`强制上传失败: ${JSON.stringify(forceData)}`);
-		} catch (forceError: any) {
-			if (forceError.message && forceError.message.includes('moderation-image-queued')) {
-				console.log('  文件已进入审核队列');
-				return { filename, url, success: true, warnings, action: 'ignore' };
-			}
-			forceLastError = forceError;
-		}
-		if (forceAttempt < FORCE_UPLOAD_RETRIES) {
-			console.log(`  强制上传第${forceAttempt}次重试...`);
-			await new Promise(resolve => setTimeout(resolve, 1000 * forceAttempt));
-		}
+		);
+	} catch (error: any) {
+		return {
+			filename,
+			url,
+			success: false,
+			warnings,
+			error: `强制上传失败: ${error?.message || '未知错误'}`,
+		};
 	}
-	return {
-		filename,
-		url,
-		success: false,
-		warnings,
-		error: `强制上传失败: ${forceLastError?.message || '未知错误'}`,
-	};
 }
 
 async function uploadFromUrl(
@@ -735,10 +740,10 @@ async function uploadFromUrl(
 		return { filename, url, success: true, isDryRun: true };
 	}
 
-	let lastError: Error | null = null;
 	let currentFilename = filename;
 	let renameSuffix = 1;
 	let renameAttempts = 0;
+	let lastError: Error | null = null;
 
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 		try {
@@ -757,15 +762,15 @@ async function uploadFromUrl(
 				noCache: true,
 			});
 
-			if ((data as any).upload && (data as any).upload.result === 'Success') {
-				if ((data as any).upload.warnings) {
+			if (data.upload && data.upload.result === 'Success') {
+				if (data.upload.warnings) {
 					console.log('  警告: 文件已存在，已被覆盖');
 				}
 				return { filename: currentFilename, url, success: true };
 			}
 
-			if ((data as any).upload && (data as any).upload.result === 'Warning' && (data as any).upload.warnings) {
-				const warnings = (data as any).upload.warnings;
+			if (data.upload && data.upload.result === 'Warning' && data.upload.warnings) {
+				const warnings = data.upload.warnings;
 				const decision = parseUploadWarnings(warnings);
 
 				console.log(`  收到警告: ${Object.keys(warnings).join(', ')}`);
@@ -846,8 +851,7 @@ async function uploadFromUrl(
 
 			throw new Error(JSON.stringify(data));
 		} catch (error: any) {
-			if (error.message && error.message.includes('moderation-image-queued')) {
-				console.log('  文件已进入审核队列');
+			if (checkModerationQueuedError(error, '  文件已进入审核队列')) {
 				return { filename: currentFilename, url, success: true };
 			}
 			const mimeMismatch = parseMimeMismatchError(error);
@@ -862,9 +866,8 @@ async function uploadFromUrl(
 				}
 			}
 			lastError = error;
-			const isAbuseFilter = error.message && error.message.toLowerCase().includes('abusefilter');
 			if (attempt < MAX_RETRIES) {
-				if (isAbuseFilter) {
+				if (isAbuseFilterError(error)) {
 					console.log(`  遇到滥用过滤器警告，第${attempt}次重试...`);
 				} else {
 					console.log(`  上传失败（${error.message}），第${attempt}次重试...`);
@@ -1031,39 +1034,36 @@ async function editPage(api: MediaWikiApi, title: string, content: string, summa
 		return;
 	}
 
-	let lastError: Error | null = null;
-	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-		try {
-			await api.postWithToken('csrf', {
-				action: 'edit',
-				title,
-				text: content,
-				summary,
-				bot: true,
-				notminor: true,
-				tags: 'Bot',
-				watchlist: 'nochange',
-			}, {
-				retry: 500,
-				noCache: true,
-			});
-			return;
-		} catch (error: any) {
-			lastError = error;
-			const isAbuseFilter = error.message && error.message.toLowerCase().includes('abusefilter');
-			if (attempt < MAX_RETRIES) {
-				if (isAbuseFilter) {
+	await withApiRetry(
+		() => api.postWithToken('csrf', {
+			action: 'edit',
+			title,
+			text: content,
+			summary,
+			bot: true,
+			notminor: true,
+			tags: 'Bot',
+			watchlist: 'nochange',
+		}, {
+			retry: 500,
+			noCache: true,
+		}),
+		{
+			maxRetries: MAX_RETRIES,
+			baseDelay: 1000,
+			onSuccess: () => {
+				return undefined;
+			},
+			onError: (error, attempt) => {
+				if (isAbuseFilterError(error)) {
 					console.log(`  编辑遇到滥用过滤器警告，第${attempt}次重试...`);
 				} else {
 					console.log(`  编辑失败（${error.message}），第${attempt}次重试...`);
 				}
-				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
-				continue;
-			}
-			throw error;
+			},
+			shouldRetry: () => true
 		}
-	}
-	throw lastError;
+	);
 }
 
 async function processPage(
