@@ -5,7 +5,7 @@
 		"moduleResolution": "NodeNext",
 		"strict": true,
 		"outDir": "dist",
-		"rootDir": ".",
+		"rootDir": "src",
 		"declaration": true,
 		"esModuleInterop": true,
 		"skipLibCheck": true,
@@ -17,14 +17,7 @@
 		"noFallthroughCasesInSwitch": true
 	},
 	"include": [
-		"index.ts",
-		"config.ts",
-		"clientlogin.ts",
-		"report/**/*.ts",
-		"migrate/**/*.ts",
-		"replace/**/*.ts",
-		"upload/**/*.ts",
-		"restore/**/*.ts"
+		"src/**/*.ts"
 	],
 	"exclude": [
 		"node_modules",
