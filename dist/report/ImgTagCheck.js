@@ -176,18 +176,18 @@ async function processPagesParallel(pages, whitelistRegexes, concurrency, proces
                 const batchTitles = Object.values(data.query.pages).map((page) => page.title);
                 titles.push(...batchTitles);
                 console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
+                await saveCheckpoint({
+                    stage: 'titles',
+                    pageTitles: titles,
+                    pagesWithContent: [],
+                    processedTitles: [],
+                    issues: [],
+                });
+                console.log(`Checkpoint saved: ${titles.length} page titles collected`);
             }
             console.log(`共获取 ${titles.length} 个页面标题`);
             return titles;
         })();
-        await saveCheckpoint({
-            stage: 'titles',
-            pageTitles: allPageTitles,
-            pagesWithContent: [],
-            processedTitles: [],
-            issues: [],
-        });
-        console.log('Checkpoint saved after getting page titles');
     }
     if (!checkpoint || checkpoint.stage === 'titles') {
         console.log(`开始获取页面内容...`);
@@ -206,17 +206,17 @@ async function processPagesParallel(pages, whitelistRegexes, concurrency, proces
             const batchPages = Object.values(data.query.pages).filter((page) => page.revisions?.length);
             result.push(...batchPages);
             console.log(`获取内容进度: ${Math.min(i + BATCH_SIZE, allPageTitles.length)}/${allPageTitles.length} (本批次 ${batchPages.length} 个有效页面)`);
+            pages = result;
+            await saveCheckpoint({
+                stage: 'contents',
+                pageTitles: allPageTitles,
+                pagesWithContent: pages,
+                processedTitles: [],
+                issues: [],
+            });
+            console.log(`Checkpoint saved: ${pages.length} page contents fetched`);
         }
-        pages = result;
         console.log(`Total pages: ${result.length}`);
-        await saveCheckpoint({
-            stage: 'contents',
-            pageTitles: allPageTitles,
-            pagesWithContent: pages,
-            processedTitles: [],
-            issues: [],
-        });
-        console.log('Checkpoint saved after getting page contents');
     }
     const allProcessedTitles = [...processedTitlesSet];
     const accumulatedIssues = [...existingIssues];
