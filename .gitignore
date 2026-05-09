@@ -9,3 +9,4 @@ node_modules/
 dist/report/*.txt
 AGENTS.md
 dist/.checkpoint/
+dist/.temp/

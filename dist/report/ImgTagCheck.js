@@ -3,6 +3,25 @@ import Parser from 'wikiparser-node';
 import { writeFile } from 'fs/promises';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
+import templateImageConfig from '../templateImageConfig.json' with { type: 'json' };
+const CHECKPOINT_INTERVAL = 100;
+function getCheckpointPath() {
+    return new URL(`./Ns${NAMESPACE}_checkpoint.json`, import.meta.url);
+}
+async function loadCheckpoint() {
+    try {
+        const path = getCheckpointPath();
+        const content = await import('fs/promises').then(fs => fs.readFile(path, 'utf-8'));
+        return JSON.parse(content);
+    }
+    catch {
+        return null;
+    }
+}
+async function saveCheckpoint(data) {
+    const path = getCheckpointPath();
+    await import('fs/promises').then(fs => fs.writeFile(path, JSON.stringify(data, null, 2), 'utf-8'));
+}
 Parser.config = 'moegirl';
 const NAMESPACE = '0';
 const CONCURRENCY = 10;
@@ -35,31 +54,59 @@ function processPage(title, content, whitelistRegexes) {
             });
         }
     }
+    for (const templateConfig of templateImageConfig) {
+        const templateNodes = parsed.querySelectorAll(`template#${templateConfig.templateName}`);
+        for (const templateNode of templateNodes) {
+            const imageValue = templateNode.getValue?.(templateConfig.externalImageParam)?.toString();
+            if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelistRegexes)) {
+                issues.push({
+                    title,
+                    message: `${templateConfig.templateName}模板${templateConfig.externalImageParam}参数不符合外部图像白名单`,
+                    line: 0,
+                    col: 0,
+                    src: imageValue.trim(),
+                });
+            }
+        }
+    }
     return issues;
 }
-async function processPagesParallel(pages, whitelistRegexes, concurrency) {
+async function processPagesParallel(pages, whitelistRegexes, concurrency, processedTitles, onCheckpoint) {
     const allIssues = [];
+    const newProcessedTitles = [];
     const queue = [...pages];
-    const total = pages.length;
-    let processed = 0;
+    const total = pages.length + processedTitles.size;
+    let processed = processedTitles.size;
     const startTime = Date.now();
+    let lastCheckpointCount = processed;
     async function worker() {
         while (queue.length > 0) {
             const page = queue.shift();
             if (!page)
                 break;
             const { title, revisions: [{ content }] } = page;
+            if (processedTitles.has(title)) {
+                continue;
+            }
             const issues = processPage(title, content, whitelistRegexes);
             allIssues.push(...issues);
+            newProcessedTitles.push(title);
             processed++;
             const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
             const percent = ((processed / total) * 100).toFixed(1);
             const remaining = queue.length;
             console.log(`[${processed}/${total}] ${percent}% | ${remaining} remaining | ${elapsed}s elapsed | ${title}`);
+            if (processed - lastCheckpointCount >= CHECKPOINT_INTERVAL) {
+                onCheckpoint(processed, allIssues, newProcessedTitles);
+                lastCheckpointCount = processed;
+            }
         }
     }
     const workers = Array.from({ length: Math.min(concurrency, pages.length) }, () => worker());
     await Promise.all(workers);
+    if (newProcessedTitles.length > 0) {
+        onCheckpoint(processed, allIssues, newProcessedTitles);
+    }
     return allIssues;
 }
 (async () => {
@@ -97,27 +144,53 @@ async function processPagesParallel(pages, whitelistRegexes, concurrency) {
         console.log(`Loaded ${regexes.length} whitelist regexes`);
         return regexes;
     })();
-    const pages = await (async () => {
-        const allPageTitles = [];
-        const eol = Symbol();
-        let apcontinue = undefined;
-        while (apcontinue !== eol) {
-            const { data } = await api.post({
-                action: 'query',
-                generator: 'allpages',
-                gapnamespace: NAMESPACE,
-                gaplimit: 500,
-                gapcontinue: apcontinue,
-            }, {
-                retry: 15,
-            });
-            apcontinue = data.continue?.gapcontinue ?? eol;
-            console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : String(apcontinue)}`);
-            const batchTitles = Object.values(data.query.pages).map((page) => page.title);
-            allPageTitles.push(...batchTitles);
-            console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
-        }
-        console.log(`共获取 ${allPageTitles.length} 个页面标题，开始获取页面内容...`);
+    const checkpoint = await loadCheckpoint();
+    let allPageTitles = [];
+    let pages = [];
+    let existingIssues = [];
+    let processedTitlesSet = new Set();
+    if (checkpoint) {
+        console.log(`Found checkpoint at stage: ${checkpoint.stage}`);
+        allPageTitles = checkpoint.pageTitles || [];
+        pages = checkpoint.pagesWithContent || [];
+        existingIssues = checkpoint.issues || [];
+        processedTitlesSet = new Set(checkpoint.processedTitles || []);
+    }
+    if (!checkpoint || checkpoint.stage === undefined) {
+        allPageTitles = await (async () => {
+            const titles = [];
+            const eol = Symbol();
+            let apcontinue = undefined;
+            while (apcontinue !== eol) {
+                const { data } = await api.post({
+                    action: 'query',
+                    generator: 'allpages',
+                    gapnamespace: NAMESPACE,
+                    gaplimit: 500,
+                    gapcontinue: apcontinue,
+                }, {
+                    retry: 15,
+                });
+                apcontinue = data.continue?.gapcontinue ?? eol;
+                console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : String(apcontinue)}`);
+                const batchTitles = Object.values(data.query.pages).map((page) => page.title);
+                titles.push(...batchTitles);
+                console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
+            }
+            console.log(`共获取 ${titles.length} 个页面标题`);
+            return titles;
+        })();
+        await saveCheckpoint({
+            stage: 'titles',
+            pageTitles: allPageTitles,
+            pagesWithContent: [],
+            processedTitles: [],
+            issues: [],
+        });
+        console.log('Checkpoint saved after getting page titles');
+    }
+    if (!checkpoint || checkpoint.stage === 'titles') {
+        console.log(`开始获取页面内容...`);
         const result = [];
         const BATCH_SIZE = 50;
         for (let i = 0; i < allPageTitles.length; i += BATCH_SIZE) {
@@ -134,11 +207,44 @@ async function processPagesParallel(pages, whitelistRegexes, concurrency) {
             result.push(...batchPages);
             console.log(`获取内容进度: ${Math.min(i + BATCH_SIZE, allPageTitles.length)}/${allPageTitles.length} (本批次 ${batchPages.length} 个有效页面)`);
         }
+        pages = result;
         console.log(`Total pages: ${result.length}`);
-        return result;
-    })();
+        await saveCheckpoint({
+            stage: 'contents',
+            pageTitles: allPageTitles,
+            pagesWithContent: pages,
+            processedTitles: [],
+            issues: [],
+        });
+        console.log('Checkpoint saved after getting page contents');
+    }
+    const allProcessedTitles = [...processedTitlesSet];
+    const accumulatedIssues = [...existingIssues];
+    async function handleCheckpoint(processedCount, newIssues, newProcessed) {
+        for (const title of newProcessed) {
+            if (!processedTitlesSet.has(title)) {
+                processedTitlesSet.add(title);
+                allProcessedTitles.push(title);
+            }
+        }
+        for (const issue of newIssues) {
+            const exists = accumulatedIssues.some(i => i.title === issue.title && i.src === issue.src);
+            if (!exists) {
+                accumulatedIssues.push(issue);
+            }
+        }
+        await saveCheckpoint({
+            stage: 'process',
+            pageTitles: allPageTitles,
+            pagesWithContent: pages,
+            processedTitles: allProcessedTitles,
+            issues: accumulatedIssues,
+        });
+        console.log(`Checkpoint saved: ${processedCount} pages processed, ${accumulatedIssues.length} issues found`);
+    }
     console.log(`Starting parallel processing with concurrency: ${CONCURRENCY}`);
-    const issues = await processPagesParallel(pages, whitelistRegexes, CONCURRENCY);
+    const newIssues = await processPagesParallel(pages, whitelistRegexes, CONCURRENCY, processedTitlesSet, handleCheckpoint);
+    const issues = [...existingIssues, ...newIssues];
     console.log(`Found ${issues.length} issues`);
     const reportContent = generateReport(issues, pages.length);
     const localReportPath = new URL(`./Ns${NAMESPACE}ImgTagCheck_report.txt`, import.meta.url);

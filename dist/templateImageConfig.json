@@ -1,0 +1,26 @@
+[
+    {
+        "templateName": "Template:Producer Music",
+        "externalImageParam": "image",
+        "internalImageParam": "图像",
+        "articleParams": ["条目"]
+    },
+    {
+        "templateName": "Template:Producer Song",
+        "externalImageParam": "image",
+        "internalImageParam": "图像",
+        "articleParams": ["条目"]
+    },
+    {
+        "templateName": "Template:Temple Song",
+        "externalImageParam": "image link",
+        "internalImageParam": "image",
+        "articleParams": ["条目", "條目", "曲目"]
+    },
+    {
+        "templateName": "Template:Temple Producer Song",
+        "externalImageParam": "image",
+        "internalImageParam": "图像",
+        "articleParams": ["条目", "條目"]
+    }
+]

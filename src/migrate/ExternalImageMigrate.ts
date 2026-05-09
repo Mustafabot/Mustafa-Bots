@@ -7,6 +7,7 @@ import { fileURLToPath } from 'url';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError, isAbuseFilterError } from '../utils/retry.js';
+import templateImageConfig from '../templateImageConfig.json' with { type: 'json' };
 
 Parser.config = 'moegirl';
 
@@ -44,6 +45,14 @@ interface ImageIssue {
 	src: string;
 	node: any;
 	attributes: Record<string, string>;
+}
+
+interface TemplateImageIssue {
+	src: string;
+	templateNode: any;
+	externalImageParam: string;
+	internalImageParam: string;
+	articleName?: string;
 }
 
 interface UploadResult {
@@ -640,6 +649,37 @@ function extractExternalImages(content: string, title: string, whitelist: RegExp
 	return { parsed, issues };
 }
 
+function extractTemplateImageParams(
+	parsed: any,
+	whitelist: RegExp[],
+): TemplateImageIssue[] {
+	const issues: TemplateImageIssue[] = [];
+	for (const templateConfig of templateImageConfig) {
+		const templates = parsed.querySelectorAll(`template#${templateConfig.templateName}`) as any[];
+		for (const templateNode of templates) {
+			const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
+			if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
+				let articleName: string | undefined;
+				for (const param of templateConfig.articleParams) {
+					const val = templateNode.getValue?.(param);
+					if (val && val.trim()) {
+						articleName = val.trim();
+						break;
+					}
+				}
+				issues.push({
+					src: imageValue.trim(),
+					templateNode,
+					externalImageParam: templateConfig.externalImageParam,
+					internalImageParam: templateConfig.internalImageParam,
+					articleName,
+				});
+			}
+		}
+	}
+	return issues;
+}
+
 interface MimeMismatchError {
 	isMimeMismatch: boolean;
 	detectedMime?: string;
@@ -1028,6 +1068,19 @@ function replaceImageNodes(parsed: any, issues: ImageIssue[], urlToFilename: Map
 	return parsed.toString();
 }
 
+function replaceTemplateImageParams(
+	templateIssues: TemplateImageIssue[],
+	urlToFilename: Map<string, string>,
+): void {
+	for (const issue of templateIssues) {
+		const filename = urlToFilename.get(issue.src);
+		if (!filename) continue;
+		const bareName = filename.replace(/^File:/i, '');
+		issue.templateNode.removeArg(issue.externalImageParam);
+		issue.templateNode.setValue(issue.internalImageParam, bareName);
+	}
+}
+
 async function editPage(api: MediaWikiApi, title: string, content: string, summary: string, dryRun: boolean): Promise<void> {
 	if (dryRun) {
 		console.log(`  [试运行] 将编辑页面: ${title}`);
@@ -1085,14 +1138,15 @@ async function processPage(
 	console.log(`处理页面: ${title}`);
 
 	const { parsed, issues } = extractExternalImages(content, title, whitelist);
-	result.imagesFound = issues.length;
+	const templateIssues = extractTemplateImageParams(parsed, whitelist);
+	result.imagesFound = issues.length + templateIssues.length;
 
-	if (issues.length === 0) {
+	if (issues.length === 0 && templateIssues.length === 0) {
 		console.log('  无外部图片需要处理');
 		return result;
 	}
 
-	console.log(`  发现 ${issues.length} 个外部图片标签`);
+	console.log(`  发现 ${issues.length} 个外部图片标签、${templateIssues.length} 个模板外部图片参数`);
 
 	const srcToNodes = new Map<string, ImageIssue[]>();
 	for (const issue of issues) {
@@ -1102,7 +1156,19 @@ async function processPage(
 		srcToNodes.get(issue.src)!.push(issue);
 	}
 
-	const uniqueSrcs = [...srcToNodes.keys()];
+	const srcToTemplateNodes = new Map<string, TemplateImageIssue[]>();
+	const srcToArticleName = new Map<string, string>();
+	for (const issue of templateIssues) {
+		if (!srcToTemplateNodes.has(issue.src)) {
+			srcToTemplateNodes.set(issue.src, []);
+		}
+		srcToTemplateNodes.get(issue.src)!.push(issue);
+		if (issue.articleName && !srcToArticleName.has(issue.src)) {
+			srcToArticleName.set(issue.src, issue.articleName);
+		}
+	}
+
+	const uniqueSrcs = [...new Set([...srcToNodes.keys(), ...srcToTemplateNodes.keys()])];
 	console.log(`  去重后需上传 ${uniqueSrcs.length} 张图片`);
 
 	const urlToFilename = new Map<string, string>();
@@ -1111,9 +1177,10 @@ async function processPage(
 	for (let i = 0; i < uniqueSrcs.length; i++) {
 		const src = uniqueSrcs[i];
 		const index = i + 1;
-		const nodes = srcToNodes.get(src)!;
-		const titleAttr = nodes[0].attributes.title;
-		let filename = generateFilename(src, title, index, titleAttr);
+		const nodes = srcToNodes.get(src);
+		const titleAttr = nodes?.[0]?.attributes.title;
+		const effectiveArticle = srcToArticleName.get(src) ?? title;
+		let filename = generateFilename(src, effectiveArticle, index, titleAttr);
 
 		if (usedFilenames.has(filename)) {
 			let suffix = 2;
@@ -1124,9 +1191,13 @@ async function processPage(
 		}
 		usedFilenames.add(filename);
 
+		const imgRefCount = nodes?.length ?? 0;
+		const templateRefCount = srcToTemplateNodes.get(src)?.length ?? 0;
+		const totalRefs = imgRefCount + templateRefCount;
+
 		console.log(`  [${index}/${uniqueSrcs.length}] 上传: ${filename}`);
 		console.log(`    来源: ${src}`);
-		console.log(`    页面内引用次数: ${srcToNodes.get(src)!.length}`);
+		console.log(`    页面内引用次数: ${totalRefs}`);
 
 		const uploadResult = await uploadFromUrl(
 			uploadApi,
@@ -1156,12 +1227,14 @@ async function processPage(
 	}
 
 	if (urlToFilename.size > 0) {
-		console.log(`  替换页面中的 ${issues.length} 个图片标签...`);
+		const totalReplacements = issues.length + templateIssues.length;
+		console.log(`  替换页面中的 ${totalReplacements} 个图片引用...`);
+		replaceTemplateImageParams(templateIssues, urlToFilename);
 		const newContent = replaceImageNodes(parsed, issues, urlToFilename);
 
 		try {
-			await editPage(editApi, title, newContent, DEFAULT_COMMENT + `（${issues.length}个）`, dryRun);
-			result.imagesReplaced = issues.length;
+			await editPage(editApi, title, newContent, DEFAULT_COMMENT + `（${totalReplacements}个）`, dryRun);
+			result.imagesReplaced = totalReplacements;
 			console.log('  页面编辑成功');
 		} catch (error: any) {
 			console.error(`  页面编辑失败: ${error.message}`);
