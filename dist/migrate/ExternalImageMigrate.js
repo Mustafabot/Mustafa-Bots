@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError, isAbuseFilterError } from '../utils/retry.js';
-import templateImageConfig from '../templateImageConfig.json' with { type: 'json' };
+import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
 Parser.config = 'moegirl';
 const MAX_API_RETRIES = 5;
 const API_RETRY_DELAY = 3000;
@@ -48,9 +48,9 @@ const FORCE_UPLOAD_RETRIES = 3;
 const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const CHECKPOINT_DIR = resolve(__dirname, '../.checkpoint');
+const CHECKPOINT_DIR = resolve(__dirname, '../../data/checkpoint');
 const CHECKPOINT_FILE = (namespace) => resolve(CHECKPOINT_DIR, `external_image_migrate_${namespace}.json`);
-const TEMP_DIR = resolve(__dirname, '../.temp');
+const TEMP_DIR = resolve(__dirname, '../../temp');
 function saveCheckpoint(namespace, apcontinue) {
     try {
         if (!existsSync(CHECKPOINT_DIR)) {
@@ -372,7 +372,10 @@ function generateFilename(url, article, index, titleAttr) {
             return `File:${safeArticle} ${safeTitle}${ext}`;
         }
     }
-    return `File:${safeArticle} ${index}${ext}`;
+    if (index > 0) {
+        return `File:${safeArticle} ${index}${ext}`;
+    }
+    return `File:${safeArticle}${ext}`;
 }
 function generateRenamedFilename(originalFilename, suffix) {
     const match = originalFilename.match(/^(File:)(.+)(\.[a-zA-Z0-9]+)$/);
@@ -521,7 +524,31 @@ function extractTemplateImageParams(parsed, whitelist) {
         const templates = parsed.querySelectorAll(`template#${templateConfig.templateName}`);
         for (const templateNode of templates) {
             const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
+            let src;
             if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
+                src = imageValue.trim();
+            }
+            else if (!imageValue?.trim() && templateConfig.fallback) {
+                const fb = templateConfig.fallback;
+                const fbValues = {};
+                let allPresent = true;
+                for (const p of fb.params) {
+                    const val = templateNode.getValue?.(p);
+                    if (!val || !val.trim()) {
+                        allPresent = false;
+                        break;
+                    }
+                    fbValues[p] = val.trim();
+                }
+                if (allPresent) {
+                    let fallbackUrl = fb.urlTemplate;
+                    for (const [key, val] of Object.entries(fbValues)) {
+                        fallbackUrl = fallbackUrl.replace(new RegExp(`\\{${key}\\}`, 'g'), val);
+                    }
+                    src = fallbackUrl;
+                }
+            }
+            if (src) {
                 let articleName;
                 for (const param of templateConfig.articleParams) {
                     const val = templateNode.getValue?.(param);
@@ -531,7 +558,7 @@ function extractTemplateImageParams(parsed, whitelist) {
                     }
                 }
                 issues.push({
-                    src: imageValue.trim(),
+                    src,
                     templateNode,
                     externalImageParam: templateConfig.externalImageParam,
                     internalImageParam: templateConfig.internalImageParam,
@@ -971,9 +998,10 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
         const src = uniqueSrcs[i];
         const index = i + 1;
         const nodes = srcToNodes.get(src);
+        const isTemplateOnly = !nodes && srcToTemplateNodes.has(src);
         const titleAttr = nodes?.[0]?.attributes.title;
         const effectiveArticle = srcToArticleName.get(src) ?? title;
-        let filename = generateFilename(src, effectiveArticle, index, titleAttr);
+        let filename = generateFilename(src, effectiveArticle, isTemplateOnly ? 0 : index, titleAttr);
         if (usedFilenames.has(filename)) {
             let suffix = 2;
             while (usedFilenames.has(generateRenamedFilename(filename, suffix))) {

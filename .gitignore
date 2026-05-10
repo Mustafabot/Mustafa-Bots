@@ -11,3 +11,4 @@ dist/report/*_checkpoint.json
 AGENTS.md
 dist/.checkpoint/
 dist/.temp/
+data/

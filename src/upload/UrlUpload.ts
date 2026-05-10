@@ -50,7 +50,7 @@ const CONFIG_PAGE = 'User:没有羽翼的格雷塔/BotConfig/UrlUpload.json';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const TEMP_DIR = resolve(__dirname, '../.temp');
+const TEMP_DIR = resolve(__dirname, '../../temp');
 
 async function fetchJsonConfig(api: MediaWikiApi, pageTitle: string): Promise<UploadConfig> {
 	const { data } = await api.post({

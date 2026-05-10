@@ -7,7 +7,7 @@ import { fileURLToPath } from 'url';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError, isAbuseFilterError } from '../utils/retry.js';
-import templateImageConfig from '../templateImageConfig.json' with { type: 'json' };
+import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
 
 Parser.config = 'moegirl';
 
@@ -119,9 +119,9 @@ const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const CHECKPOINT_DIR = resolve(__dirname, '../.checkpoint');
+const CHECKPOINT_DIR = resolve(__dirname, '../../data/checkpoint');
 const CHECKPOINT_FILE = (namespace: string) => resolve(CHECKPOINT_DIR, `external_image_migrate_${namespace}.json`);
-const TEMP_DIR = resolve(__dirname, '../.temp');
+const TEMP_DIR = resolve(__dirname, '../../temp');
 
 interface CheckpointData {
 	namespace: string;
@@ -491,7 +491,10 @@ function generateFilename(url: string, article: string, index: number, titleAttr
 			return `File:${safeArticle} ${safeTitle}${ext}`;
 		}
 	}
-	return `File:${safeArticle} ${index}${ext}`;
+	if (index > 0) {
+		return `File:${safeArticle} ${index}${ext}`;
+	}
+	return `File:${safeArticle}${ext}`;
 }
 
 function generateRenamedFilename(originalFilename: string, suffix: number): string {
@@ -658,7 +661,32 @@ function extractTemplateImageParams(
 		const templates = parsed.querySelectorAll(`template#${templateConfig.templateName}`) as any[];
 		for (const templateNode of templates) {
 			const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
+			let src: string | undefined;
+
 			if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
+				src = imageValue.trim();
+			} else if (!imageValue?.trim() && (templateConfig as any).fallback) {
+				const fb = (templateConfig as any).fallback;
+				const fbValues: Record<string, string> = {};
+				let allPresent = true;
+				for (const p of fb.params as string[]) {
+					const val = templateNode.getValue?.(p);
+					if (!val || !val.trim()) {
+						allPresent = false;
+						break;
+					}
+					fbValues[p] = val.trim();
+				}
+				if (allPresent) {
+					let fallbackUrl: string = fb.urlTemplate;
+					for (const [key, val] of Object.entries(fbValues)) {
+						fallbackUrl = fallbackUrl.replace(new RegExp(`\\{${key}\\}`, 'g'), val);
+					}
+					src = fallbackUrl;
+				}
+			}
+
+			if (src) {
 				let articleName: string | undefined;
 				for (const param of templateConfig.articleParams) {
 					const val = templateNode.getValue?.(param);
@@ -668,7 +696,7 @@ function extractTemplateImageParams(
 					}
 				}
 				issues.push({
-					src: imageValue.trim(),
+					src,
 					templateNode,
 					externalImageParam: templateConfig.externalImageParam,
 					internalImageParam: templateConfig.internalImageParam,
@@ -1178,9 +1206,10 @@ async function processPage(
 		const src = uniqueSrcs[i];
 		const index = i + 1;
 		const nodes = srcToNodes.get(src);
+		const isTemplateOnly = !nodes && srcToTemplateNodes.has(src);
 		const titleAttr = nodes?.[0]?.attributes.title;
 		const effectiveArticle = srcToArticleName.get(src) ?? title;
-		let filename = generateFilename(src, effectiveArticle, index, titleAttr);
+		let filename = generateFilename(src, effectiveArticle, isTemplateOnly ? 0 : index, titleAttr);
 
 		if (usedFilenames.has(filename)) {
 			let suffix = 2;

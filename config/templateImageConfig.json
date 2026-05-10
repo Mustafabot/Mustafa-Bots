@@ -22,5 +22,21 @@
         "externalImageParam": "image",
         "internalImageParam": "图像",
         "articleParams": ["条目", "條目"]
+    },
+    {
+        "templateName": "Template:VOCALOID & UTAU Ranking/bricks",
+        "externalImageParam": "image link",
+        "internalImageParam": "image",
+        "articleParams": ["条目", "曲名"],
+        "fallback": {
+            "urlTemplate": "https://nicovideo.cdn.nimg.jp/thumbnails/{id}/{id}.M",
+            "params": ["id"]
+        }
+    },
+    {
+        "templateName": "Template:虚拟歌手外语排行榜/bricks",
+        "externalImageParam": "image link",
+        "internalImageParam": "image",
+        "articleParams": ["条目", "曲名"]
     }
 ]

@@ -1,9 +1,9 @@
 import { MediaWikiApi } from 'wiki-saikou';
 import Parser from 'wikiparser-node';
-import { writeFile } from 'fs/promises';
+import { mkdir, unlink, writeFile } from 'fs/promises';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
-import templateImageConfig from '../templateImageConfig.json' with { type: 'json' };
+import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
 
 interface Issue {
 	title: string;
@@ -14,18 +14,16 @@ interface Issue {
 }
 
 interface CheckpointData {
-	stage: 'titles' | 'contents' | 'process';
+	stage: 'titles' | 'process';
 	pageTitles: string[];
-	pagesWithContent: Array<{ title: string; revisions: Array<{ content: string }> }>;
+	gapContinue: string | undefined;
 	processedTitles: string[];
 	issues: Issue[];
 }
 
-const CHECKPOINT_INTERVAL = 100;
-
 
 function getCheckpointPath(): URL {
-	return new URL(`./Ns${NAMESPACE}_checkpoint.json`, import.meta.url);
+	return new URL(`../../data/checkpoint/Ns${NAMESPACE}_checkpoint.json`, import.meta.url);
 }
 
 async function loadCheckpoint(): Promise<CheckpointData | null> {
@@ -40,12 +38,12 @@ async function loadCheckpoint(): Promise<CheckpointData | null> {
 
 async function saveCheckpoint(data: CheckpointData): Promise<void> {
 	const path = getCheckpointPath();
+	await mkdir(new URL('.', path), { recursive: true });
 	await import('fs/promises').then(fs => fs.writeFile(path, JSON.stringify(data, null, 2), 'utf-8'));
 }
 
 Parser.config = 'moegirl';
 const NAMESPACE = '0';
-const CONCURRENCY = 10;
 const api = new MediaWikiApi(config.zh.api, {
 	headers: { cookie: config.zh.cookie! },
 });
@@ -103,61 +101,6 @@ function processPage(
 	return issues;
 }
 
-async function processPagesParallel(
-	pages: Array<{ title: string; revisions: Array<{ content: string }> }>,
-	whitelistRegexes: RegExp[],
-	concurrency: number,
-	processedTitles: Set<string>,
-	onCheckpoint: (processedCount: number, newIssues: Issue[], newProcessedTitles: string[]) => void,
-): Promise<Issue[]> {
-	const allIssues: Issue[] = [];
-	const newProcessedTitles: string[] = [];
-	const queue = [...pages];
-	const total = pages.length + processedTitles.size;
-	let processed = processedTitles.size;
-	const startTime = Date.now();
-	let lastCheckpointCount = processed;
-
-	async function worker(): Promise<void> {
-		while (queue.length > 0) {
-			const page = queue.shift();
-			if (!page) break;
-
-			const { title, revisions: [{ content }] } = page;
-			if (processedTitles.has(title)) {
-				continue;
-			}
-
-			const issues = processPage(title, content, whitelistRegexes);
-			allIssues.push(...issues);
-			newProcessedTitles.push(title);
-
-			processed++;
-			const elapsed = ((Date.now() - startTime) / 1000).toFixed(1);
-			const percent = ((processed / total) * 100).toFixed(1);
-			const remaining = queue.length;
-			console.log(`[${processed}/${total}] ${percent}% | ${remaining} remaining | ${elapsed}s elapsed | ${title}`);
-
-			if (processed - lastCheckpointCount >= CHECKPOINT_INTERVAL) {
-				onCheckpoint(processed, allIssues, newProcessedTitles);
-				lastCheckpointCount = processed;
-			}
-		}
-	}
-
-	const workers = Array.from({ length: Math.min(concurrency, pages.length) }, () =>
-		worker(),
-	);
-
-	await Promise.all(workers);
-
-	if (newProcessedTitles.length > 0) {
-		onCheckpoint(processed, allIssues, newProcessedTitles);
-	}
-
-	return allIssues;
-}
-
 (async () => {
 	console.log(`Start time: ${new Date().toISOString()}`);
 
@@ -200,65 +143,72 @@ async function processPagesParallel(
 
 	const checkpoint = await loadCheckpoint();
 	let allPageTitles: string[] = [];
-	let pages: Array<{ title: string; revisions: Array<{ content: string }> }> = [];
 	let existingIssues: Issue[] = [];
 	let processedTitlesSet: Set<string> = new Set();
 
 	if (checkpoint) {
 		console.log(`Found checkpoint at stage: ${checkpoint.stage}`);
 		allPageTitles = checkpoint.pageTitles || [];
-		pages = checkpoint.pagesWithContent || [];
 		existingIssues = checkpoint.issues || [];
 		processedTitlesSet = new Set(checkpoint.processedTitles || []);
 	}
 
-	if (!checkpoint || checkpoint.stage === undefined) {
-		allPageTitles = await (async () => {
-			const titles: string[] = [];
-			const eol: symbol = Symbol();
-			let apcontinue: string | symbol | undefined = undefined;
+	if (!checkpoint || checkpoint.stage === 'titles') {
+		allPageTitles = [...(checkpoint?.pageTitles ?? [])];
+		const eol: symbol = Symbol();
+		let apcontinue: string | symbol | undefined = checkpoint?.gapContinue !== undefined ? checkpoint.gapContinue : undefined;
 
-			while (apcontinue !== eol) {
-				const { data } = await api.post({
-					action: 'query',
-					generator: 'allpages',
-					gapnamespace: NAMESPACE,
-					gaplimit: 500,
-					gapcontinue: apcontinue as string | undefined,
-				}, {
-					retry: 15,
-				} as any) as any;
+		while (apcontinue !== eol) {
+			const { data } = await api.post({
+				action: 'query',
+				generator: 'allpages',
+				gapnamespace: NAMESPACE,
+				gaplimit: 500,
+				gapcontinue: apcontinue as string | undefined,
+			}, {
+				retry: 15,
+			} as any) as any;
 
-				apcontinue = data.continue?.gapcontinue ?? eol;
-				console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : String(apcontinue)}`);
+			apcontinue = data.continue?.gapcontinue ?? eol;
+			console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : String(apcontinue)}`);
 
-				const batchTitles = Object.values(data.query.pages).map((page: any) => page.title);
-				titles.push(...batchTitles);
-				console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
+			const batchTitles = Object.values(data.query.pages).map((page: any) => page.title);
+			allPageTitles.push(...batchTitles);
+			console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
 
-				await saveCheckpoint({
-					stage: 'titles',
-					pageTitles: titles,
-					pagesWithContent: [],
-					processedTitles: [],
-					issues: [],
-				});
-				console.log(`Checkpoint saved: ${titles.length} page titles collected`);
-			}
+			await saveCheckpoint({
+				stage: 'titles',
+				pageTitles: allPageTitles,
+				gapContinue: apcontinue === eol ? undefined : apcontinue as string,
+				processedTitles: [],
+				issues: [],
+			});
+		}
 
-			console.log(`共获取 ${titles.length} 个页面标题`);
-			return titles;
-		})();
+		console.log(`共获取 ${allPageTitles.length} 个页面标题`);
+
+		await saveCheckpoint({
+			stage: 'titles',
+			pageTitles: allPageTitles,
+			gapContinue: undefined,
+			processedTitles: [],
+			issues: [],
+		});
+		console.log('Checkpoint saved after getting all page titles');
 	}
 
-	if (!checkpoint || checkpoint.stage === 'titles') {
-		console.log(`开始获取页面内容...`);
+	const accumulatedIssues: Issue[] = [...existingIssues];
 
-		const result: Array<{ title: string; revisions: Array<{ content: string }> }> = [];
+	if (!checkpoint || checkpoint.stage === 'titles' || (checkpoint.stage as string) === 'contents' || checkpoint.stage === 'process') {
+		console.log(`开始逐批获取内容并检查...`);
+
 		const BATCH_SIZE = 50;
+		const startIndex = checkpoint?.processedTitles?.length ?? 0;
+		const allProcessedTitles: string[] = [...processedTitlesSet];
 
-		for (let i = 0; i < allPageTitles.length; i += BATCH_SIZE) {
+		for (let i = startIndex; i < allPageTitles.length; i += BATCH_SIZE) {
 			const batch = allPageTitles.slice(i, i + BATCH_SIZE);
+
 			const { data } = await api.post({
 				action: 'query',
 				prop: 'revisions',
@@ -268,72 +218,53 @@ async function processPagesParallel(
 				retry: 15,
 			} as any) as any;
 
-			const batchPages = Object.values(data.query.pages).filter((page: any) => page.revisions?.length) as Array<{ title: string; revisions: Array<{ content: string }> }>;
-			result.push(...batchPages);
-			console.log(`获取内容进度: ${Math.min(i + BATCH_SIZE, allPageTitles.length)}/${allPageTitles.length} (本批次 ${batchPages.length} 个有效页面)`);
+			const batchPages = Object.values(data.query.pages)
+				.filter((page: any) => page.revisions?.length) as Array<{ title: string; revisions: Array<{ content: string }> }>;
 
-			pages = result;
-			await saveCheckpoint({
-				stage: 'contents',
-				pageTitles: allPageTitles,
-				pagesWithContent: pages,
-				processedTitles: [],
-				issues: [],
-			});
-			console.log(`Checkpoint saved: ${pages.length} page contents fetched`);
-		}
+			for (const page of batchPages) {
+				const { title, revisions: [{ content }] } = page;
 
-		console.log(`Total pages: ${result.length}`);
-	}
+				if (processedTitlesSet.has(title)) {
+					continue;
+				}
 
-	const allProcessedTitles: string[] = [...processedTitlesSet];
-	const accumulatedIssues: Issue[] = [...existingIssues];
+				const pageIssues = processPage(title, content, whitelistRegexes);
+				for (const issue of pageIssues) {
+					const exists = accumulatedIssues.some(
+						exist => exist.title === issue.title && exist.src === issue.src,
+					);
+					if (!exists) {
+						accumulatedIssues.push(issue);
+					}
+				}
 
-	async function handleCheckpoint(
-		processedCount: number,
-		newIssues: Issue[],
-		newProcessed: string[],
-	): Promise<void> {
-		for (const title of newProcessed) {
-			if (!processedTitlesSet.has(title)) {
 				processedTitlesSet.add(title);
 				allProcessedTitles.push(title);
 			}
+
+			const progress = Math.min(i + BATCH_SIZE, allPageTitles.length);
+			console.log(`处理进度: ${progress}/${allPageTitles.length} (本批次 ${batchPages.length} 个有效页面, 累计 ${accumulatedIssues.length} 个问题)`);
+
+			await saveCheckpoint({
+				stage: 'process',
+				pageTitles: allPageTitles,
+				gapContinue: undefined,
+				processedTitles: allProcessedTitles,
+				issues: accumulatedIssues,
+			});
 		}
-		for (const issue of newIssues) {
-			const exists = accumulatedIssues.some(
-				i => i.title === issue.title && i.src === issue.src,
-			);
-			if (!exists) {
-				accumulatedIssues.push(issue);
-			}
-		}
-		await saveCheckpoint({
-			stage: 'process',
-			pageTitles: allPageTitles,
-			pagesWithContent: pages,
-			processedTitles: allProcessedTitles,
-			issues: accumulatedIssues,
-		});
-		console.log(`Checkpoint saved: ${processedCount} pages processed, ${accumulatedIssues.length} issues found`);
+
+		console.log(`全部页面检查完成，共发现 ${accumulatedIssues.length} 个问题`);
 	}
 
-	console.log(`Starting parallel processing with concurrency: ${CONCURRENCY}`);
-	const newIssues = await processPagesParallel(
-		pages,
-		whitelistRegexes,
-		CONCURRENCY,
-		processedTitlesSet,
-		handleCheckpoint,
-	);
-
-	const issues = [...existingIssues, ...newIssues];
+	const issues = accumulatedIssues;
 
 	console.log(`Found ${issues.length} issues`);
 
-	const reportContent: string = generateReport(issues, pages.length);
+	const reportContent: string = generateReport(issues, allPageTitles.length);
 
-	const localReportPath = new URL(`./Ns${NAMESPACE}ImgTagCheck_report.txt`, import.meta.url);
+	const localReportPath = new URL(`../../data/reports/Ns${NAMESPACE}ImgTagCheck_report.txt`, import.meta.url);
+	await mkdir(new URL('.', localReportPath), { recursive: true });
 	await writeFile(localReportPath, reportContent, 'utf-8');
 	console.log(`Report saved to local file: ${localReportPath}`);
 
@@ -344,7 +275,7 @@ async function processPagesParallel(
 		const start = batchIndex * BATCH_SIZE;
 		const end = Math.min(start + BATCH_SIZE, issues.length);
 		const batchIssues = issues.slice(start, end);
-		const batchReportContent = generateBatchReport(batchIssues, pages.length, batchIndex, totalBatches);
+		const batchReportContent = generateBatchReport(batchIssues, allPageTitles.length, batchIndex, totalBatches);
 
 		const batchTitle = `${REPORT_TITLE}/${batchIndex + 1}`;
 
@@ -363,6 +294,16 @@ async function processPagesParallel(
 			retry: 500,
 			noCache: true,
 		}).then(({ data }) => console.log(JSON.stringify(data)));
+	}
+
+	const checkpointPath = getCheckpointPath();
+	try {
+		await unlink(checkpointPath);
+		console.log(`Checkpoint file deleted: ${checkpointPath.pathname}`);
+	} catch (err: any) {
+		if (err.code !== 'ENOENT') {
+			console.error(`Failed to delete checkpoint file: ${err.message}`);
+		}
 	}
 
 	console.log(`End time: ${new Date().toISOString()}`);

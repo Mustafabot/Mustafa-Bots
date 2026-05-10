@@ -17,7 +17,7 @@ const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
 const CONFIG_PAGE = 'User:没有羽翼的格雷塔/BotConfig/UrlUpload.json';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const TEMP_DIR = resolve(__dirname, '../.temp');
+const TEMP_DIR = resolve(__dirname, '../../temp');
 async function fetchJsonConfig(api, pageTitle) {
     const { data } = await api.post({
         action: 'query',
