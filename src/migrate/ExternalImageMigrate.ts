@@ -652,6 +652,20 @@ function extractExternalImages(content: string, title: string, whitelist: RegExp
 	return { parsed, issues };
 }
 
+function extractLinkTarget(wikitext: string): string | null {
+	const parsed = Parser.parse(wikitext, false, 7);
+	const links = parsed.querySelectorAll('link') as any[];
+	if (links.length > 0) {
+		const linkTarget: string | { title?: string } = links[0].link;
+		const targetStr = typeof linkTarget === 'string' ? linkTarget : String(linkTarget);
+		const cleaned = targetStr.split('#')[0].trim();
+		if (cleaned) {
+			return cleaned;
+		}
+	}
+	return null;
+}
+
 function extractTemplateImageParams(
 	parsed: any,
 	whitelist: RegExp[],
@@ -691,7 +705,9 @@ function extractTemplateImageParams(
 				for (const param of templateConfig.articleParams) {
 					const val = templateNode.getValue?.(param);
 					if (val && val.trim()) {
-						articleName = val.trim();
+						const rawValue = val.trim();
+						const linkTarget = extractLinkTarget(rawValue);
+						articleName = linkTarget ?? rawValue;
 						break;
 					}
 				}

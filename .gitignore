@@ -12,3 +12,5 @@ AGENTS.md
 dist/.checkpoint/
 dist/.temp/
 data/
+CLAUDE.md
+.claude/
