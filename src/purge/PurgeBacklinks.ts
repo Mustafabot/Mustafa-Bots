@@ -243,19 +243,6 @@ async function nulleditPages(
 				return;
 			}
 
-			const { data: queryData } = await api.post({
-				action: 'query',
-				prop: 'revisions',
-				rvprop: 'content',
-				titles: title,
-				format: 'json',
-			});
-
-			const pgs = Object.values(queryData.query.pages) as Array<{
-				revisions?: Array<{ content: string }>;
-			}>;
-			const content = pgs[0]?.revisions?.[0]?.content ?? '';
-
 			await api.postWithEditToken({
 				action: 'edit',
 				title,

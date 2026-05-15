@@ -4,6 +4,7 @@ import { mkdir, unlink, writeFile } from 'fs/promises';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
+import { buildTemplateNameMap } from '../utils/templateRedirects.js';
 function getCheckpointPath() {
     return new URL(`../../data/checkpoint/Ns${NAMESPACE}_checkpoint.json`, import.meta.url);
 }
@@ -37,7 +38,7 @@ function isWhitelisted(src, whitelistRegexes) {
     }
     return false;
 }
-function processPage(title, content, whitelistRegexes) {
+function processPage(title, content, whitelistRegexes, templateNameMap) {
     const issues = [];
     const parsed = Parser.parse(content, title);
     const imgNodes = parsed.querySelectorAll('ext#img');
@@ -53,19 +54,21 @@ function processPage(title, content, whitelistRegexes) {
             });
         }
     }
-    for (const templateConfig of templateImageConfig) {
-        const templateNodes = parsed.querySelectorAll(`template#${templateConfig.templateName}`);
-        for (const templateNode of templateNodes) {
-            const imageValue = templateNode.getValue?.(templateConfig.externalImageParam)?.toString();
-            if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelistRegexes)) {
-                issues.push({
-                    title,
-                    message: `${templateConfig.templateName}模板${templateConfig.externalImageParam}参数不符合外部图像白名单`,
-                    line: 0,
-                    col: 0,
-                    src: imageValue.trim(),
-                });
-            }
+    const allTemplateNodes = parsed.querySelectorAll('template');
+    for (const templateNode of allTemplateNodes) {
+        const name = templateNode.name;
+        const templateConfig = name ? templateNameMap.get(name) : undefined;
+        if (!templateConfig)
+            continue;
+        const imageValue = templateNode.getValue?.(templateConfig.externalImageParam)?.toString();
+        if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelistRegexes)) {
+            issues.push({
+                title,
+                message: `${templateConfig.templateName}模板${templateConfig.externalImageParam}参数不符合外部图像白名单`,
+                line: 0,
+                col: 0,
+                src: imageValue.trim(),
+            });
         }
     }
     return issues;
@@ -105,6 +108,7 @@ function processPage(title, content, whitelistRegexes) {
         console.log(`Loaded ${regexes.length} whitelist regexes`);
         return regexes;
     })();
+    const templateNameMap = await buildTemplateNameMap(api, templateImageConfig);
     const checkpoint = await loadCheckpoint();
     let allPageTitles = [];
     let existingIssues = [];
@@ -175,7 +179,7 @@ function processPage(title, content, whitelistRegexes) {
                 if (processedTitlesSet.has(title)) {
                     continue;
                 }
-                const pageIssues = processPage(title, content, whitelistRegexes);
+                const pageIssues = processPage(title, content, whitelistRegexes, templateNameMap);
                 for (const issue of pageIssues) {
                     const exists = accumulatedIssues.some(exist => exist.title === issue.title && exist.src === issue.src);
                     if (!exists) {
@@ -261,13 +265,13 @@ function generateReport(issues, totalPages) {
 
 {| class="wikitable sortable"
 ! 页面 !! 问题描述 !! 行号 !! 列号 !! src属性
-|- 
+|-
 `;
         for (const issue of issues) {
             const pageLink = `[[${issue.title}]]`;
             const src = issue.src || '';
             report += `| ${pageLink} || ${issue.message} || ${issue.line} || ${issue.col} || ${src}
-|- 
+|-
 `;
         }
         report += `|}
@@ -301,13 +305,13 @@ function generateBatchReport(batchIssues, totalPages, batchIndex, totalBatches) 
 
 {| class="wikitable sortable"
 ! 页面 !! 问题描述 !! 行号 !! 列号 !! src属性
-|- 
+|-
 `;
         for (const issue of batchIssues) {
             const pageLink = `[[${issue.title}]]`;
             const src = issue.src || '';
             report += `| ${pageLink} || ${issue.message} || ${issue.line} || ${issue.col} || ${src}
-|- 
+|-
 `;
         }
         report += `|}

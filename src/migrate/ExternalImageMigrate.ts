@@ -8,6 +8,7 @@ import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError, isAbuseFilterError } from '../utils/retry.js';
 import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
+import { buildTemplateNameMap } from '../utils/templateRedirects.js';
 
 Parser.config = 'moegirl';
 
@@ -669,56 +670,59 @@ function extractLinkTarget(wikitext: string): string | null {
 function extractTemplateImageParams(
 	parsed: any,
 	whitelist: RegExp[],
+	templateNameMap: Map<string, typeof templateImageConfig[number]>,
 ): TemplateImageIssue[] {
 	const issues: TemplateImageIssue[] = [];
-	for (const templateConfig of templateImageConfig) {
-		const templates = parsed.querySelectorAll(`template#${templateConfig.templateName}`) as any[];
-		for (const templateNode of templates) {
-			const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
-			let src: string | undefined;
+	const allTemplateNodes = parsed.querySelectorAll('template') as any[];
+	for (const templateNode of allTemplateNodes) {
+		const name: string | undefined = templateNode.name;
+		const templateConfig = name ? templateNameMap.get(name) : undefined;
+		if (!templateConfig) continue;
 
-			if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
-				src = imageValue.trim();
-			} else if (!imageValue?.trim() && (templateConfig as any).fallback) {
-				const fb = (templateConfig as any).fallback;
-				const fbValues: Record<string, string> = {};
-				let allPresent = true;
-				for (const p of fb.params as string[]) {
-					const val = templateNode.getValue?.(p);
-					if (!val || !val.trim()) {
-						allPresent = false;
-						break;
-					}
-					fbValues[p] = val.trim();
+		const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
+		let src: string | undefined;
+
+		if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
+			src = imageValue.trim();
+		} else if (!imageValue?.trim() && (templateConfig as any).fallback) {
+			const fb = (templateConfig as any).fallback;
+			const fbValues: Record<string, string> = {};
+			let allPresent = true;
+			for (const p of fb.params as string[]) {
+				const val = templateNode.getValue?.(p);
+				if (!val || !val.trim()) {
+					allPresent = false;
+					break;
 				}
-				if (allPresent) {
-					let fallbackUrl: string = fb.urlTemplate;
-					for (const [key, val] of Object.entries(fbValues)) {
-						fallbackUrl = fallbackUrl.replace(new RegExp(`\\{${key}\\}`, 'g'), val);
-					}
-					src = fallbackUrl;
+				fbValues[p] = val.trim();
+			}
+			if (allPresent) {
+				let fallbackUrl: string = fb.urlTemplate;
+				for (const [key, val] of Object.entries(fbValues)) {
+					fallbackUrl = fallbackUrl.replace(new RegExp(`\\{${key}\\}`, 'g'), val);
+				}
+				src = fallbackUrl;
+			}
+		}
+
+		if (src) {
+			let articleName: string | undefined;
+			for (const param of templateConfig.articleParams) {
+				const val = templateNode.getValue?.(param);
+				if (val && val.trim()) {
+					const rawValue = val.trim();
+					const linkTarget = extractLinkTarget(rawValue);
+					articleName = linkTarget ?? rawValue;
+					break;
 				}
 			}
-
-			if (src) {
-				let articleName: string | undefined;
-				for (const param of templateConfig.articleParams) {
-					const val = templateNode.getValue?.(param);
-					if (val && val.trim()) {
-						const rawValue = val.trim();
-						const linkTarget = extractLinkTarget(rawValue);
-						articleName = linkTarget ?? rawValue;
-						break;
-					}
-				}
-				issues.push({
-					src,
-					templateNode,
-					externalImageParam: templateConfig.externalImageParam,
-					internalImageParam: templateConfig.internalImageParam,
-					articleName,
-				});
-			}
+			issues.push({
+				src,
+				templateNode,
+				externalImageParam: templateConfig.externalImageParam,
+				internalImageParam: templateConfig.internalImageParam,
+				articleName,
+			});
 		}
 	}
 	return issues;
@@ -1168,7 +1172,8 @@ async function processPage(
 	editApi: MediaWikiApi,
 	page: PageInfo,
 	whitelist: RegExp[],
-	dryRun: boolean
+	dryRun: boolean,
+	templateNameMap: Map<string, typeof templateImageConfig[number]>,
 ): Promise<PageProcessResult> {
 	const { title, content } = page;
 	const result: PageProcessResult = {
@@ -1182,7 +1187,7 @@ async function processPage(
 	console.log(`处理页面: ${title}`);
 
 	const { parsed, issues } = extractExternalImages(content, title, whitelist);
-	const templateIssues = extractTemplateImageParams(parsed, whitelist);
+	const templateIssues = extractTemplateImageParams(parsed, whitelist, templateNameMap);
 	result.imagesFound = issues.length + templateIssues.length;
 
 	if (issues.length === 0 && templateIssues.length === 0) {
@@ -1335,6 +1340,8 @@ async function main(): Promise<void> {
 	console.log('\n正在读取外部图片白名单...');
 	const whitelist = await fetchWhitelist(zhApi);
 
+	const templateNameMap = await buildTemplateNameMap(zhApi, templateImageConfig);
+
 	if (args.dryRun) {
 		console.log('\n[试运行模式] 不会实际上传和编辑');
 	}
@@ -1359,7 +1366,7 @@ async function main(): Promise<void> {
 		stats.totalPages += pages.length;
 
 		for (const page of pages) {
-			const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun);
+			const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun, templateNameMap);
 
 			stats.totalFound += result.imagesFound;
 			stats.totalUploaded += result.imagesUploaded;

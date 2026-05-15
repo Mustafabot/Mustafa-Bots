@@ -158,15 +158,6 @@ async function nulleditPages(api, pages, dryRun, verbose, concurrency) {
             console.log(`[DRY-RUN] 将零编辑: ${title}`);
             return;
         }
-        const { data: queryData } = await api.post({
-            action: 'query',
-            prop: 'revisions',
-            rvprop: 'content',
-            titles: title,
-            format: 'json',
-        });
-        const pgs = Object.values(queryData.query.pages);
-        const content = pgs[0]?.revisions?.[0]?.content ?? '';
         await api.postWithEditToken({
             action: 'edit',
             title,

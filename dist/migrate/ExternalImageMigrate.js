@@ -8,6 +8,7 @@ import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError, isAbuseFilterError } from '../utils/retry.js';
 import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
+import { buildTemplateNameMap } from '../utils/templateRedirects.js';
 Parser.config = 'moegirl';
 const MAX_API_RETRIES = 5;
 const API_RETRY_DELAY = 3000;
@@ -531,55 +532,57 @@ function extractLinkTarget(wikitext) {
     }
     return null;
 }
-function extractTemplateImageParams(parsed, whitelist) {
+function extractTemplateImageParams(parsed, whitelist, templateNameMap) {
     const issues = [];
-    for (const templateConfig of templateImageConfig) {
-        const templates = parsed.querySelectorAll(`template#${templateConfig.templateName}`);
-        for (const templateNode of templates) {
-            const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
-            let src;
-            if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
-                src = imageValue.trim();
-            }
-            else if (!imageValue?.trim() && templateConfig.fallback) {
-                const fb = templateConfig.fallback;
-                const fbValues = {};
-                let allPresent = true;
-                for (const p of fb.params) {
-                    const val = templateNode.getValue?.(p);
-                    if (!val || !val.trim()) {
-                        allPresent = false;
-                        break;
-                    }
-                    fbValues[p] = val.trim();
+    const allTemplateNodes = parsed.querySelectorAll('template');
+    for (const templateNode of allTemplateNodes) {
+        const name = templateNode.name;
+        const templateConfig = name ? templateNameMap.get(name) : undefined;
+        if (!templateConfig)
+            continue;
+        const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
+        let src;
+        if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
+            src = imageValue.trim();
+        }
+        else if (!imageValue?.trim() && templateConfig.fallback) {
+            const fb = templateConfig.fallback;
+            const fbValues = {};
+            let allPresent = true;
+            for (const p of fb.params) {
+                const val = templateNode.getValue?.(p);
+                if (!val || !val.trim()) {
+                    allPresent = false;
+                    break;
                 }
-                if (allPresent) {
-                    let fallbackUrl = fb.urlTemplate;
-                    for (const [key, val] of Object.entries(fbValues)) {
-                        fallbackUrl = fallbackUrl.replace(new RegExp(`\\{${key}\\}`, 'g'), val);
-                    }
-                    src = fallbackUrl;
+                fbValues[p] = val.trim();
+            }
+            if (allPresent) {
+                let fallbackUrl = fb.urlTemplate;
+                for (const [key, val] of Object.entries(fbValues)) {
+                    fallbackUrl = fallbackUrl.replace(new RegExp(`\\{${key}\\}`, 'g'), val);
+                }
+                src = fallbackUrl;
+            }
+        }
+        if (src) {
+            let articleName;
+            for (const param of templateConfig.articleParams) {
+                const val = templateNode.getValue?.(param);
+                if (val && val.trim()) {
+                    const rawValue = val.trim();
+                    const linkTarget = extractLinkTarget(rawValue);
+                    articleName = linkTarget ?? rawValue;
+                    break;
                 }
             }
-            if (src) {
-                let articleName;
-                for (const param of templateConfig.articleParams) {
-                    const val = templateNode.getValue?.(param);
-                    if (val && val.trim()) {
-                        const rawValue = val.trim();
-                        const linkTarget = extractLinkTarget(rawValue);
-                        articleName = linkTarget ?? rawValue;
-                        break;
-                    }
-                }
-                issues.push({
-                    src,
-                    templateNode,
-                    externalImageParam: templateConfig.externalImageParam,
-                    internalImageParam: templateConfig.internalImageParam,
-                    articleName,
-                });
-            }
+            issues.push({
+                src,
+                templateNode,
+                externalImageParam: templateConfig.externalImageParam,
+                internalImageParam: templateConfig.internalImageParam,
+                articleName,
+            });
         }
     }
     return issues;
@@ -969,7 +972,7 @@ async function editPage(api, title, content, summary, dryRun) {
         shouldRetry: () => true
     });
 }
-async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
+async function processPage(uploadApi, editApi, page, whitelist, dryRun, templateNameMap) {
     const { title, content } = page;
     const result = {
         title,
@@ -980,7 +983,7 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun) {
     };
     console.log(`处理页面: ${title}`);
     const { parsed, issues } = extractExternalImages(content, title, whitelist);
-    const templateIssues = extractTemplateImageParams(parsed, whitelist);
+    const templateIssues = extractTemplateImageParams(parsed, whitelist, templateNameMap);
     result.imagesFound = issues.length + templateIssues.length;
     if (issues.length === 0 && templateIssues.length === 0) {
         console.log('  无外部图片需要处理');
@@ -1107,6 +1110,7 @@ async function main() {
         .then((result) => { console.log('commons站登录成功', result); });
     console.log('\n正在读取外部图片白名单...');
     const whitelist = await fetchWhitelist(zhApi);
+    const templateNameMap = await buildTemplateNameMap(zhApi, templateImageConfig);
     if (args.dryRun) {
         console.log('\n[试运行模式] 不会实际上传和编辑');
     }
@@ -1125,7 +1129,7 @@ async function main() {
     await processPagesInBatches(zhApi, args.namespace, async (pages) => {
         stats.totalPages += pages.length;
         for (const page of pages) {
-            const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun);
+            const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun, templateNameMap);
             stats.totalFound += result.imagesFound;
             stats.totalUploaded += result.imagesUploaded;
             stats.totalReplaced += result.imagesReplaced;
