@@ -1,4 +1,4 @@
-import { MediaWikiApi } from 'wiki-saikou';
+﻿import { MediaWikiApi } from 'wiki-saikou';
 import Parser from 'wikiparser-node';
 import { URL } from 'url';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
