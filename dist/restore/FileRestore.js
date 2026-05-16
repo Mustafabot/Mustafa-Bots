@@ -63,18 +63,11 @@ async function clearPoemQueue(api, pageTitle) {
         return;
     }
     const content = page.revisions[0].content;
-    const parsed = Parser.parse(content, pageTitle);
-    const poemNodes = parsed.querySelectorAll('ext#poem');
-    if (poemNodes.length === 0) {
+    const newContent = content.replace(/<poem[\s\S]*?<\/poem>/g, '<poem>\n</poem>');
+    if (newContent === content) {
         console.log('  配置页面中无 poem 标签，无需清空');
         return;
     }
-    for (const node of poemNodes) {
-        while (node.firstChild) {
-            node.firstChild.remove();
-        }
-    }
-    const newContent = parsed.toString();
     await api.postWithToken('csrf', {
         action: 'edit',
         title: pageTitle,
