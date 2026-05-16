@@ -70,7 +70,9 @@ async function clearPoemQueue(api, pageTitle) {
         return;
     }
     for (const node of poemNodes) {
-        node.innerText = '';
+        while (node.firstChild) {
+            node.firstChild.remove();
+        }
     }
     const newContent = parsed.toString();
     await api.postWithToken('csrf', {
@@ -123,10 +125,6 @@ async function undeleteFile(api, title, comment) {
                 return { success: true };
             }
             if (data.undelete) {
-                return { success: true };
-            }
-            if (JSON.stringify(data).includes('moderation-move-queued')) {
-                console.log('  还原请求已进入审核队列，视为成功');
                 return { success: true };
             }
             throw new Error(JSON.stringify(data));
