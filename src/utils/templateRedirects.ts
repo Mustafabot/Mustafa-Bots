@@ -37,7 +37,7 @@ export async function buildTemplateNameMap<T extends { templateName: string }>(
 	const map = new Map<string, T>();
 
 	for (const cfg of templateConfigs) {
-		map.set(cfg.templateName, cfg);
+		map.set(cfg.templateName.replace(/_/g, ' '), cfg);
 	}
 
 	const results = await Promise.all(
@@ -49,7 +49,7 @@ export async function buildTemplateNameMap<T extends { templateName: string }>(
 
 	for (const { cfg, aliases } of results) {
 		for (const alias of aliases) {
-			map.set(alias, cfg);
+			map.set(alias.replace(/_/g, ' '), cfg);
 		}
 	}
 
