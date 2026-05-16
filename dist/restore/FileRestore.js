@@ -114,11 +114,11 @@ async function undeleteFile(api, title, comment) {
                 retry: 500,
                 noCache: true,
             });
-            if (data.undelete && data.undelete.file_versions !== undefined) {
-                return { success: true };
-            }
             if (data.undelete) {
                 return { success: true };
+            }
+            if (data.error?.code === 'undelete-no-results') {
+                return { success: false, noResults: true };
             }
             throw new Error(JSON.stringify(data));
         }
@@ -295,12 +295,13 @@ function parseArgs(args) {
 async function main() {
     console.log(`Start time: ${new Date().toISOString()}`);
     const args = parseArgs(process.argv.slice(2));
-    console.log('正在登录zh站...');
-    await clientlogin(zhApi, config.zh.bot.clientUsername, config.zh.bot.clientPassword)
-        .then((result) => { console.log('zh站登录成功', result); });
-    console.log('正在登录commons站...');
-    await clientlogin(cmApi, config.cm.bot.clientUsername, config.cm.bot.clientPassword, config.cm.api)
-        .then((result) => { console.log('commons站登录成功', result); });
+    console.log('正在登录zh站和commons站...');
+    const [zhResult, cmResult] = await Promise.all([
+        clientlogin(zhApi, config.zh.bot.clientUsername, config.zh.bot.clientPassword),
+        clientlogin(cmApi, config.cm.bot.clientUsername, config.cm.bot.clientPassword, config.cm.api),
+    ]);
+    console.log('zh站登录成功', zhResult);
+    console.log('commons站登录成功', cmResult);
     console.log(`\n正在读取配置页面: ${CONFIG_PAGE}`);
     let filenames;
     try {
