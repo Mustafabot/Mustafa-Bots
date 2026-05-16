@@ -172,11 +172,6 @@ async function undeleteFile(
 				return { success: true };
 			}
 
-			if (JSON.stringify(data).includes('moderation-move-queued')) {
-				console.log('  还原请求已进入审核队列，视为成功');
-				return { success: true };
-			}
-
 			throw new Error(JSON.stringify(data));
 		} catch (error: any) {
 			const errMsg = error?.message || String(error);
