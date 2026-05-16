@@ -91,7 +91,7 @@ async function clearPoemQueue(api: MediaWikiApi, pageTitle: string): Promise<voi
 	}
 
 	const content = page.revisions[0].content;
-	const newContent = content.replace(/<poem[\s\S]*?<\/poem>/g, '<poem>\n</poem>');
+	const newContent = "{{用户 允许他人编辑}}\n需要还原的文件请填入下方<code><nowiki><poem></nowiki></code>标签中，一行一个，带File前缀。填写后请联系[[User talk:没有羽翼的格雷塔|操作者]]手动运行脚本。\n----\n<poem>\n</poem>";
 
 	if (newContent === content) {
 		console.log('  配置页面中无 poem 标签，无需清空');
@@ -141,7 +141,7 @@ async function undeleteFile(
 	api: MediaWikiApi,
 	title: string,
 	comment: string,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; noResults?: boolean }> {
 	let lastError: Error | null = null;
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 		try {
@@ -168,6 +168,9 @@ async function undeleteFile(
 			throw new Error(JSON.stringify(data));
 		} catch (error: any) {
 			const errMsg = error?.message || String(error);
+			if (errMsg.includes('undelete-no-results')) {
+				return { success: false, noResults: true };
+			}
 			lastError = error;
 			if (attempt < MAX_RETRIES) {
 				console.log(`  还原失败（${errMsg}），第${attempt}次重试...`);
@@ -308,8 +311,14 @@ async function processFile(
 	console.log(`  还原文件...`);
 	const undeleteResult = await undeleteFile(api, filename, comment);
 	if (!undeleteResult.success) {
-		console.error(`  还原失败: ${undeleteResult.error}`);
-		result.undeleteError = undeleteResult.error;
+		if (undeleteResult.noResults) {
+			console.log('  没有可还原的版本，跳过');
+			result.skipped = true;
+			result.skipReason = '没有可还原的删除版本';
+		} else {
+			console.error(`  还原失败: ${undeleteResult.error}`);
+			result.undeleteError = undeleteResult.error;
+		}
 		return result;
 	}
 
