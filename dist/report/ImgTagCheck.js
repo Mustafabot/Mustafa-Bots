@@ -57,7 +57,8 @@ function processPage(title, content, whitelistRegexes, templateNameMap) {
     const allTemplateNodes = parsed.querySelectorAll('template');
     for (const templateNode of allTemplateNodes) {
         const name = templateNode.name;
-        const templateConfig = name ? templateNameMap.get(name) : undefined;
+        const normalizedName = name?.replace(/_/g, ' ');
+        const templateConfig = normalizedName ? templateNameMap.get(normalizedName) : undefined;
         if (!templateConfig)
             continue;
         const imageValue = templateNode.getValue?.(templateConfig.externalImageParam)?.toString();

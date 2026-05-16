@@ -87,7 +87,8 @@ function processPage(
 	const allTemplateNodes = parsed.querySelectorAll('template') as any[];
 	for (const templateNode of allTemplateNodes) {
 		const name: string | undefined = templateNode.name;
-		const templateConfig = name ? templateNameMap.get(name) : undefined;
+		const normalizedName = name?.replace(/_/g, ' ');
+		const templateConfig = normalizedName ? templateNameMap.get(normalizedName) : undefined;
 		if (!templateConfig) continue;
 
 		const imageValue: string | undefined = templateNode.getValue?.(templateConfig.externalImageParam)?.toString();
