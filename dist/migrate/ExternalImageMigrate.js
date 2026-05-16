@@ -287,6 +287,8 @@ async function fetchWhitelist(api) {
     console.log(`Loaded ${regexes.length} whitelist regexes`);
     return regexes;
 }
+// MediaWiki legaltitlechars fallback，\\x80-\\xFF 在 JS 中需转为 \\u0080-\\uFFFF 以覆盖 CJK
+const DEFAULT_LEGAL_TITLE_CHARS = ' %!"$&\'()*,\\-./0-9:;=?@A-Z\\\\^_`a-z~\\u0080-\\uFFFF';
 async function fetchLegalTitleRegex(api) {
     const { data } = await withRetry(() => api.post({
         action: 'query',
@@ -294,16 +296,14 @@ async function fetchLegalTitleRegex(api) {
         siprop: 'general',
     }));
     const legaltitlechars = data.query?.general?.legaltitlechars;
-    if (!legaltitlechars) {
-        console.error('无法获取 legaltitlechars，使用默认规则');
-        return /[^ %!"$&'()*,\-./0-9:;=?@A-Z\\^_`a-z~\x80-\xFF]/g;
-    }
+    const raw = legaltitlechars || DEFAULT_LEGAL_TITLE_CHARS;
+    const jsSafe = raw.replace(/\\x80-\\xFF/, '\\u0080-\\uFFFF');
     try {
-        return new RegExp(`[^${legaltitlechars}]`, 'g');
+        return new RegExp(`[^${jsSafe}]`, 'gu');
     }
     catch {
         console.error('legaltitlechars 正则无效，使用默认规则');
-        return /[^ %!"$&'()*,\-./0-9:;=?@A-Z\\^_`a-z~\x80-\xFF]/g;
+        return new RegExp(`[^${DEFAULT_LEGAL_TITLE_CHARS}]`, 'gu');
     }
 }
 async function processPagesInBatches(api, namespace, processBatch, initialApcontinue) {
