@@ -26,13 +26,13 @@ async function fetchRedirectsForTemplate(api, templateName) {
 export async function buildTemplateNameMap(api, templateConfigs) {
     const map = new Map();
     for (const cfg of templateConfigs) {
-        map.set(cfg.templateName, cfg);
+        map.set(cfg.templateName.replace(/_/g, ' '), cfg);
     }
     const results = await Promise.all(templateConfigs.map(cfg => fetchRedirectsForTemplate(api, cfg.templateName)
         .then(aliases => ({ cfg, aliases }))));
     for (const { cfg, aliases } of results) {
         for (const alias of aliases) {
-            map.set(alias, cfg);
+            map.set(alias.replace(/_/g, ' '), cfg);
         }
     }
     return map;
