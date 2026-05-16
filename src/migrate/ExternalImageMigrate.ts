@@ -387,6 +387,27 @@ async function fetchWhitelist(api: MediaWikiApi): Promise<RegExp[]> {
 	return regexes;
 }
 
+async function fetchLegalTitleRegex(api: MediaWikiApi): Promise<RegExp> {
+	const { data } = await withRetry(() => api.post({
+		action: 'query',
+		meta: 'siteinfo',
+		siprop: 'general',
+	}));
+
+	const legaltitlechars: string = (data as any).query?.general?.legaltitlechars;
+	if (!legaltitlechars) {
+		console.error('无法获取 legaltitlechars，使用默认规则');
+		return /[^ %!"$&'()*,\-./0-9:;=?@A-Z\\^_`a-z~\x80-\xFF]/g;
+	}
+
+	try {
+		return new RegExp(`[^${legaltitlechars}]`, 'g');
+	} catch {
+		console.error('legaltitlechars 正则无效，使用默认规则');
+		return /[^ %!"$&'()*,\-./0-9:;=?@A-Z\\^_`a-z~\x80-\xFF]/g;
+	}
+}
+
 async function processPagesInBatches(
 	api: MediaWikiApi,
 	namespace: string,
@@ -422,7 +443,7 @@ async function processPagesInBatches(
 		console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
 
 		const pages: PageInfo[] = [];
-		const CONTENT_BATCH_SIZE = 50;
+		const CONTENT_BATCH_SIZE = 25;
 
 		for (let i = 0; i < batchTitles.length; i += CONTENT_BATCH_SIZE) {
 			const contentBatch = batchTitles.slice(i, i + CONTENT_BATCH_SIZE);
@@ -480,14 +501,21 @@ function extractExtension(url: string): string {
 	}
 }
 
-function generateFilename(url: string, article: string, index: number, titleAttr?: string): string {
+function sanitizeFilenameComponent(raw: string, legalTitleRe: RegExp): string {
+	return raw.replace(legalTitleRe, '').replace(/\s+/g, ' ').trim();
+}
+
+function generateFilename(
+	url: string,
+	article: string,
+	index: number,
+	legalTitleRe: RegExp,
+	titleAttr?: string,
+): string {
 	const ext = extractExtension(url);
-	const safeArticle = article.replace(/\//g, '-');
+	const safeArticle = sanitizeFilenameComponent(article.replace(/\//g, '-'), legalTitleRe);
 	if (titleAttr) {
-		const safeTitle = titleAttr
-			.replace(/[<>:"/\\|?*[\]{}#]/g, '')
-			.replace(/\s+/g, ' ')
-			.trim();
+		const safeTitle = sanitizeFilenameComponent(titleAttr, legalTitleRe);
 		if (safeTitle) {
 			return `File:${safeArticle} ${safeTitle}${ext}`;
 		}
@@ -654,7 +682,8 @@ function extractExternalImages(content: string, title: string, whitelist: RegExp
 }
 
 function extractLinkTarget(wikitext: string): string | null {
-	const parsed = Parser.parse(wikitext, false, 7);
+	const resolved = wikitext.replace(/\{\{!\}\}/g, '|');
+	const parsed = Parser.parse(resolved, false, 7);
 	const links = parsed.querySelectorAll('link') as any[];
 	if (links.length > 0) {
 		const linkTarget: string | { title?: string } = links[0].link;
@@ -662,6 +691,13 @@ function extractLinkTarget(wikitext: string): string | null {
 		const cleaned = targetStr.split('#')[0].trim();
 		if (cleaned) {
 			return cleaned;
+		}
+	}
+	const pipeIndex = resolved.indexOf('|');
+	if (pipeIndex > 0) {
+		const beforePipe = resolved.substring(0, pipeIndex).trim();
+		if (beforePipe) {
+			return beforePipe;
 		}
 	}
 	return null;
@@ -676,7 +712,8 @@ function extractTemplateImageParams(
 	const allTemplateNodes = parsed.querySelectorAll('template') as any[];
 	for (const templateNode of allTemplateNodes) {
 		const name: string | undefined = templateNode.name;
-		const templateConfig = name ? templateNameMap.get(name) : undefined;
+		const normalizedName = name?.replace(/_/g, ' ');
+		const templateConfig = normalizedName ? templateNameMap.get(normalizedName) : undefined;
 		if (!templateConfig) continue;
 
 		const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
@@ -1174,6 +1211,7 @@ async function processPage(
 	whitelist: RegExp[],
 	dryRun: boolean,
 	templateNameMap: Map<string, typeof templateImageConfig[number]>,
+	legalTitleRe: RegExp,
 ): Promise<PageProcessResult> {
 	const { title, content } = page;
 	const result: PageProcessResult = {
@@ -1230,7 +1268,7 @@ async function processPage(
 		const isTemplateOnly = !nodes && srcToTemplateNodes.has(src);
 		const titleAttr = nodes?.[0]?.attributes.title;
 		const effectiveArticle = srcToArticleName.get(src) ?? title;
-		let filename = generateFilename(src, effectiveArticle, isTemplateOnly ? 0 : index, titleAttr);
+		let filename = generateFilename(src, effectiveArticle, isTemplateOnly ? 0 : index, legalTitleRe, titleAttr);
 
 		if (usedFilenames.has(filename)) {
 			let suffix = 2;
@@ -1342,6 +1380,8 @@ async function main(): Promise<void> {
 
 	const templateNameMap = await buildTemplateNameMap(zhApi, templateImageConfig);
 
+	const legalTitleRe = await fetchLegalTitleRegex(zhApi);
+
 	if (args.dryRun) {
 		console.log('\n[试运行模式] 不会实际上传和编辑');
 	}
@@ -1366,7 +1406,7 @@ async function main(): Promise<void> {
 		stats.totalPages += pages.length;
 
 		for (const page of pages) {
-			const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun, templateNameMap);
+			const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun, templateNameMap, legalTitleRe);
 
 			stats.totalFound += result.imagesFound;
 			stats.totalUploaded += result.imagesUploaded;
