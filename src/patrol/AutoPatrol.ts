@@ -9,16 +9,28 @@ interface RecentChange {
 	rcid: number;
 	user: string;
 	tags: string[];
+	title: string;
+	namespace: number;
+	timestamp: string;
 }
+
+type PatrolMode = 'edit' | 'moved' | 'all';
 
 function parseArgs() {
 	const argv = process.argv.slice(2);
+	const modeArg = argv.find((a) => a.startsWith('--mode='))?.split('=')[1] || 'all';
+	const validModes: PatrolMode[] = ['edit', 'moved', 'all'];
+	if (!validModes.includes(modeArg as PatrolMode)) {
+		console.error(`${PREFIX} 无效的 --mode 值: ${modeArg}，有效值: ${validModes.join('|')}`);
+		process.exit(1);
+	}
 	return {
 		dryRun: argv.includes('--dry-run'),
 		verbose: argv.includes('--verbose'),
 		days: parseInt(argv.find((a) => a.startsWith('--days='))?.split('=')[1] || '30', 10),
 		interval: parseInt(argv.find((a) => a.startsWith('--interval='))?.split('=')[1] || '4000', 10),
 		limit: parseInt(argv.find((a) => a.startsWith('--limit='))?.split('=')[1] || '0', 10),
+		mode: modeArg as PatrolMode,
 	};
 }
 
