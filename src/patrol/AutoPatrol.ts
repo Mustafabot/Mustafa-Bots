@@ -203,7 +203,175 @@ async function patrolMovedPhase(
 	privilegedUsers: Set<string>,
 	opts: { dryRun: boolean; verbose: boolean; days: number; interval: number; limit: number },
 ): Promise<MovedPhaseResult> {
-	throw new Error('not implemented');
+	const { dryRun, verbose, days, interval, limit } = opts;
+	const rcEnd = new Date(Date.now() - days * 86400000).toISOString();
+
+	console.log(`${PREFIX} 扫描近${days}天未巡查新页面 (namespace=0|10)...`);
+
+	// 收集未巡查新页面
+	const newPages: RecentChange[] = [];
+	let rccontinue: string | undefined;
+	let earliestTs = '';
+
+	do {
+		const params: Record<string, string | number> = {
+			action: 'query',
+			list: 'recentchanges',
+			rcshow: 'unpatrolled',
+			rctype: 'new',
+			rcnamespace: '0|10',
+			rcprop: 'ids|user|tags|title|timestamp',
+			rclimit: 500,
+			rcend: rcEnd,
+		};
+		if (rccontinue) params.rccontinue = rccontinue;
+
+		const { data } = await api.post(params, { noCache: true } as Record<string, unknown>);
+		const rcs: RecentChange[] = data.query?.recentchanges || [];
+
+		for (const rc of rcs) {
+			newPages.push(rc);
+			if (!earliestTs || rc.timestamp < earliestTs) {
+				earliestTs = rc.timestamp;
+			}
+		}
+
+		rccontinue = data.continue?.rccontinue;
+	} while (rccontinue);
+
+	console.log(`${PREFIX} 未巡查新页面: ${newPages.length}条`);
+
+	if (newPages.length === 0) {
+		return { successCount: 0, skipCount: 0, failures: [], totalScanned: 0, candidateCount: 0, totalHit: 0, totalSkipped: 0 };
+	}
+
+	// 批量拉取移动日志
+	console.log(`${PREFIX} 批量拉取移动日志...`);
+	let movedPages: Map<string, MoveInfo>;
+	try {
+		movedPages = await fetchMoveLogMap(api, privilegedUsers, earliestTs);
+	} catch (err) {
+		console.error(`${PREFIX} 移动日志拉取失败，跳过阶段2: ${err instanceof Error ? err.message : String(err)}`);
+		return { successCount: 0, skipCount: 0, failures: [], totalScanned: newPages.length, candidateCount: 0, totalHit: 0, totalSkipped: newPages.length };
+	}
+
+	console.log(`${PREFIX} 候选移动: ${movedPages.size}条`);
+
+	// 交叉匹配并执行巡查
+	let totalHit = 0;
+	let totalSkipped = 0;
+	let successCount = 0;
+	let skipCount = 0;
+	const failures: string[] = [];
+
+	for (const rc of newPages) {
+		const moveInfo = movedPages.get(rc.title);
+		if (!moveInfo) {
+			totalSkipped++;
+			continue;
+		}
+
+		// 验证目标在创建者用户页下
+		const creator = (rc.user || '').trim();
+		const expectedPrefix = `User:${creator}/`;
+		if (!moveInfo.targetTitle.startsWith(expectedPrefix)) {
+			totalSkipped++;
+			continue;
+		}
+
+		totalHit++;
+
+		if (dryRun) {
+			console.log(`  [DRY-RUN] rcid=${rc.rcid} 页面:${rc.title} (打回者:${moveInfo.operator} → ${moveInfo.targetTitle}) → 将巡逻`);
+			continue;
+		}
+
+		if (limit > 0 && (successCount + skipCount) >= limit) {
+			console.log(`${PREFIX} 已达限制 ${limit}，停止`);
+			break;
+		}
+
+		try {
+			await withApiRetry(
+				() =>
+					api.postWithToken('patrol', {
+						action: 'patrol',
+						rcid: rc.rcid,
+						tags: 'Bot',
+					}),
+				{
+					maxRetries: 3,
+					shouldRetry: (_err, _attempt) => {
+						const msg = _err.message.toLowerCase();
+						if (msg.includes('permissiondenied')) {
+							console.error(`${PREFIX} 权限不足，终止`);
+							process.exit(1);
+						}
+						if (msg.includes('abusefilter')) return true;
+						return _attempt < 3;
+					},
+					onRetry: (_attempt, delay) => {
+						if (verbose) console.log(`  rcid=${rc.rcid} 重试第${_attempt}次，等待${delay}ms`);
+					},
+				},
+			);
+			successCount++;
+			if (verbose) console.log(`  rcid=${rc.rcid} 页面:${rc.title} → 已巡逻`);
+		} catch (err: unknown) {
+			skipCount++;
+			const reason = err instanceof Error ? err.message : String(err);
+			failures.push(`rcid=${rc.rcid} (${reason})`);
+			if (verbose) {
+				console.error(`  rcid=${rc.rcid} 页面:${rc.title} → 失败: ${reason}`);
+			}
+		}
+
+		await sleep(randomInterval(interval));
+	}
+
+	return { successCount, skipCount, failures, totalScanned: newPages.length, candidateCount: movedPages.size, totalHit, totalSkipped };
+}
+
+async function fetchMoveLogMap(
+	api: MediaWikiApi,
+	privilegedUsers: Set<string>,
+	rcEnd: string,
+): Promise<Map<string, MoveInfo>> {
+	const movedPages = new Map<string, MoveInfo>();
+	let lecontinue: string | undefined;
+
+	do {
+		const params: Record<string, string | number> = {
+			action: 'query',
+			list: 'logevents',
+			letype: 'move',
+			lenamespace: '0|10',
+			lestart: rcEnd,
+			lelimit: 500,
+		};
+		if (lecontinue) params.lecontinue = lecontinue;
+
+		const { data } = await api.post(params, { noCache: true } as Record<string, unknown>);
+		const events = data.query?.logevents || [];
+
+		for (const ev of events) {
+			if (ev.action !== 'move') continue;
+			const operator = (ev.user || '').trim();
+			if (!privilegedUsers.has(operator)) continue;
+
+			const targetTitle: string = ev.params?.target_title || '';
+			if (!targetTitle.startsWith('User:')) continue;
+
+			const originalTitle: string = ev.title || '';
+			if (!originalTitle || movedPages.has(originalTitle)) continue;
+
+			movedPages.set(originalTitle, { operator, targetTitle });
+		}
+
+		lecontinue = data.continue?.lecontinue;
+	} while (lecontinue);
+
+	return movedPages;
 }
 
 (async () => {
