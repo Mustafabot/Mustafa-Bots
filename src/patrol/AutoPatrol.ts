@@ -346,6 +346,7 @@ async function fetchMoveLogMap(
 			list: 'logevents',
 			letype: 'move',
 			lenamespace: '0|10',
+			ledir: 'newer',
 			lestart: rcEnd,
 			lelimit: 500,
 		};
@@ -406,7 +407,7 @@ async function fetchMoveLogMap(
 			const { data } = await api.post(params);
 			const users = data.query?.allusers || [];
 			for (const u of users) {
-				privilegedUsers.add((u.name as string).trim());
+				privilegedUsers.add(u.name.trim());
 			}
 			aufrom = data.continue?.aufrom;
 		} while (aufrom);

@@ -257,6 +257,7 @@ async function fetchMoveLogMap(api, privilegedUsers, rcEnd) {
             list: 'logevents',
             letype: 'move',
             lenamespace: '0|10',
+            ledir: 'newer',
             lestart: rcEnd,
             lelimit: 500,
         };
