@@ -53,47 +53,37 @@ function randomInterval(baseInterval: number): number {
 	return baseInterval - 1000 + Math.floor(Math.random() * 2000);
 }
 
-(async () => {
-	const { dryRun, verbose, days, interval, limit } = parseArgs();
+interface PhaseResult {
+	successCount: number;
+	skipCount: number;
+	failures: string[];
+	totalScanned: number;
+	totalHit: number;
+	totalSkipped: number;
+}
 
-	const api = new MediaWikiApi(config.zh.api, {
-		headers: { cookie: config.zh.cookie! },
-	});
+interface MovedPhaseResult {
+	successCount: number;
+	skipCount: number;
+	failures: string[];
+	totalScanned: number;
+	candidateCount: number;
+	totalHit: number;
+	totalSkipped: number;
+}
 
-	await clientlogin(
-		api,
-		config.zh.bot.clientUsername || config.zh.bot.name,
-		config.zh.bot.clientPassword,
-	);
+interface MoveInfo {
+	operator: string;
+	targetTitle: string;
+}
 
-	// ── 预拉取用户组 ──
-	console.log(`${PREFIX} 预拉取用户组...`);
-	const privilegedUsers = new Set<string>();
+async function patrolEditPhase(
+	api: MediaWikiApi,
+	privilegedUsers: Set<string>,
+	opts: { dryRun: boolean; verbose: boolean; days: number; interval: number; limit: number },
+): Promise<PhaseResult> {
+	const { dryRun, verbose, days, interval, limit } = opts;
 
-	const userGroups = ['sysop', 'patroller', 'goodeditor'] as const;
-	for (const group of userGroups) {
-		let aufrom: string | undefined;
-		do {
-			const params: Record<string, string | number> = {
-				action: 'query',
-				list: 'allusers',
-				augroup: group,
-				aulimit: 500,
-			};
-			if (aufrom) params.aufrom = aufrom;
-
-			const { data } = await api.post(params);
-			const users = data.query?.allusers || [];
-			for (const u of users) {
-				privilegedUsers.add((u.name as string).trim());
-			}
-			aufrom = data.continue?.aufrom;
-		} while (aufrom);
-	}
-
-	console.log(`${PREFIX} sysop + patroller + goodeditor 去重后: ${privilegedUsers.size}`);
-
-	// ── 扫描未巡查编辑 ──
 	const rcEnd = new Date(Date.now() - days * 86400000).toISOString();
 	console.log(`${PREFIX} 扫描近${days}天未巡查编辑 (rcend=${rcEnd})...`);
 
@@ -159,7 +149,7 @@ function randomInterval(baseInterval: number): number {
 						api.postWithToken('patrol', {
 							action: 'patrol',
 							rcid,
-							tags: 'Bot'
+							tags: 'Bot',
 						}),
 					{
 						maxRetries: 3,
@@ -202,6 +192,81 @@ function randomInterval(baseInterval: number): number {
 		console.log(`${PREFIX} 失败明细:`);
 		for (const f of failures) {
 			console.log(`  ${f}`);
+		}
+	}
+
+	return { successCount, skipCount, failures, totalScanned, totalHit, totalSkipped };
+}
+
+async function patrolMovedPhase(
+	api: MediaWikiApi,
+	privilegedUsers: Set<string>,
+	opts: { dryRun: boolean; verbose: boolean; days: number; interval: number; limit: number },
+): Promise<MovedPhaseResult> {
+	throw new Error('not implemented');
+}
+
+(async () => {
+	const { dryRun, verbose, days, interval, limit, mode } = parseArgs();
+
+	const api = new MediaWikiApi(config.zh.api, {
+		headers: { cookie: config.zh.cookie! },
+	});
+
+	await clientlogin(
+		api,
+		config.zh.bot.clientUsername || config.zh.bot.name,
+		config.zh.bot.clientPassword,
+	);
+
+	// ── 预拉取用户组 ──
+	console.log(`${PREFIX} 预拉取用户组...`);
+	const privilegedUsers = new Set<string>();
+
+	const userGroups = ['sysop', 'patroller', 'goodeditor'] as const;
+	for (const group of userGroups) {
+		let aufrom: string | undefined;
+		do {
+			const params: Record<string, string | number> = {
+				action: 'query',
+				list: 'allusers',
+				augroup: group,
+				aulimit: 500,
+			};
+			if (aufrom) params.aufrom = aufrom;
+
+			const { data } = await api.post(params);
+			const users = data.query?.allusers || [];
+			for (const u of users) {
+				privilegedUsers.add((u.name as string).trim());
+			}
+			aufrom = data.continue?.aufrom;
+		} while (aufrom);
+	}
+
+	console.log(`${PREFIX} sysop + patroller + goodeditor 去重后: ${privilegedUsers.size}`);
+
+	const opts = { dryRun, verbose, days, interval, limit };
+
+	if (mode === 'edit' || mode === 'all') {
+		console.log(`${PREFIX} === 阶段1: 编辑巡查 ===`);
+		const result = await patrolEditPhase(api, privilegedUsers, opts);
+		console.log(`${PREFIX} 阶段1 扫描完成: ${result.totalScanned}条未巡查, ${result.totalHit}条命中, ${result.totalSkipped}条跳过`);
+		console.log(`${PREFIX} 阶段1 巡逻: 成功 ${result.successCount}, 跳过 ${result.skipCount}`);
+		if (result.failures.length > 0) {
+			console.log(`${PREFIX} 阶段1 失败明细:`);
+			for (const f of result.failures) console.log(`  ${f}`);
+		}
+	}
+
+	if (mode === 'moved' || mode === 'all') {
+		console.log(`${PREFIX} === 阶段2: 新页面打回巡查 ===`);
+		const result = await patrolMovedPhase(api, privilegedUsers, opts);
+		console.log(`${PREFIX} 阶段2 扫描完成: ${result.totalScanned}条未巡查新页面, ${result.candidateCount}条候选, ${result.totalHit}条命中, ${result.totalSkipped}条跳过`);
+		console.log(`${PREFIX} 阶段2 巡逻: 成功 ${result.successCount}, 跳过 ${result.skipCount}`);
+		if (result.failures.length > 0) {
+			console.log(`${PREFIX} 阶段2 失败明细:`);
+			for (const f of result.failures) console.log(`  ${f}`);
 		}
 	}
 })();
