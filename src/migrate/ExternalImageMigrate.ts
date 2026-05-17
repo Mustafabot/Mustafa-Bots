@@ -637,6 +637,12 @@ function parseUploadWarnings(warnings: Record<string, any>): WarningDecision {
 	};
 }
 
+function ensureUrlProtocol(url: string): string {
+	if (url.startsWith('//')) return 'https:' + url;
+	if (!/^https?:\/\//i.test(url)) return 'https://' + url;
+	return url;
+}
+
 function isWhitelisted(src: string, whitelist: RegExp[]): boolean {
 	if (whitelist.some(regex => regex.test(src))) {
 		return true;
@@ -662,12 +668,15 @@ function extractExternalImages(content: string, title: string, whitelist: RegExp
 
 		if (node.type === 'ext' && node.name === 'img') {
 			const src = node.attributes?.src;
-			if (src && !isWhitelisted(src, whitelist)) {
-				issues.push({
-					src,
-					node,
-					attributes: { ...node.attributes },
-				});
+			if (src) {
+				const normalizedSrc = ensureUrlProtocol(src);
+				if (!isWhitelisted(src, whitelist)) {
+					issues.push({
+						src: normalizedSrc,
+						node,
+						attributes: { ...node.attributes },
+					});
+				}
 			}
 		}
 
@@ -721,7 +730,7 @@ function extractTemplateImageParams(
 		let src: string | undefined;
 
 		if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
-			src = imageValue.trim();
+			src = ensureUrlProtocol(imageValue.trim());
 		} else if (!imageValue?.trim() && (templateConfig as any).fallback) {
 			const fb = (templateConfig as any).fallback;
 			const fbValues: Record<string, string> = {};
@@ -739,7 +748,7 @@ function extractTemplateImageParams(
 				for (const [key, val] of Object.entries(fbValues)) {
 					fallbackUrl = fallbackUrl.replace(new RegExp(`\\{${key}\\}`, 'g'), val);
 				}
-				src = fallbackUrl;
+				src = ensureUrlProtocol(fallbackUrl);
 			}
 		}
 
