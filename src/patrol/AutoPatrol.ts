@@ -345,7 +345,6 @@ async function fetchMoveLogMap(
 			action: 'query',
 			list: 'logevents',
 			letype: 'move',
-			lenamespace: '0|10',
 			ledir: 'newer',
 			lestart: rcEnd,
 			lelimit: 500,
@@ -356,6 +355,7 @@ async function fetchMoveLogMap(
 		const events = data.query?.logevents || [];
 
 		for (const ev of events) {
+			if (ev.ns !== 0 && ev.ns !== 10) continue;
 			const operator = (ev.user || '').trim();
 			if (!privilegedUsers.has(operator)) continue;
 
