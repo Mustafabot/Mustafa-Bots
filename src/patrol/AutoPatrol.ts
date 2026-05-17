@@ -70,7 +70,7 @@ function randomInterval(baseInterval: number): number {
 	console.log(`${PREFIX} 预拉取用户组...`);
 	const privilegedUsers = new Set<string>();
 
-	const userGroups = ['patroller', 'goodeditor'] as const;
+	const userGroups = ['sysop', 'patroller', 'goodeditor'] as const;
 	for (const group of userGroups) {
 		let aufrom: string | undefined;
 		do {
@@ -91,7 +91,7 @@ function randomInterval(baseInterval: number): number {
 		} while (aufrom);
 	}
 
-	console.log(`${PREFIX} patroller + goodeditor 去重后: ${privilegedUsers.size}`);
+	console.log(`${PREFIX} sysop + patroller + goodeditor 去重后: ${privilegedUsers.size}`);
 
 	// ── 扫描未巡查编辑 ──
 	const rcEnd = new Date(Date.now() - days * 86400000).toISOString();
