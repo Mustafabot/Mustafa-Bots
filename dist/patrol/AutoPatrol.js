@@ -266,8 +266,6 @@ async function fetchMoveLogMap(api, privilegedUsers, rcEnd) {
         const { data } = await api.post(params, { noCache: true });
         const events = data.query?.logevents || [];
         for (const ev of events) {
-            if (ev.action !== 'move')
-                continue;
             const operator = (ev.user || '').trim();
             if (!privilegedUsers.has(operator))
                 continue;
