@@ -24,6 +24,12 @@ function parseArgs() {
 		console.error(`${PREFIX} 无效的 --mode 值: ${modeArg}，有效值: ${validModes.join('|')}`);
 		process.exit(1);
 	}
+	const wikiArg = argv.find((a) => a.startsWith('--wiki='))?.split('=')[1] || 'both';
+	const validWikis = ['zh', 'cm', 'both'];
+	if (!validWikis.includes(wikiArg)) {
+		console.error(`${PREFIX} 无效的 --wiki 值: ${wikiArg}，有效值: ${validWikis.join('|')}`);
+		process.exit(1);
+	}
 	return {
 		dryRun: argv.includes('--dry-run'),
 		verbose: argv.includes('--verbose'),
@@ -31,6 +37,7 @@ function parseArgs() {
 		interval: parseInt(argv.find((a) => a.startsWith('--interval='))?.split('=')[1] || '4000', 10),
 		limit: parseInt(argv.find((a) => a.startsWith('--limit='))?.split('=')[1] || '0', 10),
 		mode: modeArg as PatrolMode,
+		wiki: wikiArg as 'zh' | 'cm' | 'both',
 	};
 }
 
@@ -374,21 +381,67 @@ async function fetchMoveLogMap(
 	return movedPages;
 }
 
-(async () => {
-	const { dryRun, verbose, days, interval, limit, mode } = parseArgs();
+interface WikiPatrolResult {
+	label: 'zh' | 'cm';
+	editPhase?: PhaseResult;
+	movedPhase?: MovedPhaseResult;
+}
 
-	const api = new MediaWikiApi(config.zh.api, {
+async function runPatrolForWiki(
+	label: 'zh' | 'cm',
+	api: MediaWikiApi,
+	privilegedUsers: Set<string>,
+	opts: { dryRun: boolean; verbose: boolean; days: number; interval: number; limit: number },
+	mode: PatrolMode,
+): Promise<WikiPatrolResult> {
+	const result: WikiPatrolResult = { label };
+
+	if (mode === 'edit' || mode === 'all') {
+		console.log(`${PREFIX}:${label} === 阶段1: 编辑巡查 ===`);
+		result.editPhase = await patrolEditPhase(api, privilegedUsers, opts);
+		console.log(`${PREFIX}:${label} 阶段1 扫描完成: ${result.editPhase.totalScanned}条未巡查, ${result.editPhase.totalHit}条命中, ${result.editPhase.totalSkipped}条跳过`);
+		console.log(`${PREFIX}:${label} 阶段1 巡逻: 成功 ${result.editPhase.successCount}, 跳过 ${result.editPhase.skipCount}`);
+		if (result.editPhase.failures.length > 0) {
+			console.log(`${PREFIX}:${label} 阶段1 失败明细:`);
+			for (const f of result.editPhase.failures) console.log(`  ${f}`);
+		}
+	}
+
+	if ((mode === 'moved' || mode === 'all') && label === 'zh') {
+		console.log(`${PREFIX}:${label} === 阶段2: 新页面打回巡查 ===`);
+		result.movedPhase = await patrolMovedPhase(api, privilegedUsers, opts);
+		console.log(`${PREFIX}:${label} 阶段2 扫描完成: ${result.movedPhase.totalScanned}条未巡查新页面, ${result.movedPhase.candidateCount}条候选, ${result.movedPhase.totalHit}条命中, ${result.movedPhase.totalSkipped}条跳过`);
+		console.log(`${PREFIX}:${label} 阶段2 巡逻: 成功 ${result.movedPhase.successCount}, 跳过 ${result.movedPhase.skipCount}`);
+		if (result.movedPhase.failures.length > 0) {
+			console.log(`${PREFIX}:${label} 阶段2 失败明细:`);
+			for (const f of result.movedPhase.failures) console.log(`  ${f}`);
+		}
+	} else if (label === 'cm') {
+		console.log(`${PREFIX}:${label} (共享站跳过阶段2)`);
+	}
+
+	return result;
+}
+
+(async () => {
+	const { dryRun, verbose, days, interval, limit, mode, wiki } = parseArgs();
+
+	// ── 确定站点列表 ──
+	const wikiLabels: ('zh' | 'cm')[] = wiki === 'both' ? ['zh', 'cm'] : [wiki];
+	console.log(`${PREFIX} 目标站点: ${wikiLabels.join(' + ')}`);
+
+	// ── 创建 zh API 并登录（用于拉取用户组） ──
+	const zhApi = new MediaWikiApi(config.zh.api, {
 		headers: { cookie: config.zh.cookie! },
 	});
-
 	await clientlogin(
-		api,
+		zhApi,
 		config.zh.bot.clientUsername || config.zh.bot.name,
 		config.zh.bot.clientPassword,
 	);
 
-	// ── 预拉取用户组 ──
-	console.log(`${PREFIX} 预拉取用户组...`);
+	// ── 预拉取用户组（两个站共享用户表，用 zh API） ──
+	console.log(`${PREFIX} 预拉取用户组 (通过zh站)...`);
 	const privilegedUsers = new Set<string>();
 
 	const userGroups = ['sysop', 'patroller', 'goodeditor'] as const;
@@ -403,7 +456,7 @@ async function fetchMoveLogMap(
 			};
 			if (aufrom) params.aufrom = aufrom;
 
-			const { data } = await api.post(params);
+			const { data } = await zhApi.post(params);
 			const users = data.query?.allusers || [];
 			for (const u of users) {
 				privilegedUsers.add(u.name.trim());
@@ -416,25 +469,37 @@ async function fetchMoveLogMap(
 
 	const opts = { dryRun, verbose, days, interval, limit };
 
-	if (mode === 'edit' || mode === 'all') {
-		console.log(`${PREFIX} === 阶段1: 编辑巡查 ===`);
-		const result = await patrolEditPhase(api, privilegedUsers, opts);
-		console.log(`${PREFIX} 阶段1 扫描完成: ${result.totalScanned}条未巡查, ${result.totalHit}条命中, ${result.totalSkipped}条跳过`);
-		console.log(`${PREFIX} 阶段1 巡逻: 成功 ${result.successCount}, 跳过 ${result.skipCount}`);
-		if (result.failures.length > 0) {
-			console.log(`${PREFIX} 阶段1 失败明细:`);
-			for (const f of result.failures) console.log(`  ${f}`);
+	// ── 遍历各站执行巡查 ──
+	const allResults: WikiPatrolResult[] = [];
+
+	for (const label of wikiLabels) {
+		let api: MediaWikiApi;
+		if (label === 'zh') {
+			api = zhApi; // 复用已登录的 zh API
+		} else {
+			api = new MediaWikiApi(config.cm.api, {
+				headers: { cookie: config.cm.cookie! },
+			});
+			await clientlogin(
+				api,
+				config.cm.bot.clientUsername || config.cm.bot.name,
+				config.cm.bot.clientPassword,
+			);
 		}
+
+		const result = await runPatrolForWiki(label, api, privilegedUsers, opts, mode);
+		allResults.push(result);
 	}
 
-	if (mode === 'moved' || mode === 'all') {
-		console.log(`${PREFIX} === 阶段2: 新页面打回巡查 ===`);
-		const result = await patrolMovedPhase(api, privilegedUsers, opts);
-		console.log(`${PREFIX} 阶段2 扫描完成: ${result.totalScanned}条未巡查新页面, ${result.candidateCount}条候选, ${result.totalHit}条命中, ${result.totalSkipped}条跳过`);
-		console.log(`${PREFIX} 阶段2 巡逻: 成功 ${result.successCount}, 跳过 ${result.skipCount}`);
-		if (result.failures.length > 0) {
-			console.log(`${PREFIX} 阶段2 失败明细:`);
-			for (const f of result.failures) console.log(`  ${f}`);
-		}
+	// ── 汇总 ──
+	console.log(`${PREFIX} === 汇总 ===`);
+	for (const r of allResults) {
+		const editOk = r.editPhase ? `成功 ${r.editPhase.successCount}/跳过 ${r.editPhase.skipCount}` : '未执行';
+		const movedOk = r.movedPhase
+			? `成功 ${r.movedPhase.successCount}/跳过 ${r.movedPhase.skipCount}`
+			: r.label === 'cm'
+				? '跳过'
+				: '未执行';
+		console.log(`${PREFIX} ${r.label}: 阶段1 ${editOk}, 阶段2 ${movedOk}`);
 	}
 })();
