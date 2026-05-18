@@ -2,13 +2,13 @@
 /**
  * MediaWiki API Test Tool
  * Sends requests to MediaWiki API and returns JSON responses.
+ * Performs clientlogin by default — use --no-login to skip.
  *
  * Usage:
  *   npx tsx scripts/mw-api-test.ts --action=query --list=recentchanges --rclimit=5
- *   npx tsx scripts/mw-api-test.ts --action=query --list=allpages --aplimit=3 --login
- *   npx tsx scripts/mw-api-test.ts --action=parse --page=首页 --prop=sections --login --path=parse.sections
+ *   npx tsx scripts/mw-api-test.ts --action=parse --page=首页 --prop=sections --path=parse.sections
  *   npx tsx scripts/mw-api-test.ts --action=query --meta=siteinfo --siprop=namespaces --wiki=cm
- *   npx tsx scripts/mw-api-test.ts --action=query --list=recentchanges --rclimit=max --continue=3 --login
+ *   npx tsx scripts/mw-api-test.ts --action=query --meta=siteinfo --no-login
  *   npx tsx scripts/mw-api-test.ts --action=query --meta=siteinfo --no-auth
  */
 
@@ -22,7 +22,7 @@ interface CliArgs {
   path: string;
   raw: boolean;
   noAuth: boolean;
-  doLogin: boolean;
+  noLogin: boolean;
   continueLimit: number;
 }
 
@@ -32,14 +32,14 @@ function parseArgs(argv: string[]): CliArgs {
   let path = '';
   let raw = false;
   let noAuth = false;
-  let doLogin = false;
+  let noLogin = false;
   let continueLimit = 0;
 
   for (const arg of argv) {
     if (arg === '--raw') {
       raw = true;
-    } else if (arg === '--login') {
-      doLogin = true;
+    } else if (arg === '--no-login') {
+      noLogin = true;
     } else if (arg === '--no-auth') {
       noAuth = true;
     } else if (arg.startsWith('--wiki=')) {
@@ -64,7 +64,7 @@ function parseArgs(argv: string[]): CliArgs {
     }
   }
 
-  return { params, wiki, path, raw, noAuth, doLogin, continueLimit };
+  return { params, wiki, path, raw, noAuth, noLogin, continueLimit };
 }
 
 function extractByPath(obj: unknown, path: string): { value: unknown; found: boolean } {
@@ -87,7 +87,7 @@ function formatOutput(data: unknown, raw: boolean): string {
   return raw ? JSON.stringify(data) : JSON.stringify(data, null, 2);
 }
 
-const { params, wiki, path, raw, noAuth, doLogin, continueLimit } = parseArgs(process.argv.slice(2));
+const { params, wiki, path, raw, noAuth, noLogin, continueLimit } = parseArgs(process.argv.slice(2));
 
 if (!params.action) {
   console.error('Usage: npx tsx scripts/mw-api-test.ts --action=<action> [options] [--key=value...]');
@@ -97,16 +97,17 @@ if (!params.action) {
   console.error('');
   console.error('Options:');
   console.error('  --wiki=zh|cm            Target wiki (default: zh)');
-  console.error('  --login                 Perform clientlogin before making the request');
-  console.error('  --no-auth               Make request without any authentication (public API)');
+  console.error('  --no-login              Skip clientlogin (use for public APIs like siteinfo)');
+  console.error('  --no-auth               Make request without any authentication headers');
   console.error('  --path=PATH             Extract nested field (e.g. query.pages)');
   console.error('  --continue=N            Follow continuation up to N pages (default: 0)');
   console.error('  --raw                   Output minified JSON');
   console.error('');
   console.error('All other --key=value pairs are passed as API parameters.');
   console.error('Numeric values are auto-converted; use "max" for max limits.');
-  console.error('Use --login for actions that require authentication (allpages, parse, etc.)');
-  console.error('Use --no-auth for public API testing (baseline debugging).');
+  console.error('');
+  console.error('Default: SSO cookie + clientlogin. Use --no-login for public endpoints,');
+  console.error('--no-auth to strip all auth headers.');
   process.exit(1);
 }
 
@@ -117,8 +118,8 @@ const api = new MediaWikiApi(wikiConfig.api, {
 });
 
 try {
-  if (doLogin) {
-    await clientlogin(api, wikiConfig.bot.name!, wikiConfig.bot.password!);
+  if (!noLogin && !noAuth) {
+    await clientlogin(api, wikiConfig.bot.clientUsername!, wikiConfig.bot.clientPassword!);
   }
 
   if (continueLimit > 0) {
