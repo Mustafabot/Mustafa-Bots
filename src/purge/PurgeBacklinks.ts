@@ -4,7 +4,6 @@ import clientlogin from '../clientlogin.js';
 
 interface CliArgs {
 	title: string;
-	namespace: number;
 	dryRun: boolean;
 	verbose: boolean;
 	nulledit: boolean;
@@ -20,10 +19,10 @@ interface ListResponse {
 	};
 }
 
+
 function parseArgs(args: string[]): CliArgs | null {
 	const result: CliArgs = {
 		title: '',
-		namespace: 0,
 		dryRun: false,
 		verbose: false,
 		nulledit: false,
@@ -38,9 +37,6 @@ function parseArgs(args: string[]): CliArgs | null {
 			result.verbose = true;
 		} else if (arg === '--nulledit') {
 			result.nulledit = true;
-		} else if (arg === '--namespace' && args[i + 1]) {
-			result.namespace = parseInt(args[i + 1], 10);
-			i++;
 		} else if ((arg === '--concurrency' || arg === '-c') && args[i + 1]) {
 			result.concurrency = parseInt(args[i + 1], 10);
 			i++;
@@ -50,7 +46,7 @@ function parseArgs(args: string[]): CliArgs | null {
 	}
 
 	if (!result.title) {
-		console.error('用法: npx tsx src/purge/PurgeBacklinks.ts <页面标题> [--namespace <ns>] [--nulledit] [--concurrency <n>] [--dry-run] [--verbose]');
+		console.error('用法: npx tsx src/purge/PurgeBacklinks.ts <页面标题> [--nulledit] [--concurrency <n>] [--dry-run] [--verbose]');
 		return null;
 	}
 
@@ -61,7 +57,6 @@ type ListType = 'backlinks' | 'embeddedin';
 
 interface ListConfig {
 	titleParam: string;
-	nsParam: string;
 	limitParam: string;
 	contParam: string;
 	resultKey: string;
@@ -70,14 +65,12 @@ interface ListConfig {
 const LIST_CONFIGS: Record<ListType, ListConfig> = {
 	backlinks: {
 		titleParam: 'bltitle',
-		nsParam: 'blnamespace',
 		limitParam: 'bllimit',
 		contParam: 'blcontinue',
 		resultKey: 'backlinks',
 	},
 	embeddedin: {
 		titleParam: 'eititle',
-		nsParam: 'einamespace',
 		limitParam: 'eilimit',
 		contParam: 'eicontinue',
 		resultKey: 'embeddedin',
@@ -88,14 +81,13 @@ async function collectPages(
 	api: MediaWikiApi,
 	listType: ListType,
 	titleValue: string,
-	namespace: number,
 	verbose: boolean,
 ): Promise<string[]> {
 	const result: string[] = [];
 	const eol = Symbol();
 	let continueParam: string | symbol | undefined = undefined;
 	let genericContinue: string | undefined;
-	const { titleParam, nsParam, limitParam, contParam, resultKey } = LIST_CONFIGS[listType];
+	const { titleParam, limitParam, contParam, resultKey } = LIST_CONFIGS[listType];
 
 	while (continueParam !== eol) {
 		const params: Record<string, string | number | undefined> = {
@@ -103,7 +95,6 @@ async function collectPages(
 			formatversion: '2',
 			list: listType,
 			[titleParam]: titleValue,
-			[nsParam]: namespace,
 			[limitParam]: 'max',
 		};
 		if (typeof continueParam === 'string') {
@@ -274,9 +265,8 @@ const api = new MediaWikiApi(config.zh.api, {
 		process.exit(1);
 	}
 
-	const { title, namespace, dryRun, verbose, nulledit, concurrency } = cliArgs;
+	const { title, dryRun, verbose, nulledit, concurrency } = cliArgs;
 	console.log(`目标页面: ${title}`);
-	console.log(`命名空间: ${namespace}`);
 	console.log(`并发数: ${concurrency}`);
 	console.log(`模式: ${dryRun ? 'DRY-RUN' : '正式执行'}`);
 	console.log(`方式: ${nulledit ? '零编辑 (null edit)' : 'Purge'}`);
@@ -286,12 +276,12 @@ const api = new MediaWikiApi(config.zh.api, {
 
 	// 收集链入页面
 	console.log('\n=== 收集链入页面 (backlinks) ===');
-	const backlinks = await collectPages(api, 'backlinks', title, namespace, verbose);
+	const backlinks = await collectPages(api, 'backlinks', title, verbose);
 	console.log(`链入页面: ${backlinks.length} 个`);
 
 	// 收集嵌入页面
 	console.log('\n=== 收集嵌入页面 (embeddedin) ===');
-	const embedded = await collectPages(api, 'embeddedin', title, namespace, verbose);
+	const embedded = await collectPages(api, 'embeddedin', title, verbose);
 	console.log(`嵌入页面: ${embedded.length} 个`);
 
 	// 去重合并
