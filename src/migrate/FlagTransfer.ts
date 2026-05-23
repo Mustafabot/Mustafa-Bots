@@ -34,6 +34,18 @@ interface CliArgs {
 // Task 1 & 3: flagicon 映射解析 & 本地完成记录管理
 // ============================================================
 
+/**
+ * 将 map 中的值解析为完整文件名。
+ * - 如果值本身就是完整文件名（含扩展名或 File: 前缀），直接使用
+ * - 否则视为 Flag_of_{suffix}.svg 中的 suffix 部分
+ */
+function resolveFilename(suffix: string): string {
+  // 已经是完整文件路径
+  if (suffix.startsWith('File:')) return suffix;
+  if (/\.\w+$/.test(suffix)) return `File:${suffix}`;
+  return `File:Flag_of_${suffix}.svg`;
+}
+
 function buildFlagMap(): Map<string, string> {
   const content = readFileSync(FLAGICON_PATH, 'utf-8');
   const map = new Map<string, string>();
@@ -97,7 +109,6 @@ function saveCompleted(completed: Set<string>): void {
 
 async function findFlagiconUsages(
   api: MediaWikiApi,
-  flagMap: Map<string, string>,
 ): Promise<Set<string>> {
   const usedParams = new Set<string>();
   const eol = Symbol();
@@ -162,7 +173,7 @@ async function findFlagiconUsages(
 // ============================================================
 
 async function fetchCommonsDirectUrl(suffix: string): Promise<string> {
-  const filename = `File:Flag_of_${suffix}.svg`;
+  const filename = resolveFilename(suffix);
   const url = `${WMF_API}?action=query&prop=imageinfo&iiprop=url&titles=${encodeURIComponent(filename)}&format=json`;
 
   const response = await fetch(url, {
@@ -191,7 +202,8 @@ async function fetchCommonsDirectUrl(suffix: string): Promise<string> {
 }
 
 function fetchCommonsFallbackUrl(suffix: string): string {
-  return `https://commons.wikimedia.org/wiki/Special:FilePath/Flag_of_${encodeURIComponent(suffix)}.svg`;
+  const filename = resolveFilename(suffix);
+  return `https://commons.wikimedia.org/wiki/Special:FilePath/${encodeURIComponent(filename.replace(/^File:/i, ''))}`;
 }
 
 async function getCommonsFileUrl(suffix: string): Promise<string> {
@@ -208,8 +220,39 @@ async function getCommonsFileUrl(suffix: string): Promise<string> {
 }
 
 // ============================================================
-// Task 5: 上传到萌娘共享（双重回退）
+// Task 5: 萌娘共享文件存在检查 & 上传（双重回退）
 // ============================================================
+
+/**
+ * 检查文件是否已存在于萌娘共享站
+ */
+async function checkFileExistsOnCm(api: MediaWikiApi, filename: string): Promise<boolean> {
+  try {
+    const { data } = await api.post({
+      action: 'query',
+      prop: 'imageinfo',
+      titles: filename,
+    });
+
+    const pages = (data as any).query?.pages;
+    if (!pages) return false;
+
+    const page = Object.values(pages)[0] as any;
+    // page.missing 或 page.imagerepository === '' 表示文件不存在
+    if (page?.missing) return false;
+
+    // 检查是否有 imageinfo（有则文件存在且可访问）
+    if (page?.imageinfo && page.imageinfo.length > 0) {
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    // 查询失败时不阻断流程，返回 false 让后续上传尝试处理
+    console.error(`  检查文件存在性失败: ${error}`);
+    return false;
+  }
+}
 
 function ensureTempDir(): void {
   if (!existsSync(TEMP_DIR)) {
@@ -388,7 +431,7 @@ async function main(): Promise<void> {
   await clientlogin(cmApi, config.cm.bot.clientUsername!, config.cm.bot.clientPassword!, config.cm.api);
 
   // 3. 查找实际使用
-  const usedParams = await findFlagiconUsages(zhApi, flagMap);
+  const usedParams = await findFlagiconUsages(zhApi);
 
   // 4. 加载已完成记录
   const completed = args.reset ? new Set<string>() : loadCompleted();
@@ -416,9 +459,20 @@ async function main(): Promise<void> {
 
   for (let i = 0; i < pending.length; i++) {
     const { name, suffix } = pending[i];
-    const filename = `File:Flag_of_${suffix}.svg`;
+    const filename = resolveFilename(suffix);
 
     console.log(`\n[${i + 1}/${pending.length}] ${name} -> ${filename}`);
+
+    // 检查萌娘共享是否已存在同名文件
+    if (!args.dryRun) {
+      const exists = await checkFileExistsOnCm(cmApi, filename);
+      if (exists) {
+        console.log(`  萌娘共享已存在 ${filename}，跳过`);
+        completed.add(suffix);
+        saveCompleted(completed);
+        continue;
+      }
+    }
 
     // 获取维基共享文件 URL
     let sourceUrl: string;
