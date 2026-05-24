@@ -1,6 +1,6 @@
 on:
-  schedule:
-    - cron: "14 17 * * *" # 00:35 CST
+  #schedule:
+    #- cron: "14 17 * * *" # 00:35 CST
   workflow_dispatch:
     inputs:
       task:
@@ -20,8 +20,8 @@ env:
 
 jobs:
   AutoPatrol:
-    if: |
-      github.event.schedule == '14 17 * * *' 
+    #if: |
+     # github.event.schedule == '14 17 * * *' 
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
