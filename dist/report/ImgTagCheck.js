@@ -1,6 +1,6 @@
-import { MediaWikiApi } from 'wiki-saikou';
 import Parser from 'wikiparser-node';
 import { mkdir, unlink, writeFile } from 'fs/promises';
+import { createZhApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
@@ -25,9 +25,7 @@ async function saveCheckpoint(data) {
 }
 Parser.config = 'moegirl';
 const NAMESPACE = '0';
-const api = new MediaWikiApi(config.zh.api, {
-    headers: { cookie: config.zh.cookie },
-});
+const api = createZhApi();
 const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}`;
 function isWhitelisted(src, whitelistRegexes) {
     if (whitelistRegexes.some(regex => regex.test(src))) {
@@ -218,7 +216,7 @@ function processPage(title, content, whitelistRegexes, templateNameMap) {
         const batchReportContent = generateBatchReport(batchIssues, allPageTitles.length, batchIndex, totalBatches);
         const batchTitle = `${REPORT_TITLE}/${batchIndex + 1}`;
         console.log(`Submitting batch ${batchIndex + 1}/${totalBatches} (${batchIssues.length} issues)`);
-        await api.postWithToken('csrf', {
+        const editResult = await api.postWithToken('csrf', {
             action: 'edit',
             title: batchTitle,
             text: batchReportContent,
@@ -230,7 +228,13 @@ function processPage(title, content, whitelistRegexes, templateNameMap) {
         }, {
             retry: 500,
             noCache: true,
-        }).then(({ data }) => console.log(JSON.stringify(data)));
+        });
+        const { data } = editResult;
+        if (data.error) {
+            console.error(`提交第 ${batchIndex + 1}/${totalBatches} 批报告失败:`, JSON.stringify(data.error));
+            throw new Error(`编辑失败: ${data.error.code}: ${data.error.text}`);
+        }
+        console.log(`第 ${batchIndex + 1}/${totalBatches} 批报告提交成功:`, JSON.stringify(data));
     }
     const checkpointPath = getCheckpointPath();
     try {
@@ -243,7 +247,10 @@ function processPage(title, content, whitelistRegexes, templateNameMap) {
         }
     }
     console.log(`End time: ${new Date().toISOString()}`);
-})();
+})().catch((err) => {
+    console.error('脚本执行失败:', err);
+    process.exit(1);
+});
 function generateReport(issues, totalPages) {
     const now = new Date();
     const timestamp = now.toISOString();

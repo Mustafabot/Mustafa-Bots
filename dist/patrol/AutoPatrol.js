@@ -1,4 +1,4 @@
-import { MediaWikiApi } from 'wiki-saikou';
+import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry } from '../utils/retry.js';
@@ -324,9 +324,7 @@ async function runPatrolForWiki(label, api, privilegedUsers, opts, mode) {
     const wikiLabels = wiki === 'both' ? ['zh', 'cm'] : [wiki];
     console.log(`${PREFIX} 目标站点: ${wikiLabels.join(' + ')}`);
     // ── 创建 zh API 并登录（用于拉取用户组） ──
-    const zhApi = new MediaWikiApi(config.zh.api, {
-        headers: { cookie: config.zh.cookie },
-    });
+    const zhApi = createZhApi();
     await clientlogin(zhApi, config.zh.bot.clientUsername || config.zh.bot.name, config.zh.bot.clientPassword);
     // ── 预拉取用户组（两个站共享用户表，用 zh API） ──
     console.log(`${PREFIX} 预拉取用户组 (通过zh站)...`);
@@ -361,9 +359,7 @@ async function runPatrolForWiki(label, api, privilegedUsers, opts, mode) {
             api = zhApi; // 复用已登录的 zh API
         }
         else {
-            api = new MediaWikiApi(config.cm.api, {
-                headers: { cookie: config.cm.cookie },
-            });
+            api = createCmApi();
             await clientlogin(api, config.cm.bot.clientUsername || config.cm.bot.name, config.cm.bot.clientPassword);
         }
         const result = await runPatrolForWiki(label, api, privilegedUsers, opts, mode);

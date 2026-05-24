@@ -4,6 +4,7 @@ import { URL } from 'url';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError, isAbuseFilterError } from '../utils/retry.js';
@@ -105,13 +106,8 @@ interface CliArgs {
 	reset: boolean;
 }
 
-const zhApi = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.zh.cookie! },
-});
-
-const cmApi = new MediaWikiApi(config.cm.api, {
-	headers: { cookie: config.cm.cookie! },
-});
+const zhApi = createZhApi();
+const cmApi = createCmApi();
 
 const MAX_RETRIES = 3;
 const MAX_RENAME_ATTEMPTS = 10;

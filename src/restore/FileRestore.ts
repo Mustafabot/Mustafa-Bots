@@ -1,6 +1,7 @@
 import { MediaWikiApi } from 'wiki-saikou';
 import Parser from 'wikiparser-node';
 import process from 'process';
+import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 
@@ -22,13 +23,8 @@ interface CliArgs {
 
 Parser.config = 'moegirl';
 
-const zhApi = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.zh.cookie! },
-});
-
-const cmApi = new MediaWikiApi(config.cm.api, {
-	headers: { cookie: config.cm.cookie! },
-});
+const zhApi = createZhApi();
+const cmApi = createCmApi();
 
 const MAX_RETRIES = 3;
 const DEFAULT_COMMENT = '机器人：还原被删除的文件';

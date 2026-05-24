@@ -1,4 +1,4 @@
-import { MediaWikiApi } from 'wiki-saikou';
+import { createZhApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 
@@ -20,9 +20,7 @@ interface QueryPageResponse {
 	};
 }
 
-const api = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.zh.cookie! },
-});
+const api = createZhApi();
 
 const PAGE_TITLES: string[] = [
 	"尤里·布莱尔",

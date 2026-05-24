@@ -1,6 +1,6 @@
-import { MediaWikiApi } from 'wiki-saikou';
-import Parser from 'wikiparser-node';
+﻿import Parser from 'wikiparser-node';
 import { mkdir, unlink, writeFile } from 'fs/promises';
+import { createZhApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
@@ -45,9 +45,7 @@ async function saveCheckpoint(data: CheckpointData): Promise<void> {
 
 Parser.config = 'moegirl';
 const NAMESPACE = '0';
-const api = new MediaWikiApi(config.zh.api, {
-	headers: { cookie: config.zh.cookie! },
-});
+const api = createZhApi();
 
 const REPORT_TITLE = `User:没有羽翼的格雷塔/Report/ImgTag/Ns${NAMESPACE}`;
 
@@ -288,7 +286,7 @@ function processPage(
 
 		console.log(`Submitting batch ${batchIndex + 1}/${totalBatches} (${batchIssues.length} issues)`);
 
-		await api.postWithToken('csrf', {
+		const editResult = await api.postWithToken('csrf', {
 			action: 'edit',
 			title: batchTitle,
 			text: batchReportContent,
@@ -300,7 +298,13 @@ function processPage(
 		}, {
 			retry: 500,
 			noCache: true,
-		}).then(({ data }) => console.log(JSON.stringify(data)));
+		});
+		const { data } = editResult;
+		if (data.error) {
+			console.error(`提交第 ${batchIndex + 1}/${totalBatches} 批报告失败:`, JSON.stringify(data.error));
+			throw new Error(`编辑失败: ${data.error.code}: ${data.error.text}`);
+		}
+		console.log(`第 ${batchIndex + 1}/${totalBatches} 批报告提交成功:`, JSON.stringify(data));
 	}
 
 	const checkpointPath = getCheckpointPath();
@@ -314,7 +318,10 @@ function processPage(
 	}
 
 	console.log(`End time: ${new Date().toISOString()}`);
-})();
+})().catch((err: Error) => {
+	console.error('脚本执行失败:', err);
+	process.exit(1);
+});
 
 function generateReport(issues: Issue[], totalPages: number): string {
 	const now = new Date();
@@ -404,3 +411,5 @@ function generateBatchReport(batchIssues: Issue[], totalPages: number, batchInde
 
 	return report;
 }
+
+

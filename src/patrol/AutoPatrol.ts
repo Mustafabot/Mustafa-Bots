@@ -1,4 +1,5 @@
 import { MediaWikiApi } from 'wiki-saikou';
+import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry } from '../utils/retry.js';
@@ -431,9 +432,7 @@ async function runPatrolForWiki(
 	console.log(`${PREFIX} 目标站点: ${wikiLabels.join(' + ')}`);
 
 	// ── 创建 zh API 并登录（用于拉取用户组） ──
-	const zhApi = new MediaWikiApi(config.zh.api, {
-		headers: { cookie: config.zh.cookie! },
-	});
+	const zhApi = createZhApi();
 	await clientlogin(
 		zhApi,
 		config.zh.bot.clientUsername || config.zh.bot.name,
@@ -477,9 +476,7 @@ async function runPatrolForWiki(
 		if (label === 'zh') {
 			api = zhApi; // 复用已登录的 zh API
 		} else {
-			api = new MediaWikiApi(config.cm.api, {
-				headers: { cookie: config.cm.cookie! },
-			});
+			api = createCmApi();
 			await clientlogin(
 				api,
 				config.cm.bot.clientUsername || config.cm.bot.name,

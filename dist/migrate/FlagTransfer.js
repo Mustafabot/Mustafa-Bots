@@ -1,8 +1,8 @@
-import { MediaWikiApi } from 'wiki-saikou';
 import Parser from 'wikiparser-node';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError } from '../utils/retry.js';
@@ -435,12 +435,8 @@ async function main() {
     console.log(`完成记录已保存至: ${COMPLETED_FILE}`);
     console.log(`End time: ${new Date().toISOString()}`);
 }
-const zhApi = new MediaWikiApi(config.zh.api, {
-    headers: { cookie: config.zh.cookie },
-});
-const cmApi = new MediaWikiApi(config.cm.api, {
-    headers: { cookie: config.cm.cookie },
-});
+const zhApi = createZhApi();
+const cmApi = createCmApi();
 (async () => {
     try {
         await main();

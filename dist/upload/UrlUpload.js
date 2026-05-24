@@ -1,17 +1,13 @@
-import { MediaWikiApi } from 'wiki-saikou';
 import { URL } from 'url';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
+import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError } from '../utils/retry.js';
-const zhApi = new MediaWikiApi(config.zh.api, {
-    headers: { cookie: config.zh.cookie },
-});
-const cmApi = new MediaWikiApi(config.cm.api, {
-    headers: { cookie: config.cm.cookie },
-});
+const zhApi = createZhApi();
+const cmApi = createCmApi();
 const MAX_RETRIES = 3;
 const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
 const CONFIG_PAGE = 'User:没有羽翼的格雷塔/BotConfig/UrlUpload.json';

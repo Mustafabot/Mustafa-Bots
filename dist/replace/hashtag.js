@@ -1,10 +1,8 @@
-import { MediaWikiApi } from 'wiki-saikou';
+import { createZhApi } from '../utils/createApi.js';
 import Parser from 'wikiparser-node';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
-const api = new MediaWikiApi(config.zh.api, {
-    headers: { cookie: config.zh.cookie },
-});
+const api = createZhApi();
 (async () => {
     console.log(`Start time: ${new Date().toISOString()}`);
     await clientlogin(api, config.zh.bot.clientUsername, config.zh.bot.clientPassword)

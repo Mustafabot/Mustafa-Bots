@@ -1,4 +1,4 @@
-import { MediaWikiApi } from 'wiki-saikou';
+import { createZhApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 function parseArgs(args) {
@@ -165,9 +165,7 @@ async function nulleditPages(api, pages, dryRun, verbose, concurrency) {
         }
     }, 1000);
 }
-const api = new MediaWikiApi(config.zh.api, {
-    headers: { cookie: config.zh.cookie },
-});
+const api = createZhApi();
 (async () => {
     console.log(`Start time: ${new Date().toISOString()}`);
     const cliArgs = parseArgs(process.argv.slice(2));
