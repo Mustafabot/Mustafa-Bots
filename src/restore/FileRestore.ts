@@ -48,7 +48,7 @@ async function fetchFileList(api: MediaWikiApi, pageTitle: string): Promise<stri
 
 	const content = page.revisions[0].content;
 	const parsed = Parser.parse(content, pageTitle);
-	const poemNodes = parsed.querySelectorAll('ext#poem') as any[];
+	const poemNodes = parsed.querySelectorAll<Parser.ExtToken>('ext#poem');
 
 	if (poemNodes.length === 0) {
 		throw new Error(`配置页面 "${pageTitle}" 中未找到 <poem> 标签`);

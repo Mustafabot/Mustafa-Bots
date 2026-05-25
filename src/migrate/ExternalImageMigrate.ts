@@ -1,4 +1,4 @@
-﻿import { MediaWikiApi } from 'wiki-saikou';
+import { MediaWikiApi } from 'wiki-saikou';
 import Parser from 'wikiparser-node';
 import { URL } from 'url';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
@@ -45,13 +45,13 @@ async function withRetry<T>(
 
 interface ImageIssue {
 	src: string;
-	node: any;
+	node: Parser.ExtToken;
 	attributes: Record<string, string>;
 }
 
 interface TemplateImageIssue {
 	src: string;
-	templateNode: any;
+	templateNode: Parser.TranscludeToken;
 	externalImageParam: string;
 	internalImageParam: string;
 	articleName?: string;
@@ -655,28 +655,26 @@ function isWhitelisted(src: string, whitelist: RegExp[]): boolean {
 	return false;
 }
 
-function extractExternalImages(content: string, title: string, whitelist: RegExp[]): { parsed: any; issues: ImageIssue[] } {
+function extractExternalImages(content: string, title: string, whitelist: RegExp[]): { parsed: Parser.Token; issues: ImageIssue[] } {
 	const issues: ImageIssue[] = [];
 	const parsed = Parser.parse(content, title);
 
-	function traverse(node: any): void {
-		if (!node) return;
-
-		if (node.type === 'ext' && node.name === 'img') {
+	function traverse(node: Parser.AstNodes): void {
+		if ('type' in node && node.type !== 'text' && node.is<Parser.ExtToken>('ext') && node.name === 'img') {
 			const src = node.attributes?.src;
-			if (src) {
+			if (typeof src === 'string') {
 				const normalizedSrc = ensureUrlProtocol(src);
 				if (!isWhitelisted(src, whitelist)) {
 					issues.push({
 						src: normalizedSrc,
 						node,
-						attributes: { ...node.attributes },
+						attributes: node.getAttrs() as Record<string, string>,
 					});
 				}
 			}
 		}
 
-		if (node.children && Array.isArray(node.children)) {
+		if ('children' in node) {
 			for (const child of node.children) {
 				traverse(child);
 			}
@@ -690,7 +688,7 @@ function extractExternalImages(content: string, title: string, whitelist: RegExp
 function extractLinkTarget(wikitext: string): string | null {
 	const resolved = wikitext.replace(/\{\{!\}\}/g, '|');
 	const parsed = Parser.parse(resolved, false, 7);
-	const links = parsed.querySelectorAll('link') as any[];
+	const links = parsed.querySelectorAll<Parser.LinkToken>('link');
 	if (links.length > 0) {
 		const linkTarget: string | { title?: string } = links[0].link;
 		const targetStr = typeof linkTarget === 'string' ? linkTarget : String(linkTarget);
@@ -710,12 +708,12 @@ function extractLinkTarget(wikitext: string): string | null {
 }
 
 function extractTemplateImageParams(
-	parsed: any,
+	parsed: Parser.Token,
 	whitelist: RegExp[],
 	templateNameMap: Map<string, typeof templateImageConfig[number]>,
 ): TemplateImageIssue[] {
 	const issues: TemplateImageIssue[] = [];
-	const allTemplateNodes = parsed.querySelectorAll('template') as any[];
+	const allTemplateNodes = parsed.querySelectorAll<Parser.TranscludeToken>('template');
 	for (const templateNode of allTemplateNodes) {
 		const name: string | undefined = templateNode.name;
 		const normalizedName = name?.replace(/_/g, ' ');
@@ -1068,7 +1066,7 @@ function extractSizeFromStyle(style: string): { width?: number; height?: number 
 	return result;
 }
 
-function buildImgParserFunction(filename: string, attributes: Record<string, string>, refNode: any): any {
+function buildImgParserFunction(filename: string, attributes: Record<string, string>, refNode: Parser.Token): Parser.Token {
 	const imgName = filename.replace(/^File:/i, '');
 	let wikitext = `{{#img:{{filepath:${imgName}}}`;
 	for (const [key, value] of Object.entries(attributes)) {
@@ -1076,13 +1074,17 @@ function buildImgParserFunction(filename: string, attributes: Record<string, str
 			wikitext += `|${key}=${value}`;
 		}
 	}
+
 	wikitext += '}}';
-	const nodeConfig = refNode.getAttribute('config');
-	const root = Parser.parse(wikitext, refNode.getAttribute('include'), 7, nodeConfig);
-	return root.children[0] as any;
+
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const nodeConfig = (refNode as any).getAttribute('config');
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const root = Parser.parse(wikitext, (refNode as any).getAttribute('include'), 7, nodeConfig);
+	return root.children[0] as Parser.Token;
 }
 
-function buildInternalFileLink(filename: string, attributes: Record<string, string>, refNode: any): any {
+function buildInternalFileLink(filename: string, attributes: Record<string, string>, refNode: Parser.Token): Parser.Token {
 	if (!canMapStyleToWiki(attributes.style)) {
 		return buildImgParserFunction(filename, attributes, refNode);
 	}
@@ -1140,14 +1142,16 @@ function buildInternalFileLink(filename: string, attributes: Record<string, stri
 
 	const wikitext = `[[${parts.join('|')}]]`;
 
-	const nodeConfig = refNode.getAttribute('config');
-	const root = Parser.parse(wikitext, refNode.getAttribute('include'), 7, nodeConfig);
-	const parserNode = root.children[0] as any;
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const nodeConfig = (refNode as any).getAttribute('config');
+	// eslint-disable-next-line @typescript-eslint/no-explicit-any
+	const root = Parser.parse(wikitext, (refNode as any).getAttribute('include'), 7, nodeConfig);
+	const parserNode = root.children[0] as Parser.Token;
 
 	return parserNode;
 }
 
-function replaceImageNodes(parsed: any, issues: ImageIssue[], urlToFilename: Map<string, string>): string {
+function replaceImageNodes(parsed: Parser.Token, issues: ImageIssue[], urlToFilename: Map<string, string>): string {
 	for (const issue of issues) {
 		const filename = urlToFilename.get(issue.src);
 		if (!filename) continue;

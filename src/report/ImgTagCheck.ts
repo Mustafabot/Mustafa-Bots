@@ -67,11 +67,11 @@ function processPage(
 ): Issue[] {
 	const issues: Issue[] = [];
 	const parsed = Parser.parse(content, title);
-	const imgNodes = parsed.querySelectorAll('ext#img') as any[];
+	const imgNodes = parsed.querySelectorAll<Parser.ExtToken>('ext#img');
 
 	for (const node of imgNodes) {
-		const src: string | undefined = node.attributes?.src;
-		if (src && !isWhitelisted(src, whitelistRegexes)) {
+		const src = node.attributes?.src;
+		if (typeof src === 'string' && !isWhitelisted(src, whitelistRegexes)) {
 			issues.push({
 				title,
 				message: 'img标签src属性不符合外部图像白名单',
@@ -82,7 +82,7 @@ function processPage(
 		}
 	}
 
-	const allTemplateNodes = parsed.querySelectorAll('template') as any[];
+	const allTemplateNodes = parsed.querySelectorAll<Parser.TranscludeToken>('template');
 	for (const templateNode of allTemplateNodes) {
 		const name: string | undefined = templateNode.name;
 		const normalizedName = name?.replace(/_/g, ' ');

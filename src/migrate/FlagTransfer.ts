@@ -146,7 +146,7 @@ async function findFlagiconUsages(
         if (!page.revisions) continue;
         const wikitext: string = page.revisions[0].content;
         const parsed = Parser.parse(wikitext, page.title);
-        const templates = parsed.querySelectorAll('template') as any[];
+        const templates = parsed.querySelectorAll<Parser.TranscludeToken>('template') ;
         for (const tpl of templates) {
           const name: string = (tpl.name || '').replace(/^Template:/i, '').toLowerCase().replace(/_/g, ' ');
           if (name === 'flagicon') {

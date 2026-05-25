@@ -56,8 +56,8 @@ const api = createZhApi();
 		const { title, revisions: [{ content }] } = page;
 		console.log(`处理 ${title} 中！`);
 
-		const parser: any = Parser.parse(content);
-		const templates: any[] = parser.querySelectorAll('template#Template:Hashtags');
+		const parser = Parser.parse(content);
+		const templates = parser.querySelectorAll<Parser.TranscludeToken>('template#Template:Hashtags');
 		if (templates.length === 0) {
 			continue;
 		}
