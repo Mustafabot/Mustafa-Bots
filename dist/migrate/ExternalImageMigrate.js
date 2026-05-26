@@ -884,6 +884,14 @@ function extractSizeFromStyle(style) {
     }
     return result;
 }
+/**
+ * wikiparser-node 的 `getAttribute` 是内部 API，此函数封装类型转换以避免散落的 `as any`。
+ */
+function getInternalParserAttributes(refNode) {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const node = refNode;
+    return { config: node.getAttribute('config'), include: node.getAttribute('include') };
+}
 function buildImgParserFunction(filename, attributes, refNode) {
     const imgName = filename.replace(/^File:/i, '');
     let wikitext = `{{#img:{{filepath:${imgName}}}`;
@@ -893,10 +901,8 @@ function buildImgParserFunction(filename, attributes, refNode) {
         }
     }
     wikitext += '}}';
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const nodeConfig = refNode.getAttribute('config');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const root = Parser.parse(wikitext, refNode.getAttribute('include'), 7, nodeConfig);
+    const { config: nodeConfig, include } = getInternalParserAttributes(refNode);
+    const root = Parser.parse(wikitext, include, 7, nodeConfig);
     return root.children[0];
 }
 function buildInternalFileLink(filename, attributes, refNode) {
@@ -950,10 +956,8 @@ function buildInternalFileLink(filename, attributes, refNode) {
         parts.push(caption);
     }
     const wikitext = `[[${parts.join('|')}]]`;
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const nodeConfig = refNode.getAttribute('config');
-    // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const root = Parser.parse(wikitext, refNode.getAttribute('include'), 7, nodeConfig);
+    const { config: nodeConfig, include } = getInternalParserAttributes(refNode);
+    const root = Parser.parse(wikitext, include, 7, nodeConfig);
     const parserNode = root.children[0];
     return parserNode;
 }
@@ -1019,7 +1023,7 @@ function extractLocalFileFromSongboxImage(rawValue) {
     if (/^https?:\/\//i.test(trimmed))
         return null;
     // Handle [[File:name|...]] or [[File:name]] format
-    const fileLinkMatch = trimmed.match(/^\[\[File:(.+?)(?:\||\]\])/i);
+    const fileLinkMatch = trimmed.match(/^\[\[File:([^|\]]+)/i);
     if (fileLinkMatch)
         return fileLinkMatch[1].trim();
     // Handle "File:" prefix
@@ -1038,40 +1042,54 @@ async function fetchSongboxRedirects(api) {
     }
     return names;
 }
-async function findSongboxImage(api, articleName, songboxNames) {
-    if (songboxImageCache.has(articleName)) {
-        return songboxImageCache.get(articleName) ?? null;
+/**
+ * 批量查询多个条目的 Songbox 配图，使用单次 titles= 查询。
+ * 结果写入 songboxImageCache，未找到的条目缓存为 null。
+ */
+async function fetchSongboxImages(api, articleNames, songboxNames) {
+    const uncached = [];
+    for (const name of articleNames) {
+        if (!songboxImageCache.has(name)) {
+            uncached.push(name);
+        }
     }
+    if (uncached.length === 0)
+        return;
     const { data } = await withRetry(() => api.post({
         action: 'query',
         prop: 'revisions',
         rvprop: 'content',
-        titles: articleName,
+        titles: uncached.join('|'),
     }));
     const pages = Object.values(data.query.pages);
-    const page = pages[0];
-    if (!page?.revisions?.[0]?.content) {
-        songboxImageCache.set(articleName, null);
-        return null;
-    }
-    const content = page.revisions[0].content;
-    const parsed = Parser.parse(content, articleName);
-    const templates = parsed.querySelectorAll('template');
-    for (const tmpl of templates) {
-        const name = tmpl.name?.replace(/_/g, ' ').replace(/^template:/i, '');
-        if (!name || !songboxNames.has(name))
+    for (const page of pages) {
+        const title = page.title;
+        if (!page?.revisions?.[0]?.content) {
+            songboxImageCache.set(title, null);
             continue;
-        const imageValue = tmpl.getValue?.('image');
-        if (imageValue) {
-            const localFile = extractLocalFileFromSongboxImage(imageValue);
-            if (localFile) {
-                songboxImageCache.set(articleName, localFile);
-                return localFile;
+        }
+        const content = page.revisions[0].content;
+        const parsed = Parser.parse(content, title);
+        const templates = parsed.querySelectorAll('template');
+        let found = false;
+        for (const tmpl of templates) {
+            const name = tmpl.name?.replace(/_/g, ' ').replace(/^template:/i, '');
+            if (!name || !songboxNames.has(name))
+                continue;
+            const imageValue = tmpl.getValue?.('image');
+            if (imageValue) {
+                const localFile = extractLocalFileFromSongboxImage(imageValue);
+                if (localFile) {
+                    songboxImageCache.set(title, localFile);
+                    found = true;
+                    break;
+                }
             }
         }
+        if (!found) {
+            songboxImageCache.set(title, null);
+        }
     }
-    songboxImageCache.set(articleName, null);
-    return null;
 }
 async function processPage(uploadApi, editApi, page, whitelist, dryRun, templateNameMap, legalTitleRe, songboxNames) {
     const { title, content } = page;
@@ -1098,9 +1116,10 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun, template
             .map(i => i.articleName.trim()));
         if (uniqueArticles.size > 0) {
             console.log(`  检查 ${uniqueArticles.size} 个关联条目 Songbox 配图...`);
+            await fetchSongboxImages(editApi, uniqueArticles, songboxNames);
             const resolved = new Set();
             for (const articleName of uniqueArticles) {
-                const localFile = await findSongboxImage(editApi, articleName, songboxNames);
+                const localFile = songboxImageCache.get(articleName) ?? null;
                 if (!localFile)
                     continue;
                 const bareName = localFile.replace(/^File:/i, '');
