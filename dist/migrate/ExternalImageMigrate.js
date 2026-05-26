@@ -8,7 +8,7 @@ import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError, isAbuseFilterError } from '../utils/retry.js';
 import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
-import { buildTemplateNameMap } from '../utils/templateRedirects.js';
+import { buildTemplateNameMap, fetchRedirectsForTemplate } from '../utils/templateRedirects.js';
 Parser.config = 'moegirl';
 const MAX_API_RETRIES = 5;
 const API_RETRY_DELAY = 3000;
@@ -43,6 +43,9 @@ const MAX_RETRIES = 3;
 const MAX_RENAME_ATTEMPTS = 10;
 const FORCE_UPLOAD_RETRIES = 3;
 const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
+const SONGBOX_TEMPLATE = 'Template:VOCALOID Songbox';
+// Cache for Songbox image lookups: article title → local filename (or null if no image)
+const songboxImageCache = new Map();
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const CHECKPOINT_DIR = resolve(__dirname, '../../data/checkpoint');
@@ -520,22 +523,20 @@ function extractExternalImages(content, title, whitelist) {
     const issues = [];
     const parsed = Parser.parse(content, title);
     function traverse(node) {
-        if (!node)
-            return;
-        if (node.type === 'ext' && node.name === 'img') {
+        if ('type' in node && node.type !== 'text' && node.is('ext') && node.name === 'img') {
             const src = node.attributes?.src;
-            if (src) {
+            if (typeof src === 'string') {
                 const normalizedSrc = ensureUrlProtocol(src);
                 if (!isWhitelisted(src, whitelist)) {
                     issues.push({
                         src: normalizedSrc,
                         node,
-                        attributes: { ...node.attributes },
+                        attributes: node.getAttrs(),
                     });
                 }
             }
         }
-        if (node.children && Array.isArray(node.children)) {
+        if ('children' in node) {
             for (const child of node.children) {
                 traverse(child);
             }
@@ -892,7 +893,9 @@ function buildImgParserFunction(filename, attributes, refNode) {
         }
     }
     wikitext += '}}';
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const nodeConfig = refNode.getAttribute('config');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const root = Parser.parse(wikitext, refNode.getAttribute('include'), 7, nodeConfig);
     return root.children[0];
 }
@@ -947,7 +950,9 @@ function buildInternalFileLink(filename, attributes, refNode) {
         parts.push(caption);
     }
     const wikitext = `[[${parts.join('|')}]]`;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const nodeConfig = refNode.getAttribute('config');
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const root = Parser.parse(wikitext, refNode.getAttribute('include'), 7, nodeConfig);
     const parserNode = root.children[0];
     return parserNode;
@@ -1006,7 +1011,69 @@ async function editPage(api, title, content, summary, dryRun) {
         shouldRetry: () => true
     });
 }
-async function processPage(uploadApi, editApi, page, whitelist, dryRun, templateNameMap, legalTitleRe) {
+function extractLocalFileFromSongboxImage(rawValue) {
+    const trimmed = rawValue.trim();
+    if (!trimmed)
+        return null;
+    // Skip external URLs — can't use as local file reference
+    if (/^https?:\/\//i.test(trimmed))
+        return null;
+    // Handle [[File:name|...]] or [[File:name]] format
+    const fileLinkMatch = trimmed.match(/^\[\[File:(.+?)(?:\||\]\])/i);
+    if (fileLinkMatch)
+        return fileLinkMatch[1].trim();
+    // Handle "File:" prefix
+    const filePrefixMatch = trimmed.match(/^File:(.+)/i);
+    if (filePrefixMatch)
+        return filePrefixMatch[1].trim();
+    // Plain filename
+    return trimmed;
+}
+async function fetchSongboxRedirects(api) {
+    const redirects = await fetchRedirectsForTemplate(api, SONGBOX_TEMPLATE);
+    const canonicalName = SONGBOX_TEMPLATE.replace(/^Template:/i, '');
+    const names = new Set([canonicalName]);
+    for (const r of redirects) {
+        names.add(r.replace(/^Template:/i, ''));
+    }
+    return names;
+}
+async function findSongboxImage(api, articleName, songboxNames) {
+    if (songboxImageCache.has(articleName)) {
+        return songboxImageCache.get(articleName) ?? null;
+    }
+    const { data } = await withRetry(() => api.post({
+        action: 'query',
+        prop: 'revisions',
+        rvprop: 'content',
+        titles: articleName,
+    }));
+    const pages = Object.values(data.query.pages);
+    const page = pages[0];
+    if (!page?.revisions?.[0]?.content) {
+        songboxImageCache.set(articleName, null);
+        return null;
+    }
+    const content = page.revisions[0].content;
+    const parsed = Parser.parse(content, articleName);
+    const templates = parsed.querySelectorAll('template');
+    for (const tmpl of templates) {
+        const name = tmpl.name?.replace(/_/g, ' ').replace(/^template:/i, '');
+        if (!name || !songboxNames.has(name))
+            continue;
+        const imageValue = tmpl.getValue?.('image');
+        if (imageValue) {
+            const localFile = extractLocalFileFromSongboxImage(imageValue);
+            if (localFile) {
+                songboxImageCache.set(articleName, localFile);
+                return localFile;
+            }
+        }
+    }
+    songboxImageCache.set(articleName, null);
+    return null;
+}
+async function processPage(uploadApi, editApi, page, whitelist, dryRun, templateNameMap, legalTitleRe, songboxNames) {
     const { title, content } = page;
     const result = {
         title,
@@ -1017,13 +1084,41 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun, template
     };
     console.log(`处理页面: ${title}`);
     const { parsed, issues } = extractExternalImages(content, title, whitelist);
-    const templateIssues = extractTemplateImageParams(parsed, whitelist, templateNameMap);
+    let templateIssues = extractTemplateImageParams(parsed, whitelist, templateNameMap);
     result.imagesFound = issues.length + templateIssues.length;
     if (issues.length === 0 && templateIssues.length === 0) {
         console.log('  无外部图片需要处理');
         return result;
     }
     console.log(`  发现 ${issues.length} 个外部图片标签、${templateIssues.length} 个模板外部图片参数`);
+    // Songbox 预查：直接套用对应条目的 VOCALOID Songbox 配图
+    if (songboxNames.size > 0 && templateIssues.length > 0) {
+        const uniqueArticles = new Set(templateIssues
+            .filter(i => i.articleName)
+            .map(i => i.articleName.trim()));
+        if (uniqueArticles.size > 0) {
+            console.log(`  检查 ${uniqueArticles.size} 个关联条目 Songbox 配图...`);
+            const resolved = new Set();
+            for (const articleName of uniqueArticles) {
+                const localFile = await findSongboxImage(editApi, articleName, songboxNames);
+                if (!localFile)
+                    continue;
+                const bareName = localFile.replace(/^File:/i, '');
+                let applied = 0;
+                for (const issue of templateIssues) {
+                    if (issue.articleName?.trim() === articleName) {
+                        issue.templateNode.removeArg(issue.externalImageParam);
+                        issue.templateNode.setValue(issue.internalImageParam, bareName);
+                        resolved.add(issue);
+                        applied++;
+                    }
+                }
+                console.log(`    条目「${articleName}」→ File:${bareName} (套用 ${applied} 处)`);
+            }
+            result.imagesReplaced += resolved.size;
+            templateIssues = templateIssues.filter(i => !resolved.has(i));
+        }
+    }
     const srcToNodes = new Map();
     for (const issue of issues) {
         if (!srcToNodes.has(issue.src)) {
@@ -1113,6 +1208,7 @@ function parseArgs(args) {
         verbose: false,
         namespace: '0',
         reset: false,
+        disableSongboxLookup: false,
     };
     for (let i = 0; i < args.length; i++) {
         const arg = args[i];
@@ -1128,6 +1224,9 @@ function parseArgs(args) {
         }
         else if (arg === '--reset') {
             result.reset = true;
+        }
+        else if (arg === '--disable-songbox-lookup') {
+            result.disableSongboxLookup = true;
         }
     }
     return result;
@@ -1146,6 +1245,12 @@ async function main() {
     const whitelist = await fetchWhitelist(zhApi);
     const templateNameMap = await buildTemplateNameMap(zhApi, templateImageConfig);
     const legalTitleRe = await fetchLegalTitleRegex(zhApi);
+    const songboxNames = args.disableSongboxLookup
+        ? new Set()
+        : await fetchSongboxRedirects(zhApi);
+    if (songboxNames.size > 0) {
+        console.log(`  发现 ${songboxNames.size} 个 Songbox 模板变体`);
+    }
     if (args.dryRun) {
         console.log('\n[试运行模式] 不会实际上传和编辑');
     }
@@ -1164,7 +1269,7 @@ async function main() {
     await processPagesInBatches(zhApi, args.namespace, async (pages) => {
         stats.totalPages += pages.length;
         for (const page of pages) {
-            const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun, templateNameMap, legalTitleRe);
+            const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun, templateNameMap, legalTitleRe, songboxNames);
             stats.totalFound += result.imagesFound;
             stats.totalUploaded += result.imagesUploaded;
             stats.totalReplaced += result.imagesReplaced;

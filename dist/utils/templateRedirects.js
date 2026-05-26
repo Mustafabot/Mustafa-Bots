@@ -1,4 +1,4 @@
-async function fetchRedirectsForTemplate(api, templateName) {
+export async function fetchRedirectsForTemplate(api, templateName) {
     const aliases = [];
     let blcontinue;
     while (true) {

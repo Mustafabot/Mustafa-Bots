@@ -1,6 +1,6 @@
 import type { MediaWikiApi } from 'wiki-saikou';
 
-async function fetchRedirectsForTemplate(
+export async function fetchRedirectsForTemplate(
 	api: MediaWikiApi,
 	templateName: string,
 ): Promise<string[]> {

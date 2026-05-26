@@ -9,7 +9,7 @@ import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError, isAbuseFilterError } from '../utils/retry.js';
 import templateImageConfig from '../../config/templateImageConfig.json' with { type: 'json' };
-import { buildTemplateNameMap } from '../utils/templateRedirects.js';
+import { buildTemplateNameMap, fetchRedirectsForTemplate } from '../utils/templateRedirects.js';
 
 Parser.config = 'moegirl';
 
@@ -104,6 +104,7 @@ interface CliArgs {
 	verbose: boolean;
 	namespace: string;
 	reset: boolean;
+	disableSongboxLookup: boolean;
 }
 
 const zhApi = createZhApi();
@@ -113,6 +114,10 @@ const MAX_RETRIES = 3;
 const MAX_RENAME_ATTEMPTS = 10;
 const FORCE_UPLOAD_RETRIES = 3;
 const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
+const SONGBOX_TEMPLATE = 'Template:VOCALOID Songbox';
+
+// Cache for Songbox image lookups: article title → local filename (or null if no image)
+const songboxImageCache = new Map<string, string | null>();
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -1214,6 +1219,80 @@ async function editPage(api: MediaWikiApi, title: string, content: string, summa
 	);
 }
 
+function extractLocalFileFromSongboxImage(rawValue: string): string | null {
+	const trimmed = rawValue.trim();
+	if (!trimmed) return null;
+
+	// Skip external URLs — can't use as local file reference
+	if (/^https?:\/\//i.test(trimmed)) return null;
+
+	// Handle [[File:name|...]] or [[File:name]] format
+	const fileLinkMatch = trimmed.match(/^\[\[File:(.+?)(?:\||\]\])/i);
+	if (fileLinkMatch) return fileLinkMatch[1].trim();
+
+	// Handle "File:" prefix
+	const filePrefixMatch = trimmed.match(/^File:(.+)/i);
+	if (filePrefixMatch) return filePrefixMatch[1].trim();
+
+	// Plain filename
+	return trimmed;
+}
+
+async function fetchSongboxRedirects(api: MediaWikiApi): Promise<Set<string>> {
+	const redirects = await fetchRedirectsForTemplate(api, SONGBOX_TEMPLATE);
+	const canonicalName = SONGBOX_TEMPLATE.replace(/^Template:/i, '');
+	const names = new Set<string>([canonicalName]);
+	for (const r of redirects) {
+		names.add(r.replace(/^Template:/i, ''));
+	}
+	return names;
+}
+
+async function findSongboxImage(
+	api: MediaWikiApi,
+	articleName: string,
+	songboxNames: Set<string>,
+): Promise<string | null> {
+	if (songboxImageCache.has(articleName)) {
+		return songboxImageCache.get(articleName) ?? null;
+	}
+
+	const { data } = await withRetry(() => api.post({
+		action: 'query',
+		prop: 'revisions',
+		rvprop: 'content',
+		titles: articleName,
+	}));
+
+	const pages = Object.values((data as any).query.pages) as any[];
+	const page = pages[0];
+	if (!page?.revisions?.[0]?.content) {
+		songboxImageCache.set(articleName, null);
+		return null;
+	}
+
+	const content: string = page.revisions[0].content;
+	const parsed = Parser.parse(content, articleName);
+	const templates = parsed.querySelectorAll<Parser.TranscludeToken>('template');
+
+	for (const tmpl of templates) {
+		const name = tmpl.name?.replace(/_/g, ' ').replace(/^template:/i, '');
+		if (!name || !songboxNames.has(name)) continue;
+
+		const imageValue = tmpl.getValue?.('image');
+		if (imageValue) {
+			const localFile = extractLocalFileFromSongboxImage(imageValue);
+			if (localFile) {
+				songboxImageCache.set(articleName, localFile);
+				return localFile;
+			}
+		}
+	}
+
+	songboxImageCache.set(articleName, null);
+	return null;
+}
+
 async function processPage(
 	uploadApi: MediaWikiApi,
 	editApi: MediaWikiApi,
@@ -1222,6 +1301,7 @@ async function processPage(
 	dryRun: boolean,
 	templateNameMap: Map<string, typeof templateImageConfig[number]>,
 	legalTitleRe: RegExp,
+	songboxNames: Set<string>,
 ): Promise<PageProcessResult> {
 	const { title, content } = page;
 	const result: PageProcessResult = {
@@ -1235,7 +1315,7 @@ async function processPage(
 	console.log(`处理页面: ${title}`);
 
 	const { parsed, issues } = extractExternalImages(content, title, whitelist);
-	const templateIssues = extractTemplateImageParams(parsed, whitelist, templateNameMap);
+	let templateIssues = extractTemplateImageParams(parsed, whitelist, templateNameMap);
 	result.imagesFound = issues.length + templateIssues.length;
 
 	if (issues.length === 0 && templateIssues.length === 0) {
@@ -1244,6 +1324,36 @@ async function processPage(
 	}
 
 	console.log(`  发现 ${issues.length} 个外部图片标签、${templateIssues.length} 个模板外部图片参数`);
+
+	// Songbox 预查：直接套用对应条目的 VOCALOID Songbox 配图
+	if (songboxNames.size > 0 && templateIssues.length > 0) {
+		const uniqueArticles = new Set(
+			templateIssues
+				.filter(i => i.articleName)
+				.map(i => i.articleName!.trim()),
+		);
+		if (uniqueArticles.size > 0) {
+			console.log(`  检查 ${uniqueArticles.size} 个关联条目 Songbox 配图...`);
+			const resolved = new Set<TemplateImageIssue>();
+			for (const articleName of uniqueArticles) {
+				const localFile = await findSongboxImage(editApi, articleName, songboxNames);
+				if (!localFile) continue;
+				const bareName = localFile.replace(/^File:/i, '');
+				let applied = 0;
+				for (const issue of templateIssues) {
+					if (issue.articleName?.trim() === articleName) {
+						issue.templateNode.removeArg(issue.externalImageParam);
+						issue.templateNode.setValue(issue.internalImageParam, bareName);
+						resolved.add(issue);
+						applied++;
+					}
+				}
+				console.log(`    条目「${articleName}」→ File:${bareName} (套用 ${applied} 处)`);
+			}
+			result.imagesReplaced += resolved.size;
+			templateIssues = templateIssues.filter(i => !resolved.has(i));
+		}
+	}
 
 	const srcToNodes = new Map<string, ImageIssue[]>();
 	for (const issue of issues) {
@@ -1351,6 +1461,7 @@ function parseArgs(args: string[]): CliArgs {
 		verbose: false,
 		namespace: '0',
 		reset: false,
+		disableSongboxLookup: false,
 	};
 
 	for (let i = 0; i < args.length; i++) {
@@ -1364,6 +1475,8 @@ function parseArgs(args: string[]): CliArgs {
 			i++;
 		} else if (arg === '--reset') {
 			result.reset = true;
+		} else if (arg === '--disable-songbox-lookup') {
+			result.disableSongboxLookup = true;
 		}
 	}
 
@@ -1392,6 +1505,13 @@ async function main(): Promise<void> {
 
 	const legalTitleRe = await fetchLegalTitleRegex(zhApi);
 
+	const songboxNames = args.disableSongboxLookup
+		? new Set<string>()
+		: await fetchSongboxRedirects(zhApi);
+	if (songboxNames.size > 0) {
+		console.log(`  发现 ${songboxNames.size} 个 Songbox 模板变体`);
+	}
+
 	if (args.dryRun) {
 		console.log('\n[试运行模式] 不会实际上传和编辑');
 	}
@@ -1416,7 +1536,7 @@ async function main(): Promise<void> {
 		stats.totalPages += pages.length;
 
 		for (const page of pages) {
-			const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun, templateNameMap, legalTitleRe);
+			const result = await processPage(cmApi, zhApi, page, whitelist, args.dryRun, templateNameMap, legalTitleRe, songboxNames);
 
 			stats.totalFound += result.imagesFound;
 			stats.totalUploaded += result.imagesUploaded;

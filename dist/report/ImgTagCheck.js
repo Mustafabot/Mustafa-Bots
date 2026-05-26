@@ -42,7 +42,7 @@ function processPage(title, content, whitelistRegexes, templateNameMap) {
     const imgNodes = parsed.querySelectorAll('ext#img');
     for (const node of imgNodes) {
         const src = node.attributes?.src;
-        if (src && !isWhitelisted(src, whitelistRegexes)) {
+        if (typeof src === 'string' && !isWhitelisted(src, whitelistRegexes)) {
             issues.push({
                 title,
                 message: 'img标签src属性不符合外部图像白名单',
