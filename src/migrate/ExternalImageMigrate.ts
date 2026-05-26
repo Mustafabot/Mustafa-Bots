@@ -1443,7 +1443,12 @@ async function processPage(
 		const newContent = replaceImageNodes(parsed, issues, urlToFilename);
 
 		try {
-			await editPage(editApi, title, newContent, DEFAULT_COMMENT + `（${totalReplacements}个）`, dryRun);
+			const catParts: string[] = [];
+			if (issues.length > 0) catParts.push(`<img/>${issues.length}个`);
+			if (templateIssues.length > 0) catParts.push(`模板外链图片参数${templateIssues.length}个`);
+			if (songboxReplaceCount > 0) catParts.push(`套用既有条目[[T:VOCALOID Songbox]]头图${songboxReplaceCount}个`);
+			const summary = DEFAULT_COMMENT + '（' + catParts.join('，') + `，共${totalReplacements}个）`;
+			await editPage(editApi, title, newContent, summary, dryRun);
 			result.imagesReplaced = totalReplacements;
 			console.log('  页面编辑成功');
 		} catch (error: any) {
