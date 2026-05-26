@@ -1434,8 +1434,10 @@ async function processPage(
 		}
 	}
 
-	if (urlToFilename.size > 0) {
-		const totalReplacements = issues.length + templateIssues.length;
+	const songboxReplaceCount = result.imagesReplaced;
+
+	if (urlToFilename.size > 0 || songboxReplaceCount > 0) {
+		const totalReplacements = issues.length + templateIssues.length + songboxReplaceCount;
 		console.log(`  替换页面中的 ${totalReplacements} 个图片引用...`);
 		replaceTemplateImageParams(templateIssues, urlToFilename);
 		const newContent = replaceImageNodes(parsed, issues, urlToFilename);
