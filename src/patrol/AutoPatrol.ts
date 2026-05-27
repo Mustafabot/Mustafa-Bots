@@ -110,7 +110,6 @@ async function patrolEditPhase(
 			action: 'query',
 			list: 'recentchanges',
 			rcshow: 'unpatrolled',
-			rctype: 'edit|new|log',
 			rcprop: 'tags|user|ids',
 			rclimit: 500,
 			rcend: rcEnd,
