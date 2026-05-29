@@ -80,7 +80,7 @@ async function queryStatistics(api: MediaWikiApi, label: string, verbose: boolea
 	const editResult = await api.postWithToken('csrf', {
 		action: 'edit',
 		title: REPORT_TITLE,
-		appendtext: '\n\n'+wikitext,
+		appendtext: wikitext,
 		summary: '机器人：更新站点统计数据',
 		bot: true,
 		notminor: true,
