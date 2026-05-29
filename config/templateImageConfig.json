@@ -29,7 +29,7 @@
         "internalImageParam": "image",
         "articleParams": ["条目", "曲名"],
         "fallback": {
-            "urlTemplate": "https://nicovideo.cdn.nimg.jp/thumbnails/{id}/{id}.M",
+            "urlTemplate": "https://nicovideo.cdn.nimg.jp/thumbnails/{id}/{id}",
             "params": ["id"]
         }
     },

@@ -123,12 +123,32 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const CHECKPOINT_DIR = resolve(__dirname, '../../data/checkpoint');
 const CHECKPOINT_FILE = (namespace: string) => resolve(CHECKPOINT_DIR, `external_image_migrate_${namespace}.json`);
+const PENDING_FILE = (namespace: string) => resolve(CHECKPOINT_DIR, `external_image_migrate_${namespace}_pending.json`);
 const TEMP_DIR = resolve(__dirname, '../../temp');
 
 interface CheckpointData {
 	namespace: string;
 	apcontinue: string;
 	lastUpdate: string;
+}
+
+interface PendingEditFailure {
+	title: string;
+	error: string;
+	files: Array<[string, string]>;
+}
+
+function savePendingFailures(namespace: string, failures: PendingEditFailure[]): void {
+	try {
+		if (failures.length === 0) return;
+		if (!existsSync(CHECKPOINT_DIR)) {
+			mkdirSync(CHECKPOINT_DIR, { recursive: true });
+		}
+		writeFileSync(PENDING_FILE(namespace), JSON.stringify(failures, null, 2), 'utf-8');
+		console.log(`  已保存 ${failures.length} 个编辑失败的待处理记录到: ${PENDING_FILE(namespace)}`);
+	} catch (error) {
+		console.error('  保存待处理失败记录失败:', error);
+	}
 }
 
 function saveCheckpoint(namespace: string, apcontinue: string): void {
@@ -329,6 +349,10 @@ const MIME_TO_EXT: Record<string, string> = {
 	'font/woff2': '.woff2',
 	'application/font-woff2': '.woff2',
 };
+
+function escapeWikitextLink(s: string): string {
+	return s.replace(/\]\]/g, '&#93;&#93;');
+}
 
 function changeFileExtension(filename: string, newExt: string): string {
 	const match = filename.match(/^(File:.+)(\.[a-zA-Z0-9]+)$/);
@@ -1132,19 +1156,19 @@ function buildInternalFileLink(filename: string, attributes: Record<string, stri
 	}
 
 	if (attributes.alt) {
-		options.push(`alt=${attributes.alt}`);
+		options.push(`alt=${escapeWikitextLink(attributes.alt)}`);
 	}
 
 	if (attributes['class']) {
-		options.push(`class=${attributes['class']}`);
+		options.push(`class=${escapeWikitextLink(attributes['class'])}`);
 	}
 
 	if (attributes.link) {
-		options.push(`link=${attributes.link}`);
+		options.push(`link=${escapeWikitextLink(attributes.link)}`);
 	}
 
 	if (attributes.title) {
-		caption = attributes.title;
+		caption = escapeWikitextLink(attributes.title);
 	}
 
 	const parts = ['File:' + imgName, ...options];
@@ -1342,6 +1366,8 @@ async function processPage(
 
 	console.log(`  发现 ${issues.length} 个外部图片标签、${templateIssues.length} 个模板外部图片参数`);
 
+	let songboxResolvedCount = 0;
+
 	// Songbox 预查：直接套用对应条目的 VOCALOID Songbox 配图
 	if (songboxNames.size > 0 && templateIssues.length > 0) {
 		const uniqueArticles = new Set(
@@ -1368,7 +1394,7 @@ async function processPage(
 				}
 				console.log(`    条目「${articleName}」→ File:${bareName} (套用 ${applied} 处)`);
 			}
-			result.imagesReplaced += resolved.size;
+			songboxResolvedCount += resolved.size;
 			templateIssues = templateIssues.filter(i => !resolved.has(i));
 		}
 	}
@@ -1452,10 +1478,8 @@ async function processPage(
 		}
 	}
 
-	const songboxReplaceCount = result.imagesReplaced;
-
-	if (urlToFilename.size > 0 || songboxReplaceCount > 0) {
-		const totalReplacements = issues.length + templateIssues.length + songboxReplaceCount;
+	if (urlToFilename.size > 0 || songboxResolvedCount > 0) {
+		const totalReplacements = issues.length + templateIssues.length + songboxResolvedCount;
 		console.log(`  替换页面中的 ${totalReplacements} 个图片引用...`);
 		replaceTemplateImageParams(templateIssues, urlToFilename);
 		const newContent = replaceImageNodes(parsed, issues, urlToFilename);
@@ -1464,7 +1488,7 @@ async function processPage(
 			const catParts: string[] = [];
 			if (issues.length > 0) catParts.push(`<img/>${issues.length}个`);
 			if (templateIssues.length > 0) catParts.push(`模板外链图片参数${templateIssues.length}个`);
-			if (songboxReplaceCount > 0) catParts.push(`套用既有条目[[T:VOCALOID Songbox]]头图${songboxReplaceCount}个`);
+			if (songboxResolvedCount > 0) catParts.push(`套用既有条目[[T:VOCALOID Songbox]]头图${songboxResolvedCount}个`);
 			const summary = DEFAULT_COMMENT + '（' + catParts.join('，') + `，共${totalReplacements}个）`;
 			await editPage(editApi, title, newContent, summary, dryRun);
 			result.imagesReplaced = totalReplacements;
@@ -1473,8 +1497,11 @@ async function processPage(
 			console.error(`  页面编辑失败: ${error.message}`);
 			result.editError = error.message;
 			result.pendingFiles = [...urlToFilename.entries()];
+			result.imagesReplaced = songboxResolvedCount;
 			console.log(`  已记录 ${result.pendingFiles.length} 个待替换文件`);
 		}
+	} else {
+		result.imagesReplaced = songboxResolvedCount;
 	}
 
 	return result;
@@ -1557,6 +1584,8 @@ async function main(): Promise<void> {
 		failedUploads: [],
 	};
 
+		const editFailures: PendingEditFailure[] = [];
+
 	await processPagesInBatches(zhApi, args.namespace, async (pages) => {
 		stats.totalPages += pages.length;
 
@@ -1569,6 +1598,14 @@ async function main(): Promise<void> {
 
 			if (result.uploadResults.some(u => !u.success)) {
 				stats.failedUploads.push(...result.uploadResults.filter(u => !u.success));
+			}
+
+			if (result.editError && result.pendingFiles?.length) {
+				editFailures.push({
+					title: result.title,
+					error: result.editError,
+					files: result.pendingFiles,
+				});
 			}
 		}
 	}, initialApcontinue);
@@ -1584,6 +1621,14 @@ async function main(): Promise<void> {
 		stats.failedUploads.forEach(u => {
 			console.log(`  - ${u.filename}: ${u.error}`);
 		});
+	}
+
+	if (editFailures.length > 0) {
+		console.log(`\n编辑失败的页面: ${editFailures.length}`);
+		for (const f of editFailures) {
+			console.log(`  - ${f.title}: ${f.error}（${f.files.length} 个待替换文件）`);
+		}
+		savePendingFailures(args.namespace, editFailures);
 	}
 
 	console.log(`\nEnd time: ${new Date().toISOString()}`);
