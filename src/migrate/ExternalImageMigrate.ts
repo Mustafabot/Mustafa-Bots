@@ -740,8 +740,9 @@ function extractTemplateImageParams(
 	parsed: Parser.Token,
 	whitelist: RegExp[],
 	templateNameMap: Map<string, typeof templateImageConfig[number]>,
-): TemplateImageIssue[] {
+): { issues: TemplateImageIssue[]; filepathResolved: number } {
 	const issues: TemplateImageIssue[] = [];
+	let filepathResolved = 0;
 	const allTemplateNodes = parsed.querySelectorAll<Parser.TranscludeToken>('template');
 	for (const templateNode of allTemplateNodes) {
 		const name: string | undefined = templateNode.name;
@@ -753,6 +754,14 @@ function extractTemplateImageParams(
 		let src: string | undefined;
 
 		if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
+				// {{filepath:...}} 表示内部图片引用，直接在提取阶段规范化
+				const fpMatch = imageValue.trim().match(/^\{\{filepath\s*:\s*([^|}]+?)\s*(?:\|[^}]*)?\}\}$/i);
+				if (fpMatch) {
+					templateNode.removeArg(templateConfig.externalImageParam);
+					templateNode.setValue(templateConfig.internalImageParam, fpMatch[1].trim());
+					filepathResolved++;
+					continue;
+				}
 			src = ensureUrlProtocol(imageValue.trim());
 		} else if (!imageValue?.trim() && (templateConfig as any).fallback) {
 			const fb = (templateConfig as any).fallback;
@@ -795,7 +804,7 @@ function extractTemplateImageParams(
 			});
 		}
 	}
-	return issues;
+	return { issues, filepathResolved };
 }
 
 interface MimeMismatchError {
@@ -1356,12 +1365,16 @@ async function processPage(
 	console.log(`处理页面: ${title}`);
 
 	const { parsed, issues } = extractExternalImages(content, title, whitelist);
-	let templateIssues = extractTemplateImageParams(parsed, whitelist, templateNameMap);
-	result.imagesFound = issues.length + templateIssues.length;
+	let { issues: templateIssues, filepathResolved: filepathResolvedCount } = extractTemplateImageParams(parsed, whitelist, templateNameMap);
+	result.imagesFound = issues.length + templateIssues.length + filepathResolvedCount;
 
 	if (issues.length === 0 && templateIssues.length === 0) {
 		console.log('  无外部图片需要处理');
 		return result;
+	}
+
+	if (filepathResolvedCount > 0) {
+		console.log(`  filepath内部图片${filepathResolvedCount}个已直接替换`);
 	}
 
 	console.log(`  发现 ${issues.length} 个外部图片标签、${templateIssues.length} 个模板外部图片参数`);
@@ -1478,8 +1491,9 @@ async function processPage(
 		}
 	}
 
-	if (urlToFilename.size > 0 || songboxResolvedCount > 0) {
-		const totalReplacements = issues.length + templateIssues.length + songboxResolvedCount;
+	const preResolvedCount = songboxResolvedCount + filepathResolvedCount;
+	if (urlToFilename.size > 0 || preResolvedCount > 0) {
+		const totalReplacements = issues.length + templateIssues.length + preResolvedCount;
 		console.log(`  替换页面中的 ${totalReplacements} 个图片引用...`);
 		replaceTemplateImageParams(templateIssues, urlToFilename);
 		const newContent = replaceImageNodes(parsed, issues, urlToFilename);
@@ -1489,6 +1503,7 @@ async function processPage(
 			if (issues.length > 0) catParts.push(`<img/>${issues.length}个`);
 			if (templateIssues.length > 0) catParts.push(`模板外链图片参数${templateIssues.length}个`);
 			if (songboxResolvedCount > 0) catParts.push(`套用既有条目[[T:VOCALOID Songbox]]头图${songboxResolvedCount}个`);
+			if (filepathResolvedCount > 0) catParts.push(`filepath内部图片${filepathResolvedCount}个`);
 			const summary = DEFAULT_COMMENT + '（' + catParts.join('，') + `，共${totalReplacements}个）`;
 			await editPage(editApi, title, newContent, summary, dryRun);
 			result.imagesReplaced = totalReplacements;
@@ -1497,11 +1512,11 @@ async function processPage(
 			console.error(`  页面编辑失败: ${error.message}`);
 			result.editError = error.message;
 			result.pendingFiles = [...urlToFilename.entries()];
-			result.imagesReplaced = songboxResolvedCount;
+			result.imagesReplaced = preResolvedCount;
 			console.log(`  已记录 ${result.pendingFiles.length} 个待替换文件`);
 		}
 	} else {
-		result.imagesReplaced = songboxResolvedCount;
+		result.imagesReplaced = preResolvedCount;
 	}
 
 	return result;
