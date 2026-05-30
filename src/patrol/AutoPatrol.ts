@@ -434,8 +434,8 @@ async function runPatrolForWiki(
 	const zhApi = createZhApi();
 	await clientlogin(
 		zhApi,
-		config.zh.bot.clientUsername || config.zh.bot.name,
-		config.zh.bot.clientPassword,
+		config.zh.bot.clientUsername!,
+		config.zh.bot.clientPassword!,
 	);
 
 	// ── 预拉取用户组（两个站共享用户表，用 zh API） ──
@@ -478,8 +478,8 @@ async function runPatrolForWiki(
 			api = createCmApi();
 			await clientlogin(
 				api,
-				config.cm.bot.clientUsername || config.cm.bot.name,
-				config.cm.bot.clientPassword,
+				config.cm.bot.clientUsername!,
+				config.cm.bot.clientPassword!,
 			);
 		}
 

@@ -1,6 +1,4 @@
 interface BotConfig {
-    name: string;
-    password?: string;
     clientUsername?: string;
     clientPassword?: string;
 }
@@ -8,6 +6,7 @@ interface WikiConfig {
     api: string;
     cookie?: string;
     bot: BotConfig;
+    main?: BotConfig;
 }
 interface Config {
     useragent?: string;

@@ -324,7 +324,7 @@ async function runPatrolForWiki(label, api, privilegedUsers, opts, mode) {
     console.log(`${PREFIX} 目标站点: ${wikiLabels.join(' + ')}`);
     // ── 创建 zh API 并登录（用于拉取用户组） ──
     const zhApi = createZhApi();
-    await clientlogin(zhApi, config.zh.bot.clientUsername || config.zh.bot.name, config.zh.bot.clientPassword);
+    await clientlogin(zhApi, config.zh.bot.clientUsername, config.zh.bot.clientPassword);
     // ── 预拉取用户组（两个站共享用户表，用 zh API） ──
     console.log(`${PREFIX} 预拉取用户组 (通过zh站)...`);
     const privilegedUsers = new Set();
@@ -359,7 +359,7 @@ async function runPatrolForWiki(label, api, privilegedUsers, opts, mode) {
         }
         else {
             api = createCmApi();
-            await clientlogin(api, config.cm.bot.clientUsername || config.cm.bot.name, config.cm.bot.clientPassword);
+            await clientlogin(api, config.cm.bot.clientUsername, config.cm.bot.clientPassword);
         }
         const result = await runPatrolForWiki(label, api, privilegedUsers, opts, mode);
         allResults.push(result);
