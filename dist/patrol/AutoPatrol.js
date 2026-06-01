@@ -288,11 +288,11 @@ async function fetchMoveLogMap(api, privilegedUsers, rcEnd) {
     } while (lecontinue);
     return movedPages;
 }
-async function runPatrolForWiki(label, api, privilegedUsers, opts, mode) {
+async function runPatrolForWiki(label, api, phase1PrivilegedUsers, phase2PrivilegedUsers, opts, mode) {
     const result = { label };
     if (mode === 'edit' || mode === 'all') {
         console.log(`${PREFIX}:${label} === 阶段1: 编辑巡查 ===`);
-        result.editPhase = await patrolEditPhase(api, privilegedUsers, opts);
+        result.editPhase = await patrolEditPhase(api, phase1PrivilegedUsers, opts);
         console.log(`${PREFIX}:${label} 阶段1 扫描完成: ${result.editPhase.totalScanned}条未巡查, ${result.editPhase.totalHit}条命中, ${result.editPhase.totalSkipped}条跳过`);
         console.log(`${PREFIX}:${label} 阶段1 巡逻: 成功 ${result.editPhase.successCount}, 跳过 ${result.editPhase.skipCount}`);
         if (result.editPhase.failures.length > 0) {
@@ -303,7 +303,7 @@ async function runPatrolForWiki(label, api, privilegedUsers, opts, mode) {
     }
     if ((mode === 'moved' || mode === 'all') && label === 'zh') {
         console.log(`${PREFIX}:${label} === 阶段2: 新页面打回巡查 ===`);
-        result.movedPhase = await patrolMovedPhase(api, privilegedUsers, opts);
+        result.movedPhase = await patrolMovedPhase(api, phase2PrivilegedUsers, opts);
         console.log(`${PREFIX}:${label} 阶段2 扫描完成: ${result.movedPhase.totalScanned}条未巡查新页面, ${result.movedPhase.candidateCount}条候选, ${result.movedPhase.totalHit}条命中, ${result.movedPhase.totalSkipped}条跳过`);
         console.log(`${PREFIX}:${label} 阶段2 巡逻: 成功 ${result.movedPhase.successCount}, 跳过 ${result.movedPhase.skipCount}`);
         if (result.movedPhase.failures.length > 0) {
@@ -327,9 +327,11 @@ async function runPatrolForWiki(label, api, privilegedUsers, opts, mode) {
     await clientlogin(zhApi, config.zh.bot.clientUsername, config.zh.bot.clientPassword);
     // ── 预拉取用户组（两个站共享用户表，用 zh API） ──
     console.log(`${PREFIX} 预拉取用户组 (通过zh站)...`);
-    const privilegedUsers = new Set();
-    const userGroups = ['sysop', 'patroller', 'goodeditor'];
-    for (const group of userGroups) {
+    const PHASE1_GROUPS = ['sysop', 'patroller', 'goodeditor', 'honoredmaintainer', 'bot', 'staff'];
+    const PHASE2_GROUP_SET = new Set(['sysop', 'patroller']);
+    const phase1PrivilegedUsers = new Set();
+    const phase2PrivilegedUsers = new Set();
+    for (const group of PHASE1_GROUPS) {
         let aufrom;
         do {
             const params = {
@@ -343,12 +345,17 @@ async function runPatrolForWiki(label, api, privilegedUsers, opts, mode) {
             const { data } = await zhApi.post(params);
             const users = data.query?.allusers || [];
             for (const u of users) {
-                privilegedUsers.add(u.name.trim());
+                const name = u.name.trim();
+                phase1PrivilegedUsers.add(name);
+                if (PHASE2_GROUP_SET.has(group)) {
+                    phase2PrivilegedUsers.add(name);
+                }
             }
             aufrom = data.continue?.aufrom;
         } while (aufrom);
     }
-    console.log(`${PREFIX} sysop + patroller + goodeditor 去重后: ${privilegedUsers.size}`);
+    console.log(`${PREFIX} 阶段1用户组 (6组) 去重后: ${phase1PrivilegedUsers.size}`);
+    console.log(`${PREFIX} 阶段2用户组 (sysop+patroller) 去重后: ${phase2PrivilegedUsers.size}`);
     const opts = { dryRun, verbose, days, interval, limit };
     // ── 遍历各站执行巡查 ──
     const allResults = [];
@@ -361,7 +368,7 @@ async function runPatrolForWiki(label, api, privilegedUsers, opts, mode) {
             api = createCmApi();
             await clientlogin(api, config.cm.bot.clientUsername, config.cm.bot.clientPassword);
         }
-        const result = await runPatrolForWiki(label, api, privilegedUsers, opts, mode);
+        const result = await runPatrolForWiki(label, api, phase1PrivilegedUsers, phase2PrivilegedUsers, opts, mode);
         allResults.push(result);
     }
     // ── 汇总 ──
