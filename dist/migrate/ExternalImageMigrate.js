@@ -594,6 +594,9 @@ function extractTemplateImageParams(parsed, whitelist, templateNameMap) {
         const templateConfig = normalizedName ? templateNameMap.get(normalizedName) : undefined;
         if (!templateConfig)
             continue;
+        const existingInternal = templateNode.getValue?.(templateConfig.internalImageParam);
+        if (existingInternal && existingInternal.trim())
+            continue;
         const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
         let src;
         if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
@@ -1129,7 +1132,9 @@ async function processPage(uploadApi, editApi, page, whitelist, dryRun, template
     };
     console.log(`处理页面: ${title}`);
     const { parsed, issues } = extractExternalImages(content, title, whitelist);
-    let { issues: templateIssues, filepathResolved: filepathResolvedCount } = extractTemplateImageParams(parsed, whitelist, templateNameMap);
+    const extracted = extractTemplateImageParams(parsed, whitelist, templateNameMap);
+    let { issues: templateIssues } = extracted;
+    const { filepathResolved: filepathResolvedCount } = extracted;
     result.imagesFound = issues.length + templateIssues.length + filepathResolvedCount;
     if (issues.length === 0 && templateIssues.length === 0) {
         console.log('  无外部图片需要处理');

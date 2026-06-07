@@ -18,3 +18,4 @@ docs/
 .nemp/
 RTK.md
 temp/
+.playwright-mcp/
