@@ -78,6 +78,8 @@ interface MovedPhaseResult {
 	candidateCount: number;
 	totalHit: number;
 	totalSkipped: number;
+	userSubpageHit: number;
+	draftHit: number;
 }
 
 interface MoveInfo {
@@ -249,7 +251,7 @@ async function patrolMovedPhase(
 	console.log(`${PREFIX} 未巡查新页面: ${newPages.length}条`);
 
 	if (newPages.length === 0) {
-		return { successCount: 0, skipCount: 0, failures: [], totalScanned: 0, candidateCount: 0, totalHit: 0, totalSkipped: 0 };
+		return { successCount: 0, skipCount: 0, failures: [], totalScanned: 0, candidateCount: 0, totalHit: 0, totalSkipped: 0, userSubpageHit: 0, draftHit: 0 };
 	}
 
 	// 批量拉取移动日志
@@ -259,7 +261,7 @@ async function patrolMovedPhase(
 		movedPages = await fetchMoveLogMap(api, privilegedUsers, earliestTs);
 	} catch (err) {
 		console.error(`${PREFIX} 移动日志拉取失败，跳过阶段2: ${err instanceof Error ? err.message : String(err)}`);
-		return { successCount: 0, skipCount: 0, failures: [], totalScanned: newPages.length, candidateCount: 0, totalHit: 0, totalSkipped: newPages.length };
+		return { successCount: 0, skipCount: 0, failures: [], totalScanned: newPages.length, candidateCount: 0, totalHit: 0, totalSkipped: newPages.length, userSubpageHit: 0, draftHit: 0 };
 	}
 
 	console.log(`${PREFIX} 候选移动: ${movedPages.size}条`);
@@ -269,6 +271,8 @@ async function patrolMovedPhase(
 	let totalSkipped = 0;
 	let successCount = 0;
 	let skipCount = 0;
+	let userSubpageHit = 0;
+	let draftHit = 0;
 	const failures: string[] = [];
 
 	for (const rc of newPages) {
@@ -278,18 +282,28 @@ async function patrolMovedPhase(
 			continue;
 		}
 
-		// 验证目标在创建者用户页下
+		// 按目标前缀判定命中类型
 		const creator = (rc.user || '').trim();
-		const expectedPrefix = `User:${creator}/`;
-		if (!moveInfo.targetTitle.startsWith(expectedPrefix)) {
+		const target = moveInfo.targetTitle;
+		let hitKind: 'usersubpage' | 'draft' | null = null;
+		if (target.startsWith(`User:${creator}/`)) {
+			hitKind = 'usersubpage';
+		} else if (target.startsWith('Draft:')) {
+			hitKind = 'draft';
+		}
+
+		if (!hitKind) {
 			totalSkipped++;
 			continue;
 		}
 
 		totalHit++;
+		if (hitKind === 'usersubpage') userSubpageHit++;
+		else draftHit++;
 
 		if (dryRun) {
-			console.log(`  [DRY-RUN] rcid=${rc.rcid} 页面:${rc.title} (打回者:${moveInfo.operator} → ${moveInfo.targetTitle}) → 将巡逻`);
+			const kindLabel = hitKind === 'draft' ? '草稿' : '用户子页';
+			console.log(`  [DRY-RUN] rcid=${rc.rcid} 页面:${rc.title} [${kindLabel}] (打回者:${moveInfo.operator} → ${moveInfo.targetTitle}) → 将巡逻`);
 			continue;
 		}
 
@@ -323,7 +337,8 @@ async function patrolMovedPhase(
 				},
 			);
 			successCount++;
-			if (verbose) console.log(`  rcid=${rc.rcid} 页面:${rc.title} → 已巡逻`);
+			const kindLabel = hitKind === 'draft' ? '草稿' : '用户子页';
+			if (verbose) console.log(`  rcid=${rc.rcid} 页面:${rc.title} [${kindLabel}] → 已巡逻`);
 		} catch (err: unknown) {
 			skipCount++;
 			const reason = err instanceof Error ? err.message : String(err);
@@ -336,7 +351,7 @@ async function patrolMovedPhase(
 		await sleep(randomInterval(interval));
 	}
 
-	return { successCount, skipCount, failures, totalScanned: newPages.length, candidateCount: movedPages.size, totalHit, totalSkipped };
+	return { successCount, skipCount, failures, totalScanned: newPages.length, candidateCount: movedPages.size, totalHit, totalSkipped, userSubpageHit, draftHit };
 }
 
 async function fetchMoveLogMap(
@@ -367,7 +382,7 @@ async function fetchMoveLogMap(
 			if (!privilegedUsers.has(operator)) continue;
 
 			const targetTitle: string = ev.params?.target_title || '';
-			if (!targetTitle.startsWith('User:')) continue;
+			if (!targetTitle.startsWith('User:') && !targetTitle.startsWith('Draft:')) continue;
 
 			const originalTitle: string = ev.title || '';
 			if (!originalTitle || movedPages.has(originalTitle)) continue;
@@ -411,7 +426,7 @@ async function runPatrolForWiki(
 	if ((mode === 'moved' || mode === 'all') && label === 'zh') {
 		console.log(`${PREFIX}:${label} === 阶段2: 新页面打回巡查 ===`);
 		result.movedPhase = await patrolMovedPhase(api, phase2PrivilegedUsers, opts);
-		console.log(`${PREFIX}:${label} 阶段2 扫描完成: ${result.movedPhase.totalScanned}条未巡查新页面, ${result.movedPhase.candidateCount}条候选, ${result.movedPhase.totalHit}条命中, ${result.movedPhase.totalSkipped}条跳过`);
+		console.log(`${PREFIX}:${label} 阶段2 扫描完成: ${result.movedPhase.totalScanned}条未巡查新页面, ${result.movedPhase.candidateCount}条候选, 命中${result.movedPhase.totalHit} (用户子页${result.movedPhase.userSubpageHit}/草稿${result.movedPhase.draftHit}), ${result.movedPhase.totalSkipped}条跳过`);
 		console.log(`${PREFIX}:${label} 阶段2 巡逻: 成功 ${result.movedPhase.successCount}, 跳过 ${result.movedPhase.skipCount}`);
 		if (result.movedPhase.failures.length > 0) {
 			console.log(`${PREFIX}:${label} 阶段2 失败明细:`);
@@ -502,7 +517,7 @@ async function runPatrolForWiki(
 	for (const r of allResults) {
 		const editOk = r.editPhase ? `成功 ${r.editPhase.successCount}/跳过 ${r.editPhase.skipCount}` : '未执行';
 		const movedOk = r.movedPhase
-			? `成功 ${r.movedPhase.successCount}/跳过 ${r.movedPhase.skipCount}`
+			? `成功 ${r.movedPhase.successCount}/跳过 ${r.movedPhase.skipCount} (用户子页${r.movedPhase.userSubpageHit}/草稿${r.movedPhase.draftHit})`
 			: r.label === 'cm'
 				? '跳过'
 				: '未执行';
