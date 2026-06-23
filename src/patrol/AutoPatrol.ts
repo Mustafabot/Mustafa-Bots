@@ -3,6 +3,9 @@ import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry } from '../utils/retry.js';
+import { readFile } from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 
 const PREFIX = '[AutoPatrol]';
 
@@ -59,6 +62,30 @@ function sleep(ms: number): Promise<void> {
 
 function randomInterval(baseInterval: number): number {
 	return baseInterval - 1000 + Math.floor(Math.random() * 2000);
+}
+
+// 额外用户名单路径（基于源文件位置定位 config 目录，跟随 src/config.ts 的 __dirname 惯例）
+const EXTRA_USERS_FILE = path.join(
+	path.dirname(fileURLToPath(import.meta.url)),
+	'..',
+	'..',
+	'config',
+	'patrolExtraUsers.txt',
+);
+
+/**
+ * 解析额外用户名单文本：每行取首个 # 之前部分并 trim 首尾，跳过空行与整行注释。
+ * 仅 trim 首尾，保留中间空格（如 "张 三"）。
+ */
+function parseExtraUsers(content: string): string[] {
+	const users: string[] = [];
+	for (const rawLine of content.split('\n')) {
+		const hashIdx = rawLine.indexOf('#');
+		const head = hashIdx === -1 ? rawLine : rawLine.slice(0, hashIdx);
+		const name = head.trim();
+		if (name) users.push(name);
+	}
+	return users;
 }
 
 interface PhaseResult {
@@ -488,6 +515,24 @@ async function runPatrolForWiki(
 	}
 
 	console.log(`${PREFIX} 阶段1用户组 (6组) 去重后: ${phase1PrivilegedUsers.size}`);
+
+	// ── 读取本地额外用户名单并入阶段1集合 ──
+	try {
+		const content = await readFile(EXTRA_USERS_FILE, 'utf8');
+		const extraUsers = parseExtraUsers(content);
+		for (const name of extraUsers) {
+			phase1PrivilegedUsers.add(name);
+		}
+		console.log(`${PREFIX} 额外用户列表: 加载${extraUsers.length}名 (来自 config/patrolExtraUsers.txt)`);
+	} catch (err: unknown) {
+		const reason = err instanceof Error ? err.message : String(err);
+		if (reason.includes('ENOENT')) {
+			console.log(`${PREFIX} 额外用户列表未提供 (config/patrolExtraUsers.txt)，跳过`);
+		} else {
+			console.log(`${PREFIX} 额外用户列表读取失败: ${reason}，跳过`);
+		}
+	}
+
 	console.log(`${PREFIX} 阶段2用户组 (sysop+patroller) 去重后: ${phase2PrivilegedUsers.size}`);
 
 	const opts = { dryRun, verbose, days, interval, limit };
