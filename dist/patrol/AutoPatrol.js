@@ -2,6 +2,9 @@ import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry } from '../utils/retry.js';
+import { readFile } from 'fs/promises';
+import path from 'path';
+import { fileURLToPath } from 'url';
 const PREFIX = '[AutoPatrol]';
 function parseArgs() {
     const argv = process.argv.slice(2);
@@ -40,6 +43,23 @@ function sleep(ms) {
 }
 function randomInterval(baseInterval) {
     return baseInterval - 1000 + Math.floor(Math.random() * 2000);
+}
+// 额外用户名单路径（基于源文件位置定位 config 目录，跟随 src/config.ts 的 __dirname 惯例）
+const EXTRA_USERS_FILE = path.join(path.dirname(fileURLToPath(import.meta.url)), '..', '..', 'config', 'patrolExtraUsers.txt');
+/**
+ * 解析额外用户名单文本：每行取首个 # 之前部分并 trim 首尾，跳过空行与整行注释。
+ * 仅 trim 首尾，保留中间空格（如 "张 三"）。
+ */
+function parseExtraUsers(content) {
+    const users = [];
+    for (const rawLine of content.split('\n')) {
+        const hashIdx = rawLine.indexOf('#');
+        const head = hashIdx === -1 ? rawLine : rawLine.slice(0, hashIdx);
+        const name = head.trim();
+        if (name)
+            users.push(name);
+    }
+    return users;
 }
 async function patrolEditPhase(api, privilegedUsers, opts) {
     const { dryRun, verbose, days, interval, limit } = opts;
@@ -175,7 +195,7 @@ async function patrolMovedPhase(api, privilegedUsers, opts) {
     } while (rccontinue);
     console.log(`${PREFIX} 未巡查新页面: ${newPages.length}条`);
     if (newPages.length === 0) {
-        return { successCount: 0, skipCount: 0, failures: [], totalScanned: 0, candidateCount: 0, totalHit: 0, totalSkipped: 0 };
+        return { successCount: 0, skipCount: 0, failures: [], totalScanned: 0, candidateCount: 0, totalHit: 0, totalSkipped: 0, userSubpageHit: 0, draftHit: 0 };
     }
     // 批量拉取移动日志
     console.log(`${PREFIX} 批量拉取移动日志...`);
@@ -185,7 +205,7 @@ async function patrolMovedPhase(api, privilegedUsers, opts) {
     }
     catch (err) {
         console.error(`${PREFIX} 移动日志拉取失败，跳过阶段2: ${err instanceof Error ? err.message : String(err)}`);
-        return { successCount: 0, skipCount: 0, failures: [], totalScanned: newPages.length, candidateCount: 0, totalHit: 0, totalSkipped: newPages.length };
+        return { successCount: 0, skipCount: 0, failures: [], totalScanned: newPages.length, candidateCount: 0, totalHit: 0, totalSkipped: newPages.length, userSubpageHit: 0, draftHit: 0 };
     }
     console.log(`${PREFIX} 候选移动: ${movedPages.size}条`);
     // 交叉匹配并执行巡查
@@ -193,6 +213,8 @@ async function patrolMovedPhase(api, privilegedUsers, opts) {
     let totalSkipped = 0;
     let successCount = 0;
     let skipCount = 0;
+    let userSubpageHit = 0;
+    let draftHit = 0;
     const failures = [];
     for (const rc of newPages) {
         const moveInfo = movedPages.get(rc.title);
@@ -200,16 +222,28 @@ async function patrolMovedPhase(api, privilegedUsers, opts) {
             totalSkipped++;
             continue;
         }
-        // 验证目标在创建者用户页下
+        // 按目标前缀判定命中类型
         const creator = (rc.user || '').trim();
-        const expectedPrefix = `User:${creator}/`;
-        if (!moveInfo.targetTitle.startsWith(expectedPrefix)) {
+        const target = moveInfo.targetTitle;
+        let hitKind = null;
+        if (target.startsWith(`User:${creator}/`)) {
+            hitKind = 'usersubpage';
+        }
+        else if (target.startsWith('Draft:')) {
+            hitKind = 'draft';
+        }
+        if (!hitKind) {
             totalSkipped++;
             continue;
         }
         totalHit++;
+        if (hitKind === 'usersubpage')
+            userSubpageHit++;
+        else
+            draftHit++;
         if (dryRun) {
-            console.log(`  [DRY-RUN] rcid=${rc.rcid} 页面:${rc.title} (打回者:${moveInfo.operator} → ${moveInfo.targetTitle}) → 将巡逻`);
+            const kindLabel = hitKind === 'draft' ? '草稿' : '用户子页';
+            console.log(`  [DRY-RUN] rcid=${rc.rcid} 页面:${rc.title} [${kindLabel}] (打回者:${moveInfo.operator} → ${moveInfo.targetTitle}) → 将巡逻`);
             continue;
         }
         if (limit > 0 && (successCount + skipCount) >= limit) {
@@ -239,8 +273,9 @@ async function patrolMovedPhase(api, privilegedUsers, opts) {
                 },
             });
             successCount++;
+            const kindLabel = hitKind === 'draft' ? '草稿' : '用户子页';
             if (verbose)
-                console.log(`  rcid=${rc.rcid} 页面:${rc.title} → 已巡逻`);
+                console.log(`  rcid=${rc.rcid} 页面:${rc.title} [${kindLabel}] → 已巡逻`);
         }
         catch (err) {
             skipCount++;
@@ -252,7 +287,7 @@ async function patrolMovedPhase(api, privilegedUsers, opts) {
         }
         await sleep(randomInterval(interval));
     }
-    return { successCount, skipCount, failures, totalScanned: newPages.length, candidateCount: movedPages.size, totalHit, totalSkipped };
+    return { successCount, skipCount, failures, totalScanned: newPages.length, candidateCount: movedPages.size, totalHit, totalSkipped, userSubpageHit, draftHit };
 }
 async function fetchMoveLogMap(api, privilegedUsers, rcEnd) {
     const movedPages = new Map();
@@ -277,7 +312,7 @@ async function fetchMoveLogMap(api, privilegedUsers, rcEnd) {
             if (!privilegedUsers.has(operator))
                 continue;
             const targetTitle = ev.params?.target_title || '';
-            if (!targetTitle.startsWith('User:'))
+            if (!targetTitle.startsWith('User:') && !targetTitle.startsWith('Draft:'))
                 continue;
             const originalTitle = ev.title || '';
             if (!originalTitle || movedPages.has(originalTitle))
@@ -304,7 +339,7 @@ async function runPatrolForWiki(label, api, phase1PrivilegedUsers, phase2Privile
     if ((mode === 'moved' || mode === 'all') && label === 'zh') {
         console.log(`${PREFIX}:${label} === 阶段2: 新页面打回巡查 ===`);
         result.movedPhase = await patrolMovedPhase(api, phase2PrivilegedUsers, opts);
-        console.log(`${PREFIX}:${label} 阶段2 扫描完成: ${result.movedPhase.totalScanned}条未巡查新页面, ${result.movedPhase.candidateCount}条候选, ${result.movedPhase.totalHit}条命中, ${result.movedPhase.totalSkipped}条跳过`);
+        console.log(`${PREFIX}:${label} 阶段2 扫描完成: ${result.movedPhase.totalScanned}条未巡查新页面, ${result.movedPhase.candidateCount}条候选, 命中${result.movedPhase.totalHit} (用户子页${result.movedPhase.userSubpageHit}/草稿${result.movedPhase.draftHit}), ${result.movedPhase.totalSkipped}条跳过`);
         console.log(`${PREFIX}:${label} 阶段2 巡逻: 成功 ${result.movedPhase.successCount}, 跳过 ${result.movedPhase.skipCount}`);
         if (result.movedPhase.failures.length > 0) {
             console.log(`${PREFIX}:${label} 阶段2 失败明细:`);
@@ -355,6 +390,24 @@ async function runPatrolForWiki(label, api, phase1PrivilegedUsers, phase2Privile
         } while (aufrom);
     }
     console.log(`${PREFIX} 阶段1用户组 (6组) 去重后: ${phase1PrivilegedUsers.size}`);
+    // ── 读取本地额外用户名单并入阶段1集合 ──
+    try {
+        const content = await readFile(EXTRA_USERS_FILE, 'utf8');
+        const extraUsers = parseExtraUsers(content);
+        for (const name of extraUsers) {
+            phase1PrivilegedUsers.add(name);
+        }
+        console.log(`${PREFIX} 额外用户列表: 加载${extraUsers.length}名 (来自 config/patrolExtraUsers.txt)`);
+    }
+    catch (err) {
+        const reason = err instanceof Error ? err.message : String(err);
+        if (reason.includes('ENOENT')) {
+            console.log(`${PREFIX} 额外用户列表未提供 (config/patrolExtraUsers.txt)，跳过`);
+        }
+        else {
+            console.log(`${PREFIX} 额外用户列表读取失败: ${reason}，跳过`);
+        }
+    }
     console.log(`${PREFIX} 阶段2用户组 (sysop+patroller) 去重后: ${phase2PrivilegedUsers.size}`);
     const opts = { dryRun, verbose, days, interval, limit };
     // ── 遍历各站执行巡查 ──
@@ -376,7 +429,7 @@ async function runPatrolForWiki(label, api, phase1PrivilegedUsers, phase2Privile
     for (const r of allResults) {
         const editOk = r.editPhase ? `成功 ${r.editPhase.successCount}/跳过 ${r.editPhase.skipCount}` : '未执行';
         const movedOk = r.movedPhase
-            ? `成功 ${r.movedPhase.successCount}/跳过 ${r.movedPhase.skipCount}`
+            ? `成功 ${r.movedPhase.successCount}/跳过 ${r.movedPhase.skipCount} (用户子页${r.movedPhase.userSubpageHit}/草稿${r.movedPhase.draftHit})`
             : r.label === 'cm'
                 ? '跳过'
                 : '未执行';
