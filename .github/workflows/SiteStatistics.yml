@@ -32,4 +32,4 @@ jobs:
       - name: Install dependencies
         run: npm ci
       - name: Run Script
-        run: npx tsx src/report/SiteStatistics.ts --verbose
+        run: npx tsx src/report/SiteStatistics.ts
