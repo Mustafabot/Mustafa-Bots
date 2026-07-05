@@ -6,15 +6,13 @@
 node_modules/
 
 /report/*.txt
-dist/report/*.txt
-dist/report/*_checkpoint.json
+dist/
 AGENTS.md
-dist/.checkpoint/
-dist/.temp/
 data/
 CLAUDE.md
 .claude/
 docs/
+.superpowers/
 .nemp/
 RTK.md
 temp/
