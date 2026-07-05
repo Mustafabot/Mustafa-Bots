@@ -25,7 +25,7 @@ function parseArgs(args: string[]): CliArgs | null {
 	const result: CliArgs = {
 		title: '',
 		dryRun: false,
-		verbose: false,
+		verbose: true,
 		nulledit: false,
 		concurrency: 3,
 	};
@@ -34,8 +34,8 @@ function parseArgs(args: string[]): CliArgs | null {
 		const arg = args[i];
 		if (arg === '--dry-run') {
 			result.dryRun = true;
-		} else if (arg === '--verbose') {
-			result.verbose = true;
+		} else if (arg === '--quiet') {
+			result.verbose = false;
 		} else if (arg === '--nulledit') {
 			result.nulledit = true;
 		} else if ((arg === '--concurrency' || arg === '-c') && args[i + 1]) {
@@ -47,7 +47,7 @@ function parseArgs(args: string[]): CliArgs | null {
 	}
 
 	if (!result.title) {
-		console.error('用法: npx tsx src/purge/PurgeBacklinks.ts <页面标题> [--nulledit] [--concurrency <n>] [--dry-run] [--verbose]');
+		console.error('用法: npx tsx src/purge/PurgeBacklinks.ts <页面标题> [--nulledit] [--concurrency <n>] [--dry-run] [--quiet]');
 		return null;
 	}
 

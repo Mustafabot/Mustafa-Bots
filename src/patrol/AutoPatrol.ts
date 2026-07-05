@@ -36,7 +36,7 @@ function parseArgs() {
 	}
 	return {
 		dryRun: argv.includes('--dry-run'),
-		verbose: argv.includes('--verbose'),
+		verbose: !argv.includes('--quiet'),
 		days: parseInt(argv.find((a) => a.startsWith('--days='))?.split('=')[1] || '30', 10),
 		interval: parseInt(argv.find((a) => a.startsWith('--interval='))?.split('=')[1] || '4000', 10),
 		limit: parseInt(argv.find((a) => a.startsWith('--limit='))?.split('=')[1] || '0', 10),

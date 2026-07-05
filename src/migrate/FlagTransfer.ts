@@ -404,10 +404,10 @@ async function uploadToCm(
 // ============================================================
 
 function parseArgs(args: string[]): CliArgs {
-  const result: CliArgs = { dryRun: false, verbose: false, reset: false };
+  const result: CliArgs = { dryRun: false, verbose: true, reset: false };
   for (const arg of args) {
     if (arg === '--dry-run') result.dryRun = true;
-    else if (arg === '--verbose') result.verbose = true;
+    else if (arg === '--quiet') result.verbose = false;
     else if (arg === '--reset') result.reset = true;
   }
   return result;

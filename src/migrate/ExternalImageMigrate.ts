@@ -1530,7 +1530,7 @@ async function processPage(
 function parseArgs(args: string[]): CliArgs {
 	const result: CliArgs = {
 		dryRun: false,
-		verbose: false,
+		verbose: true,
 		namespace: '0',
 		reset: false,
 		disableSongboxLookup: false,
@@ -1540,8 +1540,8 @@ function parseArgs(args: string[]): CliArgs {
 		const arg = args[i];
 		if (arg === '--dry-run') {
 			result.dryRun = true;
-		} else if (arg === '--verbose') {
-			result.verbose = true;
+		} else if (arg === '--quiet') {
+			result.verbose = false;
 		} else if (arg === '--namespace' && args[i + 1]) {
 			result.namespace = args[i + 1];
 			i++;

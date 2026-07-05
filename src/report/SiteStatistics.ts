@@ -9,7 +9,7 @@ function parseArgs() {
 	const argv = process.argv.slice(2);
 	return {
 		dryRun: argv.includes('--dry-run'),
-		verbose: argv.includes('--verbose'),
+		verbose: !argv.includes('--quiet'),
 	};
 }
 

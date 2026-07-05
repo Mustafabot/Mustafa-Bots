@@ -387,14 +387,14 @@ async function batchUpload(
 function parseArgs(args: string[]): CliArgs {
 	const result: CliArgs = {
 		dryRun: false,
-		verbose: false,
+		verbose: true,
 	};
 
 	for (const arg of args) {
 		if (arg === '--dry-run') {
 			result.dryRun = true;
-		} else if (arg === '--verbose') {
-			result.verbose = true;
+		} else if (arg === '--quiet') {
+			result.verbose = false;
 		}
 	}
 
