@@ -89,15 +89,23 @@ function processPage(
 		const templateConfig = normalizedName ? templateNameMap.get(normalizedName) : undefined;
 		if (!templateConfig) continue;
 
-		const imageValue: string | undefined = templateNode.getValue?.(templateConfig.externalImageParam)?.toString();
-		if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelistRegexes)) {
-			issues.push({
-				title,
-				message: `${templateConfig.templateName}模板${templateConfig.externalImageParam}参数不符合外部图像白名单`,
-				line: 0,
-				col: 0,
-				src: imageValue.trim(),
-			});
+		// 支持外部图片参数为多个候选参数名（如 ["1", "img"]）
+		const externalParams = Array.isArray(templateConfig.externalImageParam)
+			? templateConfig.externalImageParam
+			: [templateConfig.externalImageParam];
+		for (const p of externalParams) {
+			const imageValue: string | undefined = templateNode.getValue?.(p)?.toString();
+			if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelistRegexes)) {
+				// {{filepath:...}} 是内部文件引用，不是外部图片
+				if (/^\{\{filepath\s*:/i.test(imageValue.trim())) continue;
+				issues.push({
+					title,
+					message: `${templateConfig.templateName}模板${p}参数不符合外部图像白名单`,
+					line: 0,
+					col: 0,
+					src: imageValue.trim(),
+				});
+			}
 		}
 	}
 

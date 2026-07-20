@@ -54,6 +54,7 @@ interface TemplateImageIssue {
 	templateNode: Parser.TranscludeToken;
 	externalImageParam: string;
 	internalImageParam: string;
+	replacement?: 'inline' | 'thumb';
 	articleName?: string;
 }
 
@@ -750,19 +751,41 @@ function extractTemplateImageParams(
 		const templateConfig = normalizedName ? templateNameMap.get(normalizedName) : undefined;
 		if (!templateConfig) continue;
 
-		const existingInternal = templateNode.getValue?.(templateConfig.internalImageParam);
-		if (existingInternal && existingInternal.trim()) continue;
+		// replacement 模板（如外部图片注释/图片外链）并非为内部图片设计，
+		// 迁移时整块替换为 [[File:]] 或 {{#img:}}，不存在独立的内部图片参数
+		const replacement = (templateConfig as any).replacement as 'inline' | 'thumb' | undefined;
 
-		const imageValue = templateNode.getValue?.(templateConfig.externalImageParam);
+		if (!replacement) {
+			const existingInternal = templateNode.getValue?.(templateConfig.internalImageParam);
+			if (existingInternal && existingInternal.trim()) continue;
+		}
+
+		// 支持外部图片参数为多个候选参数名（如 ["1", "img"]），取第一个非空者
+		const externalParams = Array.isArray(templateConfig.externalImageParam)
+			? templateConfig.externalImageParam
+			: [templateConfig.externalImageParam];
+		let imageValue: string | undefined;
+		let matchedParam = externalParams[0];
+		for (const p of externalParams) {
+			const val = templateNode.getValue?.(p);
+			if (val !== undefined && val.trim()) {
+				imageValue = val;
+				matchedParam = p;
+				break;
+			}
+		}
 		let src: string | undefined;
 
 		if (imageValue && imageValue.trim() && !isWhitelisted(imageValue.trim(), whitelist)) {
 				// {{filepath:...}} 表示内部图片引用，直接在提取阶段规范化
 				const fpMatch = imageValue.trim().match(/^\{\{filepath\s*:\s*([^|}]+?)\s*(?:\|[^}]*)?\}\}$/i);
 				if (fpMatch) {
-					templateNode.removeArg(templateConfig.externalImageParam);
-					templateNode.setValue(templateConfig.internalImageParam, fpMatch[1].trim());
-					filepathResolved++;
+					if (!replacement) {
+						templateNode.removeArg(matchedParam);
+						templateNode.setValue(templateConfig.internalImageParam, fpMatch[1].trim());
+						filepathResolved++;
+					}
+					// replacement 模板中 {{filepath:...}} 视为已手动迁移，跳过不处理
 					continue;
 				}
 			src = ensureUrlProtocol(imageValue.trim());
@@ -801,8 +824,9 @@ function extractTemplateImageParams(
 			issues.push({
 				src,
 				templateNode,
-				externalImageParam: templateConfig.externalImageParam,
+				externalImageParam: matchedParam,
 				internalImageParam: templateConfig.internalImageParam,
+				replacement,
 				articleName,
 			});
 		}
@@ -1209,6 +1233,84 @@ function replaceImageNodes(parsed: Parser.Token, issues: ImageIssue[], urlToFile
 	return parsed.toString();
 }
 
+/**
+ * 为 replacement 模板构建 [[File:]] 或 {{#img:}} 替换节点。
+ * 这类模板（外部图片注释/图片外链）并非为内部图片设计，迁移时整块替换。
+ * - 'inline'（图片外链）：复用 buildInternalFileLink，宽度/样式/class 映射为属性
+ * - 'thumb'（外部图片注释）：构建 [[File:...|thumb|align|size|alt|caption]]
+ */
+function buildTemplateImageReplacement(
+	filename: string,
+	templateNode: Parser.TranscludeToken,
+	replacement: 'inline' | 'thumb',
+): Parser.Token {
+	const get = (names: string[]): string | undefined => {
+		for (const n of names) {
+			const v = templateNode.getValue?.(n);
+			if (v !== undefined && v.trim()) return v.trim();
+		}
+		return undefined;
+	};
+
+	if (replacement === 'inline') {
+		// {{图片外链|URL|width|style|class=...}}
+		// 模板默认宽度 200px，需保留以维持渲染一致
+		const width = get(['2']) ?? '200';
+		const styleParam = get(['3']);
+		const classVal = get(['class']);
+		const styleParts: string[] = [`width:${width}px`];
+		if (styleParam) styleParts.push(styleParam);
+		const attributes: Record<string, string> = { style: styleParts.join(';') + ';' };
+		if (classVal) attributes['class'] = classVal;
+		return buildInternalFileLink(filename, attributes, templateNode);
+	}
+
+	// replacement === 'thumb'
+	// {{外部图片注释|URL|caption|align|宽度=W|高度=H|alt=A}}
+	const caption = get(['2', '注释', 'caption']);
+	const alignRaw = get(['3', '对齐', 'align']);
+	const width = get(['宽度', 'width']);
+	const height = get(['高度', 'height']);
+	const alt = get(['alt']);
+
+	const options: string[] = ['thumb'];
+
+	const alignLower = alignRaw?.toLowerCase();
+	if (alignLower === '左' || alignLower === 'left') {
+		options.push('left');
+	} else if (alignLower === '中' || alignLower === '居中' || alignLower === 'center') {
+		options.push('center');
+	} else if (alignLower === '无' || alignLower === 'none') {
+		options.push('none');
+	}
+	// 右/right 为默认，不添加
+
+	const widthNum = width ? parseInt(width, 10) : NaN;
+	const heightNum = height ? parseInt(height, 10) : NaN;
+	if (widthNum && heightNum) {
+		options.push(`${widthNum}x${heightNum}px`);
+	} else if (widthNum) {
+		options.push(`${widthNum}px`);
+	} else if (heightNum) {
+		options.push(`x${heightNum}px`);
+	}
+
+	if (alt) {
+		options.push(`alt=${escapeWikitextLink(alt)}`);
+	}
+
+	const imgName = filename.replace(/^File:/i, '');
+	const parts = ['File:' + imgName, ...options];
+	if (caption) {
+		parts.push(escapeWikitextLink(caption));
+	}
+
+	const wikitext = `[[${parts.join('|')}]]`;
+	const { config: nodeConfig, include } = getInternalParserAttributes(templateNode);
+	const root = Parser.parse(wikitext, include, 7, nodeConfig);
+	return root.children[0] as Parser.Token;
+}
+
 function replaceTemplateImageParams(
 	templateIssues: TemplateImageIssue[],
 	urlToFilename: Map<string, string>,
@@ -1216,9 +1318,15 @@ function replaceTemplateImageParams(
 	for (const issue of templateIssues) {
 		const filename = urlToFilename.get(issue.src);
 		if (!filename) continue;
-		const bareName = filename.replace(/^File:/i, '');
-		issue.templateNode.removeArg(issue.externalImageParam);
-		issue.templateNode.setValue(issue.internalImageParam, bareName);
+		if (issue.replacement) {
+			// 整块替换模板为 [[File:]] 或 {{#img:}}
+			const replacementNode = buildTemplateImageReplacement(filename, issue.templateNode, issue.replacement);
+			issue.templateNode.replaceWith(replacementNode);
+		} else {
+			const bareName = filename.replace(/^File:/i, '');
+			issue.templateNode.removeArg(issue.externalImageParam);
+			issue.templateNode.setValue(issue.internalImageParam, bareName);
+		}
 	}
 }
 

@@ -38,5 +38,19 @@
         "externalImageParam": "image link",
         "internalImageParam": "image",
         "articleParams": ["条目", "曲名"]
+    },
+    {
+        "templateName": "Template:外部图片注释",
+        "externalImageParam": ["1", "img"],
+        "internalImageParam": "1",
+        "articleParams": [],
+        "replacement": "thumb"
+    },
+    {
+        "templateName": "Template:图片外链",
+        "externalImageParam": "1",
+        "internalImageParam": "1",
+        "articleParams": [],
+        "replacement": "inline"
     }
 ]
