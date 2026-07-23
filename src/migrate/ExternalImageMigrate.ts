@@ -352,7 +352,9 @@ const MIME_TO_EXT: Record<string, string> = {
 };
 
 function escapeWikitextLink(s: string): string {
-	return s.replace(/\]\]/g, '&#93;&#93;');
+	// 必须同时转义 [ 和 ]：只转义 ]] 而留下 [[ 会产生无法闭合的内链起始，
+	// 破坏外层 [[File:...]] 的解析，导致 Parser.parse 返回空 children
+	return s.replace(/\[/g, '&#91;').replace(/\]/g, '&#93;');
 }
 
 function changeFileExtension(filename: string, newExt: string): string {
@@ -1349,7 +1351,9 @@ function buildTemplateImageReplacement(
 	const imgName = filename.replace(/^File:/i, '');
 	const parts = ['File:' + imgName, ...options];
 	if (caption) {
-		parts.push(escapeWikitextLink(caption));
+		// 不转义 caption：外部图片注释的注释文本支持 [[内链]]，wikiparser-node 能正确
+		// 解析 [[File:...|含[[内链]]的caption]] 嵌套结构；转义 ]] 会留下未闭合的 [[ 破坏解析
+		parts.push(caption);
 	}
 
 	const wikitext = `[[${parts.join('|')}]]`;
