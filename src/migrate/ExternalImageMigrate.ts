@@ -561,6 +561,52 @@ function generateRenamedFilename(originalFilename: string, suffix: number): stri
 	return `${originalFilename} ${suffix}`;
 }
 
+async function findAvailableFilename(
+	api: MediaWikiApi,
+	baseFilename: string,
+	usedFilenames: Set<string>,
+	dryRun: boolean,
+): Promise<string> {
+	const BATCH = 8;
+	const normalize = (s: string): string => s.replace(/_/g, ' ');
+	let offset = 0;
+
+	while (true) {
+		const candidates: string[] = [];
+		while (candidates.length < BATCH) {
+			const candidate = offset === 0 ? baseFilename : generateRenamedFilename(baseFilename, offset + 1);
+			offset++;
+			if (!usedFilenames.has(candidate)) {
+				candidates.push(candidate);
+			}
+			if (offset > 100) {
+				return candidates[candidates.length - 1] ?? baseFilename;
+			}
+		}
+
+		if (dryRun) {
+			return candidates[0];
+		}
+
+		const { data } = await withRetry(() => api.post({
+			action: 'query',
+			prop: 'imageinfo',
+			titles: candidates.join('|'),
+		}));
+		const pages = Object.values((data as any).query.pages) as any[];
+		const pageByTitle = new Map<string, any>();
+		for (const page of pages) {
+			pageByTitle.set(normalize(String(page.title)), page);
+		}
+		for (const candidate of candidates) {
+			const page = pageByTitle.get(normalize(candidate));
+			if (!page || !page.imagerepository) {
+				return candidate;
+			}
+		}
+	}
+}
+
 function parseUploadWarnings(warnings: Record<string, any>): WarningDecision {
 	const warningKeys = Object.keys(warnings);
 
@@ -927,7 +973,8 @@ async function uploadFromUrl(
 	filename: string,
 	comment: string,
 	dryRun: boolean,
-	article: string
+	article: string,
+	usedFilenames: Set<string>,
 ): Promise<UploadResult> {
 	if (dryRun) {
 		console.log(`  [试运行] 将上传: ${filename}`);
@@ -1027,7 +1074,7 @@ async function uploadFromUrl(
 						const newFilename = changeFileExtension(currentFilename, newExt);
 						if (newFilename !== currentFilename) {
 							console.log(`  修正扩展名: ${currentFilename} -> ${newFilename} (MIME: ${detectedMime})`);
-							currentFilename = newFilename;
+							currentFilename = await findAvailableFilename(api, newFilename, usedFilenames, false);
 							attempt--;
 							continue;
 						}
@@ -1054,7 +1101,7 @@ async function uploadFromUrl(
 				const newFilename = changeFileExtension(currentFilename, newExt);
 				if (newFilename !== currentFilename) {
 					console.log(`  扩展名与MIME不匹配，修正: ${currentFilename} -> ${newFilename} (MIME: ${mimeMismatch.detectedMime})`);
-					currentFilename = newFilename;
+					currentFilename = await findAvailableFilename(api, newFilename, usedFilenames, false);
 					attempt--;
 					continue;
 				}
@@ -1558,16 +1605,8 @@ async function processPage(
 		const isTemplateOnly = !nodes && srcToTemplateNodes.has(src);
 		const titleAttr = nodes?.[0]?.attributes.title;
 		const effectiveArticle = srcToArticleName.get(src) ?? title;
-		let filename = generateFilename(src, effectiveArticle, isTemplateOnly ? 0 : index, legalTitleRe, titleAttr);
-
-		if (usedFilenames.has(filename)) {
-			let suffix = 2;
-			while (usedFilenames.has(generateRenamedFilename(filename, suffix))) {
-				suffix++;
-			}
-			filename = generateRenamedFilename(filename, suffix);
-		}
-		usedFilenames.add(filename);
+		const baseFilename = generateFilename(src, effectiveArticle, isTemplateOnly ? 0 : index, legalTitleRe, titleAttr);
+		const filename = await findAvailableFilename(uploadApi, baseFilename, usedFilenames, dryRun);
 
 		const imgRefCount = nodes?.length ?? 0;
 		const templateRefCount = srcToTemplateNodes.get(src)?.length ?? 0;
@@ -1583,7 +1622,8 @@ async function processPage(
 			filename,
 			DEFAULT_COMMENT,
 			dryRun,
-			title
+			title,
+			usedFilenames,
 		);
 
 		result.uploadResults.push(uploadResult);
@@ -1594,6 +1634,7 @@ async function processPage(
 			result.imagesUploaded++;
 			const useFilename = uploadResult.existingFile || uploadResult.filename;
 			urlToFilename.set(src, useFilename);
+			usedFilenames.add(useFilename);
 			if (uploadResult.action === 'replace') {
 				console.log(`    使用已存在文件: ${useFilename}`);
 			} else {
