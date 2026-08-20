@@ -283,7 +283,11 @@ async function uploadFromFile(
 				baseDelay: 1000,
 				onSuccess: (data) => {
 					if (data.upload && data.upload.result === 'Success') {
-						return { filename, url: `file://${filePath}`, success: true };
+						const serverFilename = serverFilenameFromUpload(data, filename);
+						if (serverFilename !== filename) {
+							console.log(`  服务器规范化文件名: ${filename} -> ${serverFilename}`);
+						}
+						return { filename: serverFilename, url: `file://${filePath}`, success: true };
 					}
 
 					if (checkModerationQueued(data, '  文件已进入审核队列')) {
@@ -531,7 +535,23 @@ function extractExtension(url: string): string {
 }
 
 function sanitizeFilenameComponent(raw: string, legalTitleRe: RegExp): string {
-	return raw.replace(legalTitleRe, '').replace(/\s+/g, ' ').trim();
+	// 冒号虽属 legaltitlechars，但服务器端会将文件名中的冒号规范化为连字符
+	// （如页面标题“碧蓝航线:鞍山”实际存为“碧蓝航线-鞍山.jpg”），
+	// 提前替换以保证请求的文件名与服务器最终文件名一致
+	return raw.replace(/:/g, '-').replace(legalTitleRe, '').replace(/\s+/g, ' ').trim();
+}
+
+/**
+ * 服务器端可能规范化文件名（如冒号转连字符），上传成功后应以此为准，
+ * 否则替换到 wikitext 中的名字会与实际文件脱钩。
+ */
+function serverFilenameFromUpload(data: any, fallback: string): string {
+	const name = data?.upload?.filename;
+	if (typeof name === 'string' && name.trim()) {
+		const trimmed = name.trim();
+		return trimmed.startsWith('File:') ? trimmed : `File:${trimmed}`;
+	}
+	return fallback;
 }
 
 function generateFilename(
@@ -939,7 +959,11 @@ async function forceUploadWithRetry(
 				onSuccess: (forceData) => {
 					if (forceData.upload && forceData.upload.result === 'Success') {
 						console.log('  强制上传成功');
-						return { filename, url, success: true, warnings, action: 'ignore' };
+						const serverFilename = serverFilenameFromUpload(forceData, filename);
+						if (serverFilename !== filename) {
+							console.log(`  服务器规范化文件名: ${filename} -> ${serverFilename}`);
+						}
+						return { filename: serverFilename, url, success: true, warnings, action: 'ignore' };
 					}
 
 					if (checkModerationQueued(forceData, '  文件已进入审核队列')) {
@@ -1009,7 +1033,11 @@ async function uploadFromUrl(
 				if (data.upload.warnings) {
 					console.log('  警告: 文件已存在，已被覆盖');
 				}
-				return { filename: currentFilename, url, success: true };
+				const serverFilename = serverFilenameFromUpload(data, currentFilename);
+				if (serverFilename !== currentFilename) {
+					console.log(`  服务器规范化文件名: ${currentFilename} -> ${serverFilename}`);
+				}
+				return { filename: serverFilename, url, success: true };
 			}
 
 			if (data.upload && data.upload.result === 'Warning' && data.upload.warnings) {
