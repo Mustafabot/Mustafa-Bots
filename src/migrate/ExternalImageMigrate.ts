@@ -283,11 +283,7 @@ async function uploadFromFile(
 				baseDelay: 1000,
 				onSuccess: (data) => {
 					if (data.upload && data.upload.result === 'Success') {
-						const serverFilename = serverFilenameFromUpload(data, filename);
-						if (serverFilename !== filename) {
-							console.log(`  服务器规范化文件名: ${filename} -> ${serverFilename}`);
-						}
-						return { filename: serverFilename, url: `file://${filePath}`, success: true };
+						return { filename: serverFilenameFromUpload(data, filename), url: `file://${filePath}`, success: true };
 					}
 
 					if (checkModerationQueued(data, '  文件已进入审核队列')) {
@@ -544,12 +540,17 @@ function sanitizeFilenameComponent(raw: string, legalTitleRe: RegExp): string {
 /**
  * 服务器端可能规范化文件名（如冒号转连字符），上传成功后应以此为准，
  * 否则替换到 wikitext 中的名字会与实际文件脱钩。
+ * 与请求文件名不一致时打印差异日志。
  */
 function serverFilenameFromUpload(data: any, fallback: string): string {
 	const name = data?.upload?.filename;
 	if (typeof name === 'string' && name.trim()) {
 		const trimmed = name.trim();
-		return trimmed.startsWith('File:') ? trimmed : `File:${trimmed}`;
+		const serverFilename = trimmed.startsWith('File:') ? trimmed : `File:${trimmed}`;
+		if (serverFilename !== fallback) {
+			console.log(`  服务器规范化文件名: ${fallback} -> ${serverFilename}`);
+		}
+		return serverFilename;
 	}
 	return fallback;
 }
@@ -959,11 +960,7 @@ async function forceUploadWithRetry(
 				onSuccess: (forceData) => {
 					if (forceData.upload && forceData.upload.result === 'Success') {
 						console.log('  强制上传成功');
-						const serverFilename = serverFilenameFromUpload(forceData, filename);
-						if (serverFilename !== filename) {
-							console.log(`  服务器规范化文件名: ${filename} -> ${serverFilename}`);
-						}
-						return { filename: serverFilename, url, success: true, warnings, action: 'ignore' };
+						return { filename: serverFilenameFromUpload(forceData, filename), url, success: true, warnings, action: 'ignore' };
 					}
 
 					if (checkModerationQueued(forceData, '  文件已进入审核队列')) {
@@ -1033,11 +1030,7 @@ async function uploadFromUrl(
 				if (data.upload.warnings) {
 					console.log('  警告: 文件已存在，已被覆盖');
 				}
-				const serverFilename = serverFilenameFromUpload(data, currentFilename);
-				if (serverFilename !== currentFilename) {
-					console.log(`  服务器规范化文件名: ${currentFilename} -> ${serverFilename}`);
-				}
-				return { filename: serverFilename, url, success: true };
+				return { filename: serverFilenameFromUpload(data, currentFilename), url, success: true };
 			}
 
 			if (data.upload && data.upload.result === 'Warning' && data.upload.warnings) {

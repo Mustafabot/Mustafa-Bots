@@ -58,11 +58,25 @@ export async function withApiRetry<T>(
 	throw lastError || new Error('重试失败');
 }
 
+/** Moderation 扩展的入队响应码（moderation-image-queued / moderation-move-queued 等） */
+const MODERATION_QUEUED_RE = /moderation-[a-z]+-queued/;
+
+/** 判断文本是否为 Moderation 扩展的「已入审核队列」响应码 */
+export function isModerationQueuedCode(text: string): boolean {
+	return MODERATION_QUEUED_RE.test(text);
+}
+
+/** 判断错误是否为权限不足（permissiondenied），重试无意义，应立即终止 */
+export function isPermissionDeniedError(error: Error | { message?: string } | string): boolean {
+	const msg = typeof error === 'string' ? error : (error.message ?? '');
+	return msg.toLowerCase().includes('permissiondenied');
+}
+
 export function checkModerationQueued(data: any, message?: string): boolean {
 	if (data?.upload?.result === 'Success') {
 		return true;
 	}
-	if (JSON.stringify(data).includes('moderation-image-queued')) {
+	if (isModerationQueuedCode(JSON.stringify(data))) {
 		if (message) console.log(message);
 		return true;
 	}
@@ -70,7 +84,7 @@ export function checkModerationQueued(data: any, message?: string): boolean {
 }
 
 export function checkModerationQueuedError(error: Error, message?: string): boolean {
-	if (error.message && error.message.includes('moderation-image-queued')) {
+	if (error.message && isModerationQueuedCode(error.message)) {
 		if (message) console.log(message);
 		return true;
 	}
