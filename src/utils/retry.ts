@@ -58,6 +58,23 @@ export async function withApiRetry<T>(
 	throw lastError || new Error('重试失败');
 }
 
+export interface ApiError {
+	code: string;
+	info: string;
+}
+
+/** MediaWiki 的错误既可能以 error/errors 出现在 200 响应体里，也可能被 wiki-saikou 抛出 */
+export function extractApiError(data: any): ApiError | null {
+	if (data?.error?.code) {
+		return { code: String(data.error.code), info: String(data.error.info ?? '') };
+	}
+	const first = Array.isArray(data?.errors) ? data.errors[0] : undefined;
+	if (first?.code) {
+		return { code: String(first.code), info: String(first.text ?? first['*'] ?? '') };
+	}
+	return null;
+}
+
 /** Moderation 扩展的入队响应码（moderation-image-queued / moderation-move-queued 等） */
 const MODERATION_QUEUED_RE = /moderation-[a-z]+-queued/;
 

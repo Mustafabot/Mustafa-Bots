@@ -17,3 +17,4 @@ docs/
 RTK.md
 temp/
 .playwright-mcp/
+.zcode/
