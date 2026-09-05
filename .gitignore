@@ -18,3 +18,4 @@ RTK.md
 temp/
 .playwright-mcp/
 .zcode/
+.commandcode/

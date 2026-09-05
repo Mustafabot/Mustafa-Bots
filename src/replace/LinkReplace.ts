@@ -86,7 +86,7 @@ function normalizeTitle(title: string): string {
 	return cleaned ? cleaned[0].toUpperCase() + cleaned.slice(1) : cleaned;
 }
 
-/** 每条规则 from 的繁简变体集合（含原标题），用于判定"显示文字与旧标题实际相同" */
+/** 每条规则 from/to 的繁简变体集合（含原标题），用于判定"显示文字与旧/新标题实际相同" */
 const titleVariantCache = new Map<string, Set<string>>();
 
 const ZH_VARIANTS = ['zh-cn', 'zh-hans', 'zh-hant', 'zh-tw', 'zh-hk'];
@@ -106,19 +106,19 @@ function extractParsedText(html: string): string {
 		.trim();
 }
 
-/** 通过 API 把规则 from 转换为各繁简变体，建立变体集合（重复 from 只转换一次） */
+/** 通过 API 把标题转换为各繁简变体，建立变体集合（重复标题只转换一次） */
 async function buildTitleVariants(rules: ReplacementRule[], log: (msg: string) => void): Promise<void> {
 	const seen = new Set<string>();
-	for (const rule of rules) {
-		const key = normalizeTitle(rule.from);
-		if (seen.has(key)) continue;
+	const convert = async (title: string): Promise<void> => {
+		const key = normalizeTitle(title);
+		if (seen.has(key)) return;
 		seen.add(key);
 		const set = new Set<string>([key]);
 		for (const variant of ZH_VARIANTS) {
 			try {
 				const { data } = await api.post({
 					action: 'parse',
-					text: rule.from,
+					text: title,
 					contentmodel: 'wikitext',
 					variant,
 					prop: 'text',
@@ -136,15 +136,24 @@ async function buildTitleVariants(rules: ReplacementRule[], log: (msg: string) =
 			await sleep(300);
 		}
 		titleVariantCache.set(key, set);
-		log(`  标题变体 ${rule.from}: ${[...set].join(' / ')}`);
+		log(`  标题变体 ${title}: ${[...set].join(' / ')}`);
+	};
+	for (const rule of rules) {
+		await convert(rule.from);
+		await convert(rule.to);
 	}
 }
 
-/** 显示文字是否与旧标题实际相同（完全一致或仅繁简不同） */
-function displayMatchesRule(display: string, rule: ReplacementRule): boolean {
-	const set = titleVariantCache.get(normalizeTitle(rule.from));
+/** 显示文字是否与指定标题实际相同（完全一致或仅繁简不同） */
+function displayMatchesTitle(display: string, title: string): boolean {
+	const set = titleVariantCache.get(normalizeTitle(title));
 	if (set) return set.has(normalizeTitle(display));
-	return normalizeTitle(display) === normalizeTitle(rule.from);
+	return normalizeTitle(display) === normalizeTitle(title);
+}
+
+/** 显示文字是否与旧/新标题实际相同（冗余管道的判定依据） */
+function displayMatchesRule(display: string, rule: ReplacementRule): boolean {
+	return displayMatchesTitle(display, rule.from) || displayMatchesTitle(display, rule.to);
 }
 
 /** 模板名归一化：命名空间前缀小写、主体按 normalizeTitle 处理 */
@@ -196,11 +205,11 @@ function replaceParamValue(raw: string, rule: ReplacementRule, separator: string
 		// pieces: ['', 分隔符, 分段, 分隔符, 分段, ...]，分段位于偶数下标（≥2）
 		const displaySegCount = (pieces.length - 1) / 2;
 		const matchedCount = pieces.filter((seg, i) => i >= 2 && i % 2 === 0 && displayMatchesRule(seg, rule)).length;
-		// 纯管道显示尾部（如大家族内容行）且目标无片段：显示与旧标题实际相同时整体移除冗余管道
+		// 纯管道显示尾部（如大家族内容行）且目标无片段：显示与旧/新标题实际相同时整体移除冗余管道
 		if (separator.includes('|') && !fragment && displaySegCount > 0 && matchedCount === displaySegCount) {
 			return result.replace(/\|/g, '{{!}}');
 		}
-		// 其余分段：与旧标题实际相同时同步为新标题
+		// 其余分段：与旧/新标题实际相同时同步为新标题
 		for (let i = 2; i < pieces.length; i += 2) {
 			if (pieces[i] !== undefined && displayMatchesRule(pieces[i], rule)) {
 				pieces[i] = rule.to;
@@ -225,9 +234,31 @@ function replaceDirectLinks(parsed: Parser.Token, ruleMap: Map<string, Replaceme
 				// 有片段时无管道写法会把片段显示出来，保留管道并显示新标题
 				link.innerText = rule.to;
 			} else {
-				// 显示与旧标题实际相同：移除冗余管道符
+				// 显示与旧/新标题实际相同：移除冗余管道符
 				(link.childNodes as unknown as readonly Parser.Token[])[1]?.remove();
 			}
+		}
+		const key = `${rule.from}→${rule.to}`;
+		hits.set(key, (hits.get(key) ?? 0) + 1);
+	}
+}
+
+/**
+ * 文件链接（[[File:…|link=目标]]、gallery/imagemap 图片）的 link 参数。
+ * link=（空值，禁用链接）不参与替换；caption 与旧/新标题实际相同时同步为新标题。
+ */
+function replaceFileLinks(parsed: Parser.Token, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>): void {
+	const files = parsed.querySelectorAll<Parser.FileToken>('file, gallery-image, imagemap-image');
+	for (const file of files) {
+		const raw = file.getValue('link');
+		if (typeof raw !== 'string' || raw === '') continue;
+		const [main, fragment] = splitFragment(raw.trim());
+		const rule = ruleMap.get(normalizeTitle(main));
+		if (!rule) continue;
+		file.setValue('link', fragment ? `${rule.to}#${fragment}` : rule.to);
+		const caption = file.getValue('caption');
+		if (typeof caption === 'string' && displayMatchesRule(caption.trim(), rule)) {
+			file.setValue('caption', rule.to);
 		}
 		const key = `${rule.from}→${rule.to}`;
 		hits.set(key, (hits.get(key) ?? 0) + 1);
@@ -279,7 +310,7 @@ function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, Link
 			const displayKey = String(cfg.displayParam);
 			const displayRaw = temp.getValue(displayKey);
 			if (displayRaw !== undefined && displayMatchesRule(displayRaw.trim(), matchedRule)) {
-				// 显示与旧标题实际相同：移除冗余显示参数
+				// 显示与旧/新标题实际相同：移除冗余显示参数
 				temp.removeArg(displayKey);
 			}
 		}
@@ -559,6 +590,7 @@ async function processPage(
 	const parsed = Parser.parse(content);
 	const hits = new Map<string, number>();
 	replaceDirectLinks(parsed, ruleMap, hits);
+	replaceFileLinks(parsed, ruleMap, hits);
 	replaceTemplateArgs(parsed, templateMap, ruleMap, hits);
 	renameTransclusions(parsed, ruleMap, hits);
 	const newContent = parsed.toString();
