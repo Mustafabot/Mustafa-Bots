@@ -225,6 +225,35 @@ function displayMatchesRule(display: string, rule: ReplacementRule): boolean {
 	return displayMatchesTitle(display, rule.from) || displayMatchesTitle(display, rule.to);
 }
 
+/**
+ * 显示文字是否为标题剥去紧贴的半角括号后缀（如 苹果(植物) 的显示 苹果）。
+ * 只识别站规规定的紧贴半角括号，空格/全角括号不处理，避免误伤原文。
+ */
+function displayHidesSuffix(display: string, title: string): boolean {
+	const d = normalizeTitle(display);
+	if (!d) return false;
+	const variants = titleVariantCache.get(normalizeTitle(title));
+	if (!variants) return false;
+	for (const variant of variants) {
+		// 末尾必须是单个不含内层括号的 (…) 组，避免 A(B)C) 之类的整串比较误判
+		const match = /^(.*)\(([^()]*)\)$/.exec(variant);
+		if (match !== null && match[1] === d) return true;
+	}
+	return false;
+}
+
+/**
+ * 显示文字是否属于"标题型"：与旧/新标题实际相同；消歧义页上还含仅隐藏了紧贴半角括号后缀的显示。
+ * 空显示（管道魔术 [[X|]] 会隐去命名空间前缀与括号后缀）在消歧义页上同样视为标题型。
+ */
+function isTitleDisplay(display: string, rule: ReplacementRule, isDisambiguation: boolean): boolean {
+	if (!isDisambiguation) return displayMatchesRule(display, rule);
+	if (display.trim() === '') return true;
+	return displayMatchesRule(display, rule)
+		|| displayHidesSuffix(display, rule.from)
+		|| displayHidesSuffix(display, rule.to);
+}
+
 /** 模板名归一化：命名空间前缀小写、主体按 normalizeTitle 处理 */
 function normalizeTemplateName(name: string): string {
 	const colon = name.indexOf(':');
@@ -260,7 +289,7 @@ function classifyAbuseFilter(sources: unknown[]): 'retry' | 'disallowed' | 'none
  * 对单个模板参数值执行一条替换规则。
  * 返回新值；未命中返回 null。参数值中的裸 | 会破坏模板结构，统一转义为 {{!}}。
  */
-function replaceParamValue(raw: string, rule: ReplacementRule, separator: string | undefined): string | null {
+function replaceParamValue(raw: string, rule: ReplacementRule, separator: string | undefined, isDisambiguation: boolean): string | null {
 	const normalized = raw.replace(/\{\{!\}\}/g, '|');
 	const firstSep = separator ? new RegExp(`[${escapeCharClass(separator)}]`) : null;
 	const match = firstSep ? firstSep.exec(normalized) : null;
@@ -273,14 +302,14 @@ function replaceParamValue(raw: string, rule: ReplacementRule, separator: string
 		const pieces = tail.split(new RegExp(`([${escapeCharClass(separator)}])`));
 		// pieces: ['', 分隔符, 分段, 分隔符, 分段, ...]，分段位于偶数下标（≥2）
 		const displaySegCount = (pieces.length - 1) / 2;
-		const matchedCount = pieces.filter((seg, i) => i >= 2 && i % 2 === 0 && displayMatchesRule(seg, rule)).length;
+		const matchedCount = pieces.filter((seg, i) => i >= 2 && i % 2 === 0 && isTitleDisplay(seg, rule, isDisambiguation)).length;
 		// 纯管道显示尾部（如大家族内容行）且目标无片段：显示与旧/新标题实际相同时整体移除冗余管道
 		if (separator.includes('|') && !fragment && displaySegCount > 0 && matchedCount === displaySegCount) {
 			return result.replace(/\|/g, '{{!}}');
 		}
 		// 其余分段：与旧/新标题实际相同时同步为新标题
 		for (let i = 2; i < pieces.length; i += 2) {
-			if (pieces[i] !== undefined && displayMatchesRule(pieces[i], rule)) {
+			if (pieces[i] !== undefined && isTitleDisplay(pieces[i], rule, isDisambiguation)) {
 				pieces[i] = rule.to;
 			}
 		}
@@ -290,15 +319,16 @@ function replaceParamValue(raw: string, rule: ReplacementRule, separator: string
 }
 
 /** 直接内链 [[旧标题]] / [[旧标题|显示]] / [[旧标题#片段]] */
-function replaceDirectLinks(parsed: Parser.Token, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>): void {
+function replaceDirectLinks(parsed: Parser.Token, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>, isDisambiguation: boolean): void {
 	const links = parsed.querySelectorAll<Parser.LinkToken>('link');
 	for (const link of links) {
 		const current = normalizeTitle(link.link.title);
 		const rule = ruleMap.get(current);
 		if (!rule) continue;
 		const fragment = link.link.fragment;
+		const hasPipe = link.childNodes.length === 2;
 		link.link = fragment ? `${rule.to}#${fragment}` : rule.to;
-		if (link.childNodes.length === 2 && displayMatchesRule(link.innerText, rule)) {
+		if (hasPipe && isTitleDisplay(link.innerText, rule, isDisambiguation)) {
 			if (fragment) {
 				// 有片段时无管道写法会把片段显示出来，保留管道并显示新标题
 				link.innerText = rule.to;
@@ -316,7 +346,7 @@ function replaceDirectLinks(parsed: Parser.Token, ruleMap: Map<string, Replaceme
  * 文件链接（[[File:…|link=目标]]、gallery/imagemap 图片）的 link 参数。
  * link=（空值，禁用链接）不参与替换；caption 与旧/新标题实际相同时同步为新标题。
  */
-function replaceFileLinks(parsed: Parser.Token, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>): void {
+function replaceFileLinks(parsed: Parser.Token, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>, isDisambiguation: boolean): void {
 	const files = parsed.querySelectorAll<Parser.FileToken>('file, gallery-image, imagemap-image');
 	for (const file of files) {
 		const raw = file.getValue('link');
@@ -325,9 +355,12 @@ function replaceFileLinks(parsed: Parser.Token, ruleMap: Map<string, Replacement
 		const rule = ruleMap.get(normalizeTitle(main));
 		if (!rule) continue;
 		file.setValue('link', fragment ? `${rule.to}#${fragment}` : rule.to);
-		const caption = file.getValue('caption');
-		if (typeof caption === 'string' && displayMatchesRule(caption.trim(), rule)) {
-			file.setValue('caption', rule.to);
+		// 消歧义页的 caption 是描述文字而非义项名，保持原样
+		if (!isDisambiguation) {
+			const caption = file.getValue('caption');
+			if (typeof caption === 'string' && displayMatchesRule(caption.trim(), rule)) {
+				file.setValue('caption', rule.to);
+			}
 		}
 		const key = `${rule.from}→${rule.to}`;
 		hits.set(key, (hits.get(key) ?? 0) + 1);
@@ -335,7 +368,7 @@ function replaceFileLinks(parsed: Parser.Token, ruleMap: Map<string, Replacement
 }
 
 /** 配置的链接模板（Coloredlink 等）的目标参数与显示文字参数 */
-function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, LinkTemplateConfig>, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>): void {
+function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, LinkTemplateConfig>, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>, isDisambiguation: boolean): void {
 	const templates = parsed.querySelectorAll<Parser.TranscludeToken>('template');
 	for (const temp of templates) {
 		const cfg = templateMap.get(normalizeTemplateName(temp.name));
@@ -343,7 +376,7 @@ function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, Link
 		const applyRule = (key: string, rule: ReplacementRule): boolean => {
 			const raw = temp.getValue(key);
 			if (raw === undefined) return false;
-			const next = replaceParamValue(raw, rule, cfg.valueSeparator);
+			const next = replaceParamValue(raw, rule, cfg.valueSeparator, isDisambiguation);
 			if (next === null || next === raw) return false;
 			temp.setValue(key, next);
 			const hitKey = `${rule.from}→${rule.to}`;
@@ -351,12 +384,14 @@ function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, Link
 			return true;
 		};
 		let matchedRule: ReplacementRule | null = null;
+		let matchedTargetKey: string | null = null;
 		if (cfg.param === 'all') {
 			for (const arg of temp.getAllArgs()) {
 				if (!/^\d+$/.test(arg.name)) continue;
 				for (const rule of ruleMap.values()) {
 					if (applyRule(arg.name, rule)) {
 						matchedRule = rule;
+						matchedTargetKey = arg.name;
 						break;
 					}
 				}
@@ -369,6 +404,7 @@ function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, Link
 				for (const rule of ruleMap.values()) {
 					if (applyRule(key, rule)) {
 						matchedRule = rule;
+						matchedTargetKey = key;
 						break;
 					}
 				}
@@ -378,9 +414,15 @@ function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, Link
 		if (matchedRule && cfg.displayParam !== undefined) {
 			const displayKey = String(cfg.displayParam);
 			const displayRaw = temp.getValue(displayKey);
-			if (displayRaw !== undefined && displayMatchesRule(displayRaw.trim(), matchedRule)) {
-				// 显示与旧/新标题实际相同：移除冗余显示参数
-				temp.removeArg(displayKey);
+			if (displayRaw !== undefined && isTitleDisplay(displayRaw.trim(), matchedRule, isDisambiguation)) {
+				const targetRaw = matchedTargetKey !== null ? temp.getValue(matchedTargetKey) : undefined;
+				if (typeof targetRaw === 'string' && targetRaw.includes('#')) {
+					// 目标带片段：移除显示参数会把片段暴露到显示文字，改为显式设为新标题（新#片段|新）
+					temp.setValue(displayKey, matchedRule.to);
+				} else {
+					// 显示与旧/新标题实际相同：移除冗余显示参数
+					temp.removeArg(displayKey);
+				}
 			}
 		}
 	}
@@ -414,20 +456,26 @@ async function fetchJsonConfig(pageTitle: string): Promise<BotConfig> {
 	}
 }
 
-async function fetchPageContent(title: string): Promise<string | null> {
+/** 取页面正文与是否为消歧义页（pageprops.disambiguation） */
+async function fetchPageData(title: string): Promise<{ content: string | null; isDisambiguation: boolean }> {
 	const { data } = await api.post({
 		action: 'query',
-		prop: 'revisions',
+		prop: 'revisions|pageprops',
 		rvprop: 'content',
 		titles: title,
 	}, {
 		retry: 15,
 	} as any);
 
-	const pages = data.query?.pages as Record<string, { revisions?: Array<{ content: string }> }> | undefined;
+	const pages = data.query?.pages as Record<string, { revisions?: Array<{ content: string }>; pageprops?: Record<string, unknown> }> | undefined;
 	const page = pages ? Object.values(pages)[0] : undefined;
-	if (!page?.revisions?.[0]) return null;
-	return page.revisions[0].content;
+	const content = page?.revisions?.[0]?.content ?? null;
+	const isDisambiguation = page?.pageprops !== undefined && 'disambiguation' in page.pageprops;
+	return { content, isDisambiguation };
+}
+
+async function fetchPageContent(title: string): Promise<string | null> {
+	return (await fetchPageData(title)).content;
 }
 
 async function buildTemplateMap(linkTemplates: LinkTemplateConfig[] | undefined): Promise<Map<string, LinkTemplateConfig>> {
@@ -657,15 +705,15 @@ async function processPage(
 	dryRun: boolean,
 	log: (msg: string) => void,
 ): Promise<Map<string, number>> {
-	const content = await fetchPageContent(title);
+	const { content, isDisambiguation } = await fetchPageData(title);
 	if (content === null) {
 		throw new Error('页面不存在或无法获取内容');
 	}
 	const parsed = Parser.parse(content);
 	const hits = new Map<string, number>();
-	replaceDirectLinks(parsed, ruleMap, hits);
-	replaceFileLinks(parsed, ruleMap, hits);
-	replaceTemplateArgs(parsed, templateMap, ruleMap, hits);
+	replaceDirectLinks(parsed, ruleMap, hits, isDisambiguation);
+	replaceFileLinks(parsed, ruleMap, hits, isDisambiguation);
+	replaceTemplateArgs(parsed, templateMap, ruleMap, hits, isDisambiguation);
 	renameTransclusions(parsed, ruleMap, hits);
 	const newContent = parsed.toString();
 	if (newContent === content) return hits;
