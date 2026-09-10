@@ -91,11 +91,15 @@ const titleVariantCache = new Map<string, Set<string>>();
 
 const ZH_VARIANTS = ['zh-cn', 'zh-hans', 'zh-hant', 'zh-tw', 'zh-hk'];
 
-/** 从 action=parse 的 HTML 输出中提取纯文本 */
-function extractParsedText(html: string): string {
+/** 从 action=parse 的 HTML 输出中提取首个 <p> 的 HTML 片段 */
+function extractFirstParagraph(html: string): string | null {
 	const pMatch = /<p>([\s\S]*?)<\/p>/.exec(html);
-	const body = pMatch ? pMatch[1] : html;
-	return body
+	return pMatch ? pMatch[1] : null;
+}
+
+/** 从 HTML 片段中提取纯文本 */
+function htmlToText(fragment: string): string {
+	return fragment
 		.replace(/<!--[\s\S]*?-->/g, '')
 		.replace(/<[^>]+>/g, '')
 		.replace(/&amp;/g, '&')
@@ -106,14 +110,36 @@ function extractParsedText(html: string): string {
 		.trim();
 }
 
+/** 从 action=parse 的 HTML 输出中提取纯文本（无 <p> 时退化为整段处理） */
+function extractParsedText(html: string): string {
+	return htmlToText(extractFirstParagraph(html) ?? html);
+}
+
+/** 行首为这些字符的标题在多行文本中会被解析为块级语法（标题/列表/缩进/水平线），含 ~~~ 会被替换为签名，均不能安全批量拼接 */
+const UNSAFE_LINE_START = /^[=*#:;-]|~~~/;
+
+/** 单次批量变体转换的最大标题数 */
+const BATCH_VARIANT_SIZE = 50;
+
 /** 通过 API 把标题转换为各繁简变体，建立变体集合（重复标题只转换一次） */
 async function buildTitleVariants(rules: ReplacementRule[], log: (msg: string) => void): Promise<void> {
+	// 去重收集待转换标题（normalizeTitle 后发送，前导空白已被清除）
+	const titles: string[] = [];
 	const seen = new Set<string>();
-	const convert = async (title: string): Promise<void> => {
-		const key = normalizeTitle(title);
-		if (seen.has(key)) return;
-		seen.add(key);
-		const set = new Set<string>([key]);
+	for (const rule of rules) {
+		for (const title of [rule.from, rule.to]) {
+			const key = normalizeTitle(title);
+			if (!seen.has(key)) {
+				seen.add(key);
+				titles.push(key);
+			}
+		}
+	}
+
+	// 逐个转换：标题含行首块级语法、或批量调用失败/输出行数不齐时的兜底
+	const convertOne = async (title: string): Promise<void> => {
+		if (titleVariantCache.has(title)) return;
+		const set = new Set<string>([title]);
 		for (const variant of ZH_VARIANTS) {
 			try {
 				const { data } = await api.post({
@@ -135,12 +161,55 @@ async function buildTitleVariants(rules: ReplacementRule[], log: (msg: string) =
 			}
 			await sleep(300);
 		}
-		titleVariantCache.set(key, set);
+		titleVariantCache.set(title, set);
 		log(`  标题变体 ${title}: ${[...set].join(' / ')}`);
 	};
-	for (const rule of rules) {
-		await convert(rule.from);
-		await convert(rule.to);
+
+	// 批量转换：多行标题一次 parse，每个变体只发一次请求，输出按行 1:1 对应；返回 false 表示需退化为逐个转换
+	const convertBatch = async (batch: string[]): Promise<boolean> => {
+		const sets = new Map<string, Set<string>>(batch.map((key): [string, Set<string>] => [key, new Set<string>([key])]));
+		for (const variant of ZH_VARIANTS) {
+			try {
+				const { data } = await api.post({
+					action: 'parse',
+					text: batch.join('\n'),
+					contentmodel: 'wikitext',
+					variant,
+					prop: 'text',
+				}, {
+					retry: 15,
+				} as any);
+				const html: string | undefined = data?.parse?.text;
+				const paragraph = typeof html === 'string' ? extractFirstParagraph(html) : null;
+				if (paragraph === null) return false;
+				const lines = htmlToText(paragraph).split(/\r?\n/);
+				// 行数不齐说明发生了意料外的块级解析，批量结果不可信
+				if (lines.length !== batch.length) return false;
+				for (const [i, key] of batch.entries()) {
+					const converted = lines[i]?.trim();
+					if (converted) sets.get(key)!.add(normalizeTitle(converted));
+				}
+			} catch {
+				return false;
+			}
+			await sleep(300);
+		}
+		for (const [key, set] of sets) {
+			titleVariantCache.set(key, set);
+			log(`  标题变体 ${key}: ${[...set].join(' / ')}`);
+		}
+		return true;
+	};
+
+	const unsafe = titles.filter((title) => UNSAFE_LINE_START.test(title));
+	for (const title of unsafe) await convertOne(title);
+	const safe = titles.filter((title) => !UNSAFE_LINE_START.test(title));
+	for (let i = 0; i < safe.length; i += BATCH_VARIANT_SIZE) {
+		const batch = safe.slice(i, i + BATCH_VARIANT_SIZE);
+		if (!await convertBatch(batch)) {
+			log('  批量变体转换未通过，本批退化为逐个转换');
+			for (const title of batch) await convertOne(title);
+		}
 	}
 }
 
@@ -392,19 +461,24 @@ function validateConfig(cfg: BotConfig): string | null {
 
 /** 检查 from 的移动前置状态：已是 to 的重定向 / 不存在 / 正常存在 */
 async function checkMoveState(from: string, to: string): Promise<'redirected' | 'missing' | 'exists'> {
+	// 注意：带 redirects=1 时 MediaWiki 会把 pages 数组中的重定向条目替换为其指向的
+	// 最终页面，因此不能直接用 pages[0].missing 判断 from 是否存在——当 from 是指向
+	// 缺失页的重定向时会被误判为 missing。故 missing 判定须锚定 from 原标题。
 	const { data } = await api.post({
 		action: 'query',
 		format: 'json',
 		formatversion: '2',
 		titles: from,
+		prop: 'info',
 		redirects: 1,
 	}, {
 		retry: 15,
 	} as any);
 
 	const pages = data?.query?.pages ?? [];
-	const page = Array.isArray(pages) ? pages[0] : undefined;
-	if (page?.missing) return 'missing';
+	if (!Array.isArray(pages)) return 'exists';
+	const missingSelf = pages.some((p: { title?: string; missing?: boolean }) => p.missing && normalizeTitle(p.title ?? '') === normalizeTitle(from));
+	if (missingSelf) return 'missing';
 	const redirects = data?.query?.redirects ?? [];
 	if (redirects.some((r: { from: string; to: string }) => normalizeTitle(r.from) === normalizeTitle(from) && normalizeTitle(r.to) === normalizeTitle(to))) {
 		return 'redirected';
