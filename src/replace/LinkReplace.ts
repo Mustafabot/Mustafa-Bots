@@ -122,12 +122,12 @@ const UNSAFE_LINE_START = /^[=*#:;-]|~~~/;
 const BATCH_VARIANT_SIZE = 50;
 
 /** 通过 API 把标题转换为各繁简变体，建立变体集合（重复标题只转换一次） */
-async function buildTitleVariants(rules: ReplacementRule[], log: (msg: string) => void): Promise<void> {
-	// 去重收集待转换标题（normalizeTitle 后发送，前导空白已被清除）
+async function buildTitleVariants(rules: PreparedRule[], log: (msg: string) => void): Promise<void> {
+	// 去重收集待转换标题（normalizeTitle 后发送，前导空白已被清除；仅取标题部分，锚点不参与变体转换）
 	const titles: string[] = [];
 	const seen = new Set<string>();
 	for (const rule of rules) {
-		for (const title of [rule.from, rule.to]) {
+		for (const title of [rule.fromTitle, rule.toTitle]) {
 			const key = normalizeTitle(title);
 			if (!seen.has(key)) {
 				seen.add(key);
@@ -220,9 +220,9 @@ function displayMatchesTitle(display: string, title: string): boolean {
 	return normalizeTitle(display) === normalizeTitle(title);
 }
 
-/** 显示文字是否与旧/新标题实际相同（冗余管道的判定依据） */
-function displayMatchesRule(display: string, rule: ReplacementRule): boolean {
-	return displayMatchesTitle(display, rule.from) || displayMatchesTitle(display, rule.to);
+/** 显示文字是否与旧/新标题实际相同（冗余管道的判定依据；只比较标题部分，忽略锚点） */
+function displayMatchesRule(display: string, rule: PreparedRule): boolean {
+	return displayMatchesTitle(display, rule.fromTitle) || displayMatchesTitle(display, rule.toTitle);
 }
 
 /**
@@ -246,12 +246,12 @@ function displayHidesSuffix(display: string, title: string): boolean {
  * 显示文字是否属于"标题型"：与旧/新标题实际相同；消歧义页上还含仅隐藏了紧贴半角括号后缀的显示。
  * 空显示（管道魔术 [[X|]] 会隐去命名空间前缀与括号后缀）在消歧义页上同样视为标题型。
  */
-function isTitleDisplay(display: string, rule: ReplacementRule, isDisambiguation: boolean): boolean {
+function isTitleDisplay(display: string, rule: PreparedRule, isDisambiguation: boolean): boolean {
 	if (!isDisambiguation) return displayMatchesRule(display, rule);
 	if (display.trim() === '') return true;
 	return displayMatchesRule(display, rule)
-		|| displayHidesSuffix(display, rule.from)
-		|| displayHidesSuffix(display, rule.to);
+		|| displayHidesSuffix(display, rule.fromTitle)
+		|| displayHidesSuffix(display, rule.toTitle);
 }
 
 /** 模板名归一化：命名空间前缀小写、主体按 normalizeTitle 处理 */
@@ -265,6 +265,86 @@ function splitFragment(title: string): [string, string | undefined] {
 	const idx = title.indexOf('#');
 	if (idx === -1) return [title, undefined];
 	return [title.slice(0, idx), title.slice(idx + 1)];
+}
+
+/**
+ * 锚点归一化：空白/下划线的连续序列折叠为单个下划线，并去掉尾部下划线。
+ * 与 wikiparser-node 输出的 fragment 保持一致（如 "历  史"、"历_ _史" 归为 "历_史"，"历史_" 归为 "历史"）。
+ * 锚点对繁简敏感，故此处不做任何变体转换。
+ */
+function normAnchor(anchor: string): string {
+	return anchor.replace(/[\s_]+/g, '_').replace(/_+$/, '');
+}
+
+/** exact 索引的键：`归一化标题#归一化锚点`（构造侧与查询侧共用，键格式只在此处定义） */
+function exactKey(title: string, anchor: string): string {
+	return `${normalizeTitle(title)}#${normAnchor(anchor)}`;
+}
+
+/** 预解析后的规则：from/to 的标题与锚点各拆分一次，各消费点直接读字段 */
+interface PreparedRule extends ReplacementRule {
+	fromTitle: string;
+	fromFrag?: string;
+	toTitle: string;
+	toFrag?: string;
+}
+
+function prepareRule(rule: ReplacementRule): PreparedRule {
+	const [fromTitle, fromFrag] = splitFragment(rule.from);
+	const [toTitle, toFrag] = splitFragment(rule.to);
+	return { ...rule, fromTitle, fromFrag, toTitle, toFrag };
+}
+
+/**
+ * 规则索引：exact 存 from 含锚点的规则（键 `标题#锚点`），title 存 from 无锚点的规则（键 `标题`）；
+ * transclusions 存 from 含命名空间前缀（可作模板嵌入引用）的规则（键为模板名归一化）。
+ */
+interface RuleIndex {
+	exact: Map<string, PreparedRule>;
+	title: Map<string, PreparedRule>;
+	transclusions: Map<string, PreparedRule>;
+}
+
+function buildRuleIndex(rules: PreparedRule[]): RuleIndex {
+	const index: RuleIndex = { exact: new Map(), title: new Map(), transclusions: new Map() };
+	for (const rule of rules) {
+		if (rule.fromFrag !== undefined) {
+			index.exact.set(exactKey(rule.fromTitle, rule.fromFrag), rule);
+		} else {
+			index.title.set(normalizeTitle(rule.fromTitle), rule);
+		}
+		const fromNorm = normalizeTemplateName(rule.from);
+		if (fromNorm.includes(':')) index.transclusions.set(fromNorm, rule);
+	}
+	return index;
+}
+
+/** 按 标题/锚点 查规则：含锚点的精确键优先于纯标题键 */
+function lookupRule(index: RuleIndex, title: string, fragment: string | undefined): PreparedRule | undefined {
+	if (fragment !== undefined) {
+		const exact = index.exact.get(exactKey(title, fragment));
+		if (exact) return exact;
+	}
+	return index.title.get(normalizeTitle(title));
+}
+
+/**
+ * 生成新链接目标。from 与 to 均不含锚点时保留链接原锚点（现有行为）；
+ * 其余任一含锚点时一律取 to 逐字（可新增、改写或去除锚点）。
+ * hasFragment 表示新目标是否带锚点，供调用方决定显示文字的写法。
+ */
+function buildTarget(rule: PreparedRule, linkFragment: string | undefined): { target: string; hasFragment: boolean } {
+	if (rule.fromFrag === undefined && rule.toFrag === undefined) {
+		return linkFragment
+			? { target: `${rule.toTitle}#${linkFragment}`, hasFragment: true }
+			: { target: rule.toTitle, hasFragment: false };
+	}
+	return { target: rule.to, hasFragment: rule.toFrag !== undefined };
+}
+
+/** hits 统计键 */
+function hitKey(rule: ReplacementRule): string {
+	return `${rule.from}→${rule.to}`;
 }
 
 function escapeCharClass(chars: string): string {
@@ -287,57 +367,58 @@ function classifyAbuseFilter(sources: unknown[]): 'retry' | 'disallowed' | 'none
 
 /**
  * 对单个模板参数值执行一条替换规则。
- * 返回新值；未命中返回 null。参数值中的裸 | 会破坏模板结构，统一转义为 {{!}}。
+ * 返回新值与命中的规则；未命中返回 null。参数值中的裸 | 会破坏模板结构，统一转义为 {{!}}。
  */
-function replaceParamValue(raw: string, rule: ReplacementRule, separator: string | undefined, isDisambiguation: boolean): string | null {
+function replaceParamValue(raw: string, index: RuleIndex, separator: string | undefined, isDisambiguation: boolean): { value: string; rule: PreparedRule } | null {
 	const normalized = raw.replace(/\{\{!\}\}/g, '|');
 	const firstSep = separator ? new RegExp(`[${escapeCharClass(separator)}]`) : null;
 	const match = firstSep ? firstSep.exec(normalized) : null;
 	const targetRaw = match ? normalized.slice(0, match.index) : normalized;
 	const tail = match ? normalized.slice(match.index) : '';
 	const [main, fragment] = splitFragment(targetRaw.trim());
-	if (normalizeTitle(main) !== normalizeTitle(rule.from)) return null;
-	let result = fragment ? `${rule.to}#${fragment}` : rule.to;
+	const rule = lookupRule(index, main, fragment);
+	if (!rule) return null;
+	const { target, hasFragment } = buildTarget(rule, fragment);
+	let result = target;
 	if (match && separator) {
 		const pieces = tail.split(new RegExp(`([${escapeCharClass(separator)}])`));
 		// pieces: ['', 分隔符, 分段, 分隔符, 分段, ...]，分段位于偶数下标（≥2）
 		const displaySegCount = (pieces.length - 1) / 2;
 		const matchedCount = pieces.filter((seg, i) => i >= 2 && i % 2 === 0 && isTitleDisplay(seg, rule, isDisambiguation)).length;
-		// 纯管道显示尾部（如大家族内容行）且目标无片段：显示与旧/新标题实际相同时整体移除冗余管道
-		if (separator.includes('|') && !fragment && displaySegCount > 0 && matchedCount === displaySegCount) {
-			return result.replace(/\|/g, '{{!}}');
+		// 纯管道显示尾部（如大家族内容行）且新目标无锚点：显示与旧/新标题实际相同时整体移除冗余管道
+		if (separator.includes('|') && !hasFragment && displaySegCount > 0 && matchedCount === displaySegCount) {
+			return { value: result.replace(/\|/g, '{{!}}'), rule };
 		}
-		// 其余分段：与旧/新标题实际相同时同步为新标题
+		// 其余分段：与旧/新标题实际相同时同步为新标题（含锚点的目标只取标题部分，避免锚点暴露）
 		for (let i = 2; i < pieces.length; i += 2) {
 			if (pieces[i] !== undefined && isTitleDisplay(pieces[i], rule, isDisambiguation)) {
-				pieces[i] = rule.to;
+				pieces[i] = rule.toTitle;
 			}
 		}
 		result += pieces.join('');
 	}
-	return result.replace(/\|/g, '{{!}}');
+	return { value: result.replace(/\|/g, '{{!}}'), rule };
 }
 
-/** 直接内链 [[旧标题]] / [[旧标题|显示]] / [[旧标题#片段]] */
-function replaceDirectLinks(parsed: Parser.Token, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>, isDisambiguation: boolean): void {
+/** 直接内链 [[旧标题]] / [[旧标题|显示]] / [[旧标题#锚点]] */
+function replaceDirectLinks(parsed: Parser.Token, index: RuleIndex, hits: Map<string, number>, isDisambiguation: boolean): void {
 	const links = parsed.querySelectorAll<Parser.LinkToken>('link');
 	for (const link of links) {
-		const current = normalizeTitle(link.link.title);
-		const rule = ruleMap.get(current);
+		const rule = lookupRule(index, link.link.title, link.link.fragment);
 		if (!rule) continue;
-		const fragment = link.link.fragment;
 		const hasPipe = link.childNodes.length === 2;
-		link.link = fragment ? `${rule.to}#${fragment}` : rule.to;
+		const { target, hasFragment } = buildTarget(rule, link.link.fragment);
+		link.link = target;
 		if (hasPipe && isTitleDisplay(link.innerText, rule, isDisambiguation)) {
-			if (fragment) {
-				// 有片段时无管道写法会把片段显示出来，保留管道并显示新标题
-				link.innerText = rule.to;
+			if (hasFragment) {
+				// 目标带锚点时无管道写法会把锚点显示出来，保留管道并显示新标题
+				link.innerText = rule.toTitle;
 			} else {
 				// 显示与旧/新标题实际相同：移除冗余管道符
 				(link.childNodes as unknown as readonly Parser.Token[])[1]?.remove();
 			}
 		}
-		const key = `${rule.from}→${rule.to}`;
+		const key = hitKey(rule);
 		hits.set(key, (hits.get(key) ?? 0) + 1);
 	}
 }
@@ -346,54 +427,52 @@ function replaceDirectLinks(parsed: Parser.Token, ruleMap: Map<string, Replaceme
  * 文件链接（[[File:…|link=目标]]、gallery/imagemap 图片）的 link 参数。
  * link=（空值，禁用链接）不参与替换；caption 与旧/新标题实际相同时同步为新标题。
  */
-function replaceFileLinks(parsed: Parser.Token, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>, isDisambiguation: boolean): void {
+function replaceFileLinks(parsed: Parser.Token, index: RuleIndex, hits: Map<string, number>, isDisambiguation: boolean): void {
 	const files = parsed.querySelectorAll<Parser.FileToken>('file, gallery-image, imagemap-image');
 	for (const file of files) {
 		const raw = file.getValue('link');
 		if (typeof raw !== 'string' || raw === '') continue;
 		const [main, fragment] = splitFragment(raw.trim());
-		const rule = ruleMap.get(normalizeTitle(main));
+		const rule = lookupRule(index, main, fragment);
 		if (!rule) continue;
-		file.setValue('link', fragment ? `${rule.to}#${fragment}` : rule.to);
+		file.setValue('link', buildTarget(rule, fragment).target);
 		// 消歧义页的 caption 是描述文字而非义项名，保持原样
 		if (!isDisambiguation) {
 			const caption = file.getValue('caption');
 			if (typeof caption === 'string' && displayMatchesRule(caption.trim(), rule)) {
-				file.setValue('caption', rule.to);
+				file.setValue('caption', rule.toTitle);
 			}
 		}
-		const key = `${rule.from}→${rule.to}`;
+		const key = hitKey(rule);
 		hits.set(key, (hits.get(key) ?? 0) + 1);
 	}
 }
 
 /** 配置的链接模板（Coloredlink 等）的目标参数与显示文字参数 */
-function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, LinkTemplateConfig>, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>, isDisambiguation: boolean): void {
+function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, LinkTemplateConfig>, index: RuleIndex, hits: Map<string, number>, isDisambiguation: boolean): void {
 	const templates = parsed.querySelectorAll<Parser.TranscludeToken>('template');
 	for (const temp of templates) {
 		const cfg = templateMap.get(normalizeTemplateName(temp.name));
 		if (!cfg) continue;
-		const applyRule = (key: string, rule: ReplacementRule): boolean => {
+		const applyRule = (key: string): PreparedRule | null => {
 			const raw = temp.getValue(key);
-			if (raw === undefined) return false;
-			const next = replaceParamValue(raw, rule, cfg.valueSeparator, isDisambiguation);
-			if (next === null || next === raw) return false;
-			temp.setValue(key, next);
-			const hitKey = `${rule.from}→${rule.to}`;
-			hits.set(hitKey, (hits.get(hitKey) ?? 0) + 1);
-			return true;
+			if (raw === undefined) return null;
+			const next = replaceParamValue(raw, index, cfg.valueSeparator, isDisambiguation);
+			if (next === null || next.value === raw) return null;
+			temp.setValue(key, next.value);
+			const statKey = hitKey(next.rule);
+			hits.set(statKey, (hits.get(statKey) ?? 0) + 1);
+			return next.rule;
 		};
-		let matchedRule: ReplacementRule | null = null;
+		let matchedRule: PreparedRule | null = null;
 		let matchedTargetKey: string | null = null;
 		if (cfg.param === 'all') {
 			for (const arg of temp.getAllArgs()) {
 				if (!/^\d+$/.test(arg.name)) continue;
-				for (const rule of ruleMap.values()) {
-					if (applyRule(arg.name, rule)) {
-						matchedRule = rule;
-						matchedTargetKey = arg.name;
-						break;
-					}
+				const rule = applyRule(arg.name);
+				if (rule) {
+					matchedRule = rule;
+					matchedTargetKey = arg.name;
 				}
 			}
 		} else {
@@ -401,12 +480,10 @@ function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, Link
 			for (const key of candidates) {
 				const raw = temp.getValue(key);
 				if (raw === undefined || raw.trim() === '') continue;
-				for (const rule of ruleMap.values()) {
-					if (applyRule(key, rule)) {
-						matchedRule = rule;
-						matchedTargetKey = key;
-						break;
-					}
+				const rule = applyRule(key);
+				if (rule) {
+					matchedRule = rule;
+					matchedTargetKey = key;
 				}
 				break; // 只取首个非空候选参数
 			}
@@ -417,8 +494,8 @@ function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, Link
 			if (displayRaw !== undefined && isTitleDisplay(displayRaw.trim(), matchedRule, isDisambiguation)) {
 				const targetRaw = matchedTargetKey !== null ? temp.getValue(matchedTargetKey) : undefined;
 				if (typeof targetRaw === 'string' && targetRaw.includes('#')) {
-					// 目标带片段：移除显示参数会把片段暴露到显示文字，改为显式设为新标题（新#片段|新）
-					temp.setValue(displayKey, matchedRule.to);
+					// 目标带锚点：移除显示参数会把锚点暴露到显示文字，改为显式设为新标题（新#锚点|新）
+					temp.setValue(displayKey, matchedRule.toTitle);
 				} else {
 					// 显示与旧/新标题实际相同：移除冗余显示参数
 					temp.removeArg(displayKey);
@@ -429,18 +506,14 @@ function replaceTemplateArgs(parsed: Parser.Token, templateMap: Map<string, Link
 }
 
 /** 普通嵌入引用 {{Template:旧}}：仅当规则 from 带模板命名空间前缀时重写，避免误伤主命名空间规则 */
-function renameTransclusions(parsed: Parser.Token, ruleMap: Map<string, ReplacementRule>, hits: Map<string, number>): void {
+function renameTransclusions(parsed: Parser.Token, index: RuleIndex, hits: Map<string, number>): void {
 	const templates = parsed.querySelectorAll<Parser.TranscludeToken>('template');
 	for (const temp of templates) {
-		const current = normalizeTemplateName(temp.name);
-		for (const rule of ruleMap.values()) {
-			const fromNorm = normalizeTemplateName(rule.from);
-			if (!fromNorm.includes(':') || fromNorm !== current) continue;
-			temp.replaceTemplate(rule.to.replace(/^template:/i, ''));
-			const key = `${rule.from}→${rule.to}`;
-			hits.set(key, (hits.get(key) ?? 0) + 1);
-			break;
-		}
+		const rule = index.transclusions.get(normalizeTemplateName(temp.name));
+		if (!rule) continue;
+		temp.replaceTemplate(rule.to.replace(/^template:/i, ''));
+		const key = hitKey(rule);
+		hits.set(key, (hits.get(key) ?? 0) + 1);
 	}
 }
 
@@ -497,6 +570,9 @@ function validateConfig(cfg: BotConfig): string | null {
 	if (cfg.mode !== undefined && !['replace', 'move'].includes(cfg.mode)) return 'mode 只能是 replace 或 move';
 	for (const [i, rule] of cfg.replacements.entries()) {
 		if (!rule.from || !rule.to) return `replacements[${i}] 缺少 from 或 to`;
+		// 含锚点的规则要求标题部分非空（纯锚点规则无意义）
+		if (rule.from.trim().startsWith('#')) return `replacements[${i}] from 的标题部分不能为空（不支持纯锚点规则）`;
+		if (rule.to.trim().startsWith('#')) return `replacements[${i}] to 的标题部分不能为空`;
 		if (normalizeTitle(rule.from) === normalizeTitle(rule.to)) return `replacements[${i}] from 与 to 相同`;
 	}
 	if (cfg.namespaces !== undefined && (!Array.isArray(cfg.namespaces) || cfg.namespaces.some((n) => !Number.isInteger(n) || n < 0))) {
@@ -555,28 +631,35 @@ async function attemptMove(params: Record<string, unknown>): Promise<{ ok: boole
 }
 
 /** 移动阶段：返回移动成功（或视为已完成）的规则，失败的规则本轮不参与链接替换 */
-async function runMovePhase(cfg: BotConfig, summary: string, interval: number, dryRun: boolean, log: (msg: string) => void): Promise<ReplacementRule[]> {
+async function runMovePhase(cfg: BotConfig, summary: string, interval: number, dryRun: boolean, log: (msg: string) => void): Promise<PreparedRule[]> {
 	const moveCfg = cfg.move ?? {};
-	const applicable: ReplacementRule[] = [];
+	const applicable: PreparedRule[] = [];
 	console.log(`== 移动阶段（${cfg.replacements.length} 条规则） ==`);
-	for (const rule of cfg.replacements) {
-		const state = await checkMoveState(rule.from, rule.to);
+	for (const raw of cfg.replacements) {
+		const rule = prepareRule(raw);
+		if (rule.fromFrag !== undefined) {
+			// 锚点规则不涉及页面移动，直接参与链接替换
+			log(`  ${rule.from} → ${rule.to}：锚点规则，跳过移动`);
+			applicable.push(rule);
+			continue;
+		}
+		const state = await checkMoveState(rule.fromTitle, rule.toTitle);
 		if (state === 'redirected') {
-			log(`  ${rule.from} 已是 ${rule.to} 的重定向，跳过移动`);
+			log(`  ${rule.fromTitle} 已是 ${rule.toTitle} 的重定向，跳过移动`);
 			applicable.push(rule);
 		} else if (state === 'missing') {
-			console.log(`  ${rule.from} 不存在，视为已完成移动`);
+			console.log(`  ${rule.fromTitle} 不存在，视为已完成移动`);
 			applicable.push(rule);
 		} else if (dryRun) {
-			log(`  [DRY-RUN] 将移动 ${rule.from} → ${rule.to}`);
+			log(`  [DRY-RUN] 将移动 ${rule.fromTitle} → ${rule.toTitle}`);
 			applicable.push(rule);
 		} else {
 			const params: Record<string, unknown> = {
 				action: 'move',
 				format: 'json',
 				formatversion: '2',
-				from: rule.from,
-				to: rule.to,
+				from: rule.fromTitle,
+				to: rule.toTitle,
 				reason: summary,
 				movetalk: moveCfg.movetalk !== false,
 				movesubpages: true,
@@ -585,7 +668,7 @@ async function runMovePhase(cfg: BotConfig, summary: string, interval: number, d
 			if (moveCfg.noredirect) params.noredirect = 1;
 			let result = await attemptMove(params);
 			if (!result.ok && moveCfg.noredirect && /suppressredirect|noredirect/i.test(`${result.code ?? ''} ${result.info ?? ''}`)) {
-				log(`  ${rule.from}：不留重定向失败（${result.code}），降级为保留重定向`);
+				log(`  ${rule.fromTitle}：不留重定向失败（${result.code}），降级为保留重定向`);
 				delete params.noredirect;
 				result = await attemptMove(params);
 			}
@@ -594,10 +677,10 @@ async function runMovePhase(cfg: BotConfig, summary: string, interval: number, d
 				result = await attemptMove(params);
 			}
 			if (result.ok) {
-				log(`  已移动 ${rule.from} → ${rule.to}`);
+				log(`  已移动 ${rule.fromTitle} → ${rule.toTitle}`);
 				applicable.push(rule);
 			} else {
-				console.error(`  移动失败 ${rule.from} → ${rule.to}: [${result.code}] ${result.info}（该规则本轮不执行链接替换）`);
+				console.error(`  移动失败 ${rule.fromTitle} → ${rule.toTitle}: [${result.code}] ${result.info}（该规则本轮不执行链接替换）`);
 			}
 		}
 		await sleep(interval);
@@ -606,7 +689,7 @@ async function runMovePhase(cfg: BotConfig, summary: string, interval: number, d
 }
 
 /** 发现阶段：显式 pages ∪ 各 from 的链入（backlinks）∪ 嵌入引用（embeddedin），均在指定命名空间内 */
-async function discoverPages(cfg: BotConfig, applicableRules: ReplacementRule[], log: (msg: string) => void): Promise<string[]> {
+async function discoverPages(cfg: BotConfig, applicableRules: PreparedRule[], log: (msg: string) => void): Promise<string[]> {
 	const found = new Set<string>();
 	for (const page of cfg.pages ?? []) {
 		if (page.trim()) found.add(page.trim());
@@ -614,13 +697,15 @@ async function discoverPages(cfg: BotConfig, applicableRules: ReplacementRule[],
 	const namespaces = cfg.namespaces;
 	if (!namespaces?.length) return [...found];
 	const nsParam = namespaces.join('|');
-	for (const rule of applicableRules) {
+	// 同一标题的多条规则（含锚点规则）只需查询一次链入/嵌入
+	const queryTitles = [...new Set(applicableRules.map((rule) => rule.fromTitle))];
+	for (const queryTitle of queryTitles) {
 		let blcontinue: string | undefined;
 		do {
 			const { data } = await api.post({
 				action: 'query',
 				list: 'backlinks',
-				bltitle: rule.from,
+				bltitle: queryTitle,
 				blnamespace: nsParam,
 				bllimit: 'max',
 				blcontinue,
@@ -639,7 +724,7 @@ async function discoverPages(cfg: BotConfig, applicableRules: ReplacementRule[],
 			const { data } = await api.post({
 				action: 'query',
 				list: 'embeddedin',
-				eititle: rule.from,
+				eititle: queryTitle,
 				einnamespace: nsParam,
 				eilimit: 'max',
 				eicontinue,
@@ -699,7 +784,7 @@ async function submitEdit(title: string, text: string, summary: string, log: (ms
 
 async function processPage(
 	title: string,
-	ruleMap: Map<string, ReplacementRule>,
+	index: RuleIndex,
 	templateMap: Map<string, LinkTemplateConfig>,
 	summary: string,
 	dryRun: boolean,
@@ -711,10 +796,10 @@ async function processPage(
 	}
 	const parsed = Parser.parse(content);
 	const hits = new Map<string, number>();
-	replaceDirectLinks(parsed, ruleMap, hits, isDisambiguation);
-	replaceFileLinks(parsed, ruleMap, hits, isDisambiguation);
-	replaceTemplateArgs(parsed, templateMap, ruleMap, hits, isDisambiguation);
-	renameTransclusions(parsed, ruleMap, hits);
+	replaceDirectLinks(parsed, index, hits, isDisambiguation);
+	replaceFileLinks(parsed, index, hits, isDisambiguation);
+	replaceTemplateArgs(parsed, templateMap, index, hits, isDisambiguation);
+	renameTransclusions(parsed, index, hits);
 	const newContent = parsed.toString();
 	if (newContent === content) return hits;
 	if (dryRun) {
@@ -811,20 +896,16 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 		const templateMap = await buildTemplateMap(cfg.linkTemplates);
 		if (templateMap.size > 0) log(`链接模板配置 ${cfg.linkTemplates!.length} 项（含重定向共 ${templateMap.size} 个模板名）`);
 
-		const applicableRules = mode === 'move'
+		const applicableRules: PreparedRule[] = mode === 'move'
 			? await runMovePhase(cfg, summary, cliArgs.interval, cliArgs.dryRun, log)
-			: cfg.replacements;
+			: cfg.replacements.map(prepareRule);
 		if (applicableRules.length === 0) {
 			console.log('没有可用的替换规则（全部移动失败），结束');
 			process.exit(1);
 		}
-		const ruleMap = new Map<string, ReplacementRule>();
-		for (const rule of applicableRules) {
-			ruleMap.set(normalizeTitle(rule.from), rule);
-		}
-		await buildTitleVariants(applicableRules, log);
-
-		const pages = await discoverPages(cfg, applicableRules, log);
+		const index = buildRuleIndex(applicableRules);
+		// 变体转换与页面发现互不依赖（变体集合要到逐页处理时才被读取），并行执行
+		const [, pages] = await Promise.all([buildTitleVariants(applicableRules, log), discoverPages(cfg, applicableRules, log)]);
 		if (pages.length === 0) {
 			console.log('没有发现待处理页面，结束');
 			process.exit(0);
@@ -841,7 +922,7 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 				continue;
 			}
 			try {
-				const hits = await processPage(title, ruleMap, templateMap, summary, cliArgs.dryRun, log);
+				const hits = await processPage(title, index, templateMap, summary, cliArgs.dryRun, log);
 				if (hits.size > 0) {
 					console.log(`${title}: ${[...hits.entries()].map(([rule, count]) => `${rule} ${count} 处`).join('，')}`);
 					changed++;
