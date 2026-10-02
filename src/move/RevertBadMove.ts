@@ -4,6 +4,7 @@ import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, extractApiError, isModerationQueuedCode, isPermissionDeniedError } from '../utils/retry.js';
 import type { ApiError } from '../utils/retry.js';
+import type { ApiErrorResponse, ApiMoveResponse, ApiPage, ApiQueryResponse } from 'types-mediawiki-response';
 
 const PREFIX = '[RevertBadMove]';
 
@@ -121,7 +122,7 @@ async function collectBadPages(
 	let apcontinue: string | undefined;
 
 	do {
-		const { data } = await api.post<any>(
+		const { data } = await api.post<ApiQueryResponse>(
 			{
 				action: 'query',
 				format: 'json',
@@ -142,7 +143,7 @@ async function collectBadPages(
 		}
 
 		for (const page of data?.query?.allpages ?? []) {
-			titles.push(page.title as string);
+			titles.push(page.title);
 		}
 
 		apcontinue = data?.continue?.apcontinue;
@@ -162,7 +163,7 @@ async function previewTargets(api: MediaWikiApi, plans: MovePlan[]): Promise<voi
 	const BATCH = 50;
 	for (let i = 0; i < plans.length; i += BATCH) {
 		const batch = plans.slice(i, i + BATCH);
-		const { data } = await api.post<any>(
+		const { data } = await api.post<ApiQueryResponse>(
 			{
 				action: 'query',
 				format: 'json',
@@ -173,7 +174,7 @@ async function previewTargets(api: MediaWikiApi, plans: MovePlan[]): Promise<voi
 			{ retry: 15, noCache: true } as any,
 		);
 
-		const byTitle = new Map<string, any>();
+		const byTitle = new Map<string, ApiPage>();
 		for (const page of data?.query?.pages ?? []) {
 			byTitle.set(page.title as string, page);
 		}
@@ -208,7 +209,7 @@ async function moveOnce(
 	reason: string,
 	verbose: boolean,
 ): Promise<ApiError | null> {
-	const data = await withApiRetry<any>(
+	const data = await withApiRetry<ApiMoveResponse | ApiErrorResponse>(
 		() =>
 			api.postWithToken('csrf', {
 				action: 'move',

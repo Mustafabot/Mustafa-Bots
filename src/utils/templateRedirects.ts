@@ -1,4 +1,5 @@
 import type { MediaWikiApi } from 'wiki-saikou';
+import type { ApiQueryResponse } from 'types-mediawiki-response';
 
 export async function fetchRedirectsForTemplate(
 	api: MediaWikiApi,
@@ -7,14 +8,14 @@ export async function fetchRedirectsForTemplate(
 	const aliases: string[] = [];
 	let blcontinue: string | undefined;
 	while (true) {
-		const { data } = await api.post({
+		const { data } = await api.post<ApiQueryResponse>({
 			action: 'query',
 			list: 'backlinks',
 			bltitle: templateName,
 			blfilterredir: 'redirects',
 			bllimit: 'max',
 			blcontinue: blcontinue,
-		}, { retry: 15 } as any) as any;
+		}, { retry: 15 } as any);
 
 		const backlinks: Array<{ title: string }> = data.query?.backlinks ?? [];
 		for (const bl of backlinks) {

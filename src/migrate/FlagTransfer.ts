@@ -1,4 +1,5 @@
 import { MediaWikiApi } from 'wiki-saikou';
+import type { ApiPage, ApiQueryResponse } from 'types-mediawiki-response';
 import Parser from 'wikiparser-node';
 import { readFileSync, writeFileSync, existsSync, mkdirSync, unlinkSync } from 'fs';
 import { resolve, dirname } from 'path';
@@ -118,7 +119,7 @@ async function findFlagiconUsages(
   console.log('\n正在查找 {{flagicon}} 模板使用情况...');
 
   while (eicontinue !== eol) {
-    const { data } = await api.post({
+    const { data } = await api.post<ApiQueryResponse>({
       action: 'query',
       list: 'embeddedin',
       eititle: 'Template:flagicon',
@@ -127,25 +128,25 @@ async function findFlagiconUsages(
       eicontinue: eicontinue as string | undefined,
     });
 
-    const pages = (data as any).query.embeddedin as any[];
+    const pages = data.query.embeddedin as any[];
     const titles: string[] = pages.map((p: any) => p.title);
 
     // 批量获取页面内容，每次 50 个
     for (let i = 0; i < titles.length; i += 50) {
       const batch = titles.slice(i, i + 50);
-      const contentData = await api.post({
+      const contentData = await api.post<ApiQueryResponse>({
         action: 'query',
         prop: 'revisions',
         rvprop: 'content',
         titles: batch.join('|'),
       });
 
-      const pagesObj = (contentData.data as any).query.pages;
+      const pagesObj = contentData.data.query.pages as ApiPage[];
       for (const pageId of Object.keys(pagesObj)) {
-        const page = pagesObj[pageId];
+        const page = pagesObj[pageId as unknown as number];
         if (!page.revisions) continue;
-        const wikitext: string = page.revisions[0].content;
-        const parsed = Parser.parse(wikitext, page.title);
+        const wikitext = page.revisions[0].content as string;
+        const parsed = Parser.parse(wikitext, page.title as string);
         const templates = parsed.querySelectorAll<Parser.TranscludeToken>('template') ;
         for (const tpl of templates) {
           const name: string = (tpl.name || '').replace(/^Template:/i, '').toLowerCase().replace(/_/g, ' ');
@@ -229,16 +230,16 @@ async function getCommonsFileUrl(suffix: string): Promise<string> {
  */
 async function checkFileExistsOnCm(api: MediaWikiApi, filename: string): Promise<boolean> {
   try {
-    const { data } = await api.post({
+    const { data } = await api.post<ApiQueryResponse>({
       action: 'query',
       prop: 'imageinfo',
       titles: filename,
     });
 
-    const pages = (data as any).query?.pages;
+    const pages = data.query?.pages;
     if (!pages) return false;
 
-    const page = Object.values(pages)[0] as any;
+    const page = Object.values(pages)[0];
     // page.missing 或 page.imagerepository === '' 表示文件不存在
     if (page?.missing) return false;
 

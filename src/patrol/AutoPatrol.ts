@@ -1,4 +1,5 @@
 import { MediaWikiApi } from 'wiki-saikou';
+import type { ApiQueryResponse } from 'types-mediawiki-response';
 import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
@@ -145,8 +146,8 @@ async function patrolEditPhase(
 		};
 		if (rccontinue) params.rccontinue = rccontinue;
 
-		const { data } = await api.post(params, { noCache: true } as Record<string, unknown>);
-		const rcs: RecentChange[] = data.query?.recentchanges || [];
+		const { data } = await api.post<ApiQueryResponse>(params, { noCache: true } as Record<string, unknown>);
+		const rcs = (data.query?.recentchanges || []) as unknown as RecentChange[];
 		totalScanned += rcs.length;
 
 		if (verbose) console.log(`${PREFIX} 第${pageNum}页: ${rcs.length}条结果`);
@@ -262,8 +263,8 @@ async function patrolMovedPhase(
 		};
 		if (rccontinue) params.rccontinue = rccontinue;
 
-		const { data } = await api.post(params, { noCache: true } as Record<string, unknown>);
-		const rcs: RecentChange[] = data.query?.recentchanges || [];
+		const { data } = await api.post<ApiQueryResponse>(params, { noCache: true } as Record<string, unknown>);
+		const rcs = (data.query?.recentchanges || []) as unknown as RecentChange[];
 
 		for (const rc of rcs) {
 			newPages.push(rc);
@@ -400,7 +401,7 @@ async function fetchMoveLogMap(
 		};
 		if (lecontinue) params.lecontinue = lecontinue;
 
-		const { data } = await api.post(params, { noCache: true } as Record<string, unknown>);
+		const { data } = await api.post<ApiQueryResponse>(params, { noCache: true } as Record<string, unknown>);
 		const events = data.query?.logevents || [];
 
 		for (const ev of events) {
@@ -408,7 +409,7 @@ async function fetchMoveLogMap(
 			const operator = (ev.user || '').trim();
 			if (!privilegedUsers.has(operator)) continue;
 
-			const targetTitle: string = ev.params?.target_title || '';
+			const targetTitle: string = (ev.params?.target_title as string | undefined) || '';
 			if (!targetTitle.startsWith('User:') && !targetTitle.startsWith('Draft:')) continue;
 
 			const originalTitle: string = ev.title || '';
@@ -501,7 +502,7 @@ async function runPatrolForWiki(
 			};
 			if (aufrom) params.aufrom = aufrom;
 
-			const { data } = await zhApi.post(params);
+			const { data } = await zhApi.post<ApiQueryResponse>(params);
 			const users = data.query?.allusers || [];
 			for (const u of users) {
 				const name = u.name.trim();

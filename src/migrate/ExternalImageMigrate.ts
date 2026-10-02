@@ -1,4 +1,5 @@
 import { MediaWikiApi } from 'wiki-saikou';
+import type { ApiPage, ApiQueryResponse, ApiUploadResponse } from 'types-mediawiki-response';
 import Parser from 'wikiparser-node';
 import { URL } from 'url';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
@@ -384,20 +385,20 @@ async function detectMimeFromUrl(url: string): Promise<string | null> {
 }
 
 async function fetchWhitelist(api: MediaWikiApi): Promise<RegExp[]> {
-	const { data } = await withRetry(() => api.post({
+	const { data } = await withRetry(() => api.post<ApiQueryResponse>({
 		action: 'query',
 		prop: 'revisions',
 		rvprop: 'content',
 		titles: 'MediaWiki:External_image_whitelist',
 	}));
 
-	const page = Object.values((data as any).query.pages)[0] as any;
+	const page = Object.values(data.query.pages as ApiPage[])[0];
 	if (!page || !page.revisions) {
 		console.error('Failed to get external image whitelist');
 		return [];
 	}
 
-	const content: string = page.revisions[0].content;
+	const content = page.revisions[0].content as string;
 	const regexes = content
 		.split('\n')
 		.filter(line => line.trim() && !line.trim().startsWith('#'))
@@ -419,13 +420,13 @@ async function fetchWhitelist(api: MediaWikiApi): Promise<RegExp[]> {
 const DEFAULT_LEGAL_TITLE_CHARS = ' %!"$&\'()*,\\-./0-9:;=?@A-Z\\\\^_`a-z~\\u0080-\\uFFFF';
 
 async function fetchLegalTitleRegex(api: MediaWikiApi): Promise<RegExp> {
-	const { data } = await withRetry(() => api.post({
+	const { data } = await withRetry(() => api.post<ApiQueryResponse>({
 		action: 'query',
 		meta: 'siteinfo',
 		siprop: 'general',
 	}));
 
-	const legaltitlechars: string = (data as any).query?.general?.legaltitlechars;
+	const legaltitlechars = data.query?.general?.legaltitlechars;
 	const raw = legaltitlechars || DEFAULT_LEGAL_TITLE_CHARS;
 	const jsSafe = raw.replace(/\\x80-\\xFF/, '\\u0080-\\uFFFF');
 
@@ -453,14 +454,14 @@ async function processPagesInBatches(
 
 	while (apcontinue !== eol) {
 		const titlesData = await withRetry(async () => {
-			const { data } = await api.post({
+			const { data } = await api.post<ApiQueryResponse>({
 				action: 'query',
 				generator: 'allpages',
 				gapnamespace: namespace,
 				gaplimit: 500,
 				gapcontinue: apcontinue as string | undefined,
 			});
-			return (data as any);
+			return data;
 		});
 
 		const nextApcontinue: string | symbol = titlesData.continue?.gapcontinue ?? eol;
@@ -468,7 +469,7 @@ async function processPagesInBatches(
 		console.log(`\n=== 批次 ${batchIndex} ===`);
 		console.log(`gapcontinue: ${nextApcontinue === eol ? 'END_OF_LIST' : String(nextApcontinue)}`);
 
-		const batchTitles: string[] = Object.values(titlesData.query.pages).map((page: any) => page.title);
+		const batchTitles: string[] = Object.values(titlesData.query.pages as ApiPage[]).map((page: any) => page.title);
 		console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
 
 		const pages: PageInfo[] = [];
@@ -477,16 +478,16 @@ async function processPagesInBatches(
 		for (let i = 0; i < batchTitles.length; i += CONTENT_BATCH_SIZE) {
 			const contentBatch = batchTitles.slice(i, i + CONTENT_BATCH_SIZE);
 			const contentData = await withRetry(async () => {
-				const { data } = await api.post({
+				const { data } = await api.post<ApiQueryResponse>({
 					action: 'query',
 					prop: 'revisions',
 					rvprop: 'content',
 					titles: contentBatch.join('|'),
 				});
-				return (data as any);
+				return data;
 			});
 
-			const batchPages: PageInfo[] = Object.values(contentData.query.pages)
+			const batchPages: PageInfo[] = Object.values(contentData.query.pages as ApiPage[])
 				.filter((page: any) => page.revisions?.length)
 				.map((page: any) => ({
 					title: page.title,
@@ -611,13 +612,13 @@ async function findAvailableFilename(
 			return candidates[0];
 		}
 
-		const { data } = await withRetry(() => api.post({
+		const { data } = await withRetry(() => api.post<ApiQueryResponse>({
 			action: 'query',
 			prop: 'imageinfo',
 			titles: candidates.join('|'),
 		}));
-		const pages = Object.values((data as any).query.pages) as any[];
-		const pageByTitle = new Map<string, any>();
+		const pages = Object.values(data.query.pages as ApiPage[]);
+		const pageByTitle = new Map<string, ApiPage>();
 		for (const page of pages) {
 			pageByTitle.set(normalize(String(page.title)), page);
 		}
@@ -1011,7 +1012,7 @@ async function uploadFromUrl(
 
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 		try {
-			const { data } = await api.postWithToken('csrf', {
+			const { data } = await api.postWithToken<ApiUploadResponse>('csrf', {
 				action: 'upload',
 				filename: currentFilename,
 				url,
@@ -1486,14 +1487,14 @@ async function fetchSongboxImages(
 	}
 	if (uncached.length === 0) return;
 
-	const { data } = await withRetry(() => api.post({
+	const { data } = await withRetry(() => api.post<ApiQueryResponse>({
 		action: 'query',
 		prop: 'revisions',
 		rvprop: 'content',
 		titles: uncached.join('|'),
 	}));
 
-	const pages = Object.values((data as any).query.pages) as any[];
+	const pages = Object.values(data.query.pages as ApiPage[]);
 	for (const page of pages) {
 		const title = page.title as string;
 		if (!page?.revisions?.[0]?.content) {
@@ -1501,7 +1502,7 @@ async function fetchSongboxImages(
 			continue;
 		}
 
-		const content: string = page.revisions[0].content;
+		const content = page.revisions[0].content as string;
 		const parsed = Parser.parse(content, title);
 		const templates = parsed.querySelectorAll<Parser.TranscludeToken>('template');
 

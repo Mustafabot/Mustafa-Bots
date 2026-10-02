@@ -1,4 +1,5 @@
 import { MediaWikiApi } from 'wiki-saikou';
+import type { ApiPage, ApiQueryResponse } from 'types-mediawiki-response';
 import { URL } from 'url';
 import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
 import { resolve, dirname } from 'path';
@@ -49,7 +50,7 @@ const __dirname = dirname(__filename);
 const TEMP_DIR = resolve(__dirname, '../../temp');
 
 async function fetchJsonConfig(api: MediaWikiApi, pageTitle: string): Promise<UploadConfig> {
-	const { data } = await api.post({
+	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
 		prop: 'revisions',
 		rvprop: 'content',
@@ -58,13 +59,13 @@ async function fetchJsonConfig(api: MediaWikiApi, pageTitle: string): Promise<Up
 		retry: 15,
 	} as any);
 
-	const pages = data.query.pages as Record<string, { revisions?: { content: string }[] }>;
+	const pages = data.query.pages as ApiPage[];
 	const page = Object.values(pages)[0];
 	if (!page || !page.revisions) {
 		throw new Error(`配置页面 "${pageTitle}" 不存在或无法获取内容`);
 	}
 
-	const content = page.revisions[0].content;
+	const content = page.revisions[0].content as string;
 	try {
 		return JSON.parse(content) as UploadConfig;
 	} catch (e) {

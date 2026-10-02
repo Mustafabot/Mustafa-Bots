@@ -1,0 +1,636 @@
+import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'fs';
+import { createHash } from 'crypto';
+import { dirname, resolve } from 'path';
+import { fileURLToPath } from 'url';
+import type { MediaWikiApi, MwApiParams } from 'wiki-saikou';
+import type { ApiEditResponse, ApiQueryResponse } from 'types-mediawiki-response';
+import config from '../config.js';
+import clientlogin from '../clientlogin.js';
+import { createCmApi, createZhApi } from '../utils/createApi.js';
+import { SiteMirror, syncMirror, type MirrorSyncResult } from '../utils/siteMirror.js';
+import { checkModerationQueued, checkModerationQueuedError, extractApiError, isPermissionDeniedError } from '../utils/retry.js';
+
+/** 单条替换规则（CLI 参数或 JSON 配置页的 rules 元素） */
+interface ReplaceRule {
+	/** 查找文本；regex 为 true 时按 JavaScript 正则解析 */
+	from: string;
+	/** 替换文本；regex 为 true 时支持 $1 等替换引用，可为空串（即删除） */
+	to: string;
+	/** 是否按正则解析 from */
+	regex?: boolean;
+	/** 是否忽略大小写 */
+	ignoreCase?: boolean;
+}
+
+/** JSON 配置页结构 */
+interface TaskConfig {
+	/** 默认编辑摘要（可被 --summary 覆盖） */
+	summary?: string;
+	/** 替换筛选的命名空间（须为镜像已覆盖范围） */
+	namespaces?: number[];
+	/** 替换规则列表 */
+	rules: ReplaceRule[];
+}
+
+type WikiName = 'zh' | 'cm';
+
+interface CliArgs {
+	wiki: WikiName;
+	/** 位置参数：查找文本（非 --config 模式必填） */
+	from?: string;
+	/** 位置参数：替换文本（非 --config 模式必填） */
+	to?: string;
+	configPage?: string;
+	summary?: string;
+	namespaces?: number[];
+	regex?: boolean;
+	ignoreCase?: boolean;
+	syncOnly: boolean;
+	reset: boolean;
+	resync: boolean;
+	dryRun: boolean;
+	quiet: boolean;
+	interval: number;
+}
+
+/** 预编译后的规则：命中计数与替换执行各有闭包，避免逐页重新编译正则 */
+interface PreparedRule {
+	rule: ReplaceRule;
+	/** 返回 from 在文本中的出现次数（0 表示未命中） */
+	countMatches: (text: string) => number;
+	/** 在文本上执行替换，返回新文本与替换次数 */
+	apply: (text: string) => { text: string; count: number };
+}
+
+/** 一次替换任务的完整参数 */
+interface ReplaceTask {
+	summary: string;
+	namespaces: number[];
+	rules: PreparedRule[];
+	/** checkpoint 文件命名用：配置页标题或 from→to */
+	checkpointLabel: string;
+	fingerprint: string;
+}
+
+interface Checkpoint {
+	wiki: WikiName;
+	fingerprint: string;
+	completed: string[];
+	failed: Record<string, string>;
+}
+
+interface LoadedCheckpoint extends Checkpoint {
+	completedSet: Set<string>;
+}
+
+/**
+ * 各站镜像默认覆盖的命名空间（zh=条目、cm=文件），
+ * 与 ReplaceText 界面被管理员全站 JS 覆盖后的默认选择一致；
+ * 扩充范围后需 --resync 重新全量同步（增量同步也会自动吸收新增命名空间）。
+ */
+const MIRROR_NAMESPACES: Record<WikiName, number[]> = { zh: [0], cm: [6] };
+
+const DEFAULT_INTERVAL = 1500;
+/** 镜像同步请求间隔（只读查询，可比编辑激进） */
+const SYNC_REQUEST_INTERVAL = 300;
+/** 搜索进度日志间隔（页数） */
+const LOG_INTERVAL = 20000;
+
+const SYNC_MODE_LABEL: Record<MirrorSyncResult['mode'], string> = {
+	full: '首次全量',
+	resume: '断点续传',
+	incremental: '增量比对',
+};
+
+const USAGE = [
+	'用法:',
+	'  npx tsx src/replace/TextReplace.ts <from> <to> [--summary <文本>] [--regex] [--ignore-case]',
+	'  npx tsx src/replace/TextReplace.ts --config <JSON配置页标题>',
+	'通用参数:',
+	'  [--wiki zh|cm]          目标站点，默认 zh（决定 API、镜像库与默认命名空间：zh=0，cm=6）',
+	'  [--namespace <ns,ns>]   替换时筛选的命名空间，须为镜像已覆盖范围',
+	'  [--sync-only]           仅同步本地镜像，不执行替换',
+	'  [--reset]               丢弃编辑阶段 checkpoint 重跑（镜像保留）',
+	'  [--resync]              清空本地镜像，重新全量同步',
+	'  [--dry-run] [--quiet] [--interval <ms>]',
+	'JSON 配置页格式:',
+	'  { "summary": "可选", "namespaces": [0], "rules": [{ "from": "...", "to": "...", "regex": false, "ignoreCase": false }] }',
+	'说明:',
+	'  - 首次运行先全量同步镜像（耗时较长、可断点续传），之后每次运行增量同步后本地搜索，只编辑命中页',
+	'  - 替换在原始 wikitext 上进行，语义与 ReplaceText 一致（不感知语法、不做繁简转换）',
+	'  - regex 模式按 JavaScript 正则解析，to 支持 $1 等替换引用',
+].join('\n');
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const MIRROR_DIR = resolve(__dirname, '../../data/mirror');
+const CHECKPOINT_DIR = resolve(__dirname, '../../data/checkpoint');
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+/** 截断过长文本用于日志与摘要 */
+function trunc(text: string, max = 50): string {
+	return text.length > max ? `${text.slice(0, max)}…` : text;
+}
+
+/** 正则元字符转义（纯文本 + 忽略大小写时把字面量转为等价正则） */
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** 校验单条规则，返回错误信息或 null */
+function validateRule(rule: ReplaceRule, label: string): string | null {
+	if (typeof rule.from !== 'string' || rule.from === '') return `${label} 缺少 from`;
+	if (typeof rule.to !== 'string') return `${label} 缺少 to（可为空串）`;
+	if (rule.regex !== undefined && typeof rule.regex !== 'boolean') return `${label} regex 必须是布尔值`;
+	if (rule.ignoreCase !== undefined && typeof rule.ignoreCase !== 'boolean') return `${label} ignoreCase 必须是布尔值`;
+	if (rule.regex) {
+		try {
+			new RegExp(rule.from, `g${rule.ignoreCase ? 'i' : ''}`);
+		} catch (error) {
+			return `${label} from 不是合法正则: ${(error as Error).message}`;
+		}
+	} else if (rule.from === rule.to) {
+		return `${label} from 与 to 相同`;
+	}
+	return null;
+}
+
+/** 预编译规则：纯文本（区分大小写）用字符串操作；纯文本忽略大小写用转义正则；regex 用原正则 */
+function prepareRule(rule: ReplaceRule): PreparedRule {
+	if (rule.regex || rule.ignoreCase) {
+		const source = rule.regex ? rule.from : escapeRegExp(rule.from);
+		const flags = `g${rule.ignoreCase ? 'i' : ''}`;
+		// 两个独立实例，避免 g 标志的 lastIndex 在测试与替换间互相影响
+		const countRe = new RegExp(source, flags);
+		const replaceRe = new RegExp(source, flags);
+		return {
+			rule,
+			countMatches: (text) => {
+				const matches = text.match(countRe);
+				return matches ? matches.length : 0;
+			},
+			apply: (text) => {
+				const matches = text.match(countRe);
+				const count = matches ? matches.length : 0;
+				return { text: count > 0 ? text.replace(replaceRe, rule.to) : text, count };
+			},
+		};
+	}
+	return {
+		rule,
+		countMatches: (text) => {
+			if (!text.includes(rule.from)) return 0;
+			return text.split(rule.from).length - 1;
+		},
+		apply: (text) => {
+			const count = text.split(rule.from).length - 1;
+			// split/join 保证 to 按字面处理（$ 等字符不被解释）
+			return { text: count > 0 ? text.split(rule.from).join(rule.to) : text, count };
+		},
+	};
+}
+
+/** 规则的展示标签：正则用 /…/ 包裹，纯文本用引号 */
+function describeRule(rule: ReplaceRule): string {
+	const from = rule.regex ? `/${trunc(rule.from, 40)}/` : `"${trunc(rule.from, 40)}"`;
+	return `${from} → "${trunc(rule.to, 40)}"`;
+}
+
+/** 解析 CLI 参数（支持 --key value 与 --key=value 两种写法） */
+function parseArgs(argv: string[]): CliArgs | null {
+	const result: CliArgs & { namespaces: number[] } = {
+		wiki: 'zh',
+		namespaces: [],
+		syncOnly: false,
+		reset: false,
+		resync: false,
+		dryRun: false,
+		quiet: false,
+		interval: DEFAULT_INTERVAL,
+	};
+	const positional: string[] = [];
+	for (let i = 0; i < argv.length; i++) {
+		const arg = argv[i];
+		let name = arg;
+		let inlineValue: string | undefined;
+		if (arg.startsWith('--')) {
+			const eq = arg.indexOf('=');
+			if (eq !== -1) {
+				name = arg.slice(0, eq);
+				inlineValue = arg.slice(eq + 1);
+			}
+		}
+		const readValue = (): string | undefined => {
+			if (inlineValue !== undefined) return inlineValue;
+			if (i + 1 < argv.length) {
+				i += 1;
+				return argv[i];
+			}
+			return undefined;
+		};
+		switch (name) {
+			case '--config':
+				result.configPage = readValue() ?? '';
+				break;
+			case '--wiki':
+				result.wiki = (readValue() ?? '') as WikiName;
+				break;
+			case '--summary':
+				result.summary = readValue();
+				break;
+			case '--namespace': {
+				const raw = readValue();
+				if (raw !== undefined) {
+					for (const piece of raw.split(',')) {
+						const ns = Number.parseInt(piece.trim(), 10);
+						if (Number.isInteger(ns)) result.namespaces.push(ns);
+					}
+				}
+				break;
+			}
+			case '--interval':
+				result.interval = Number.parseInt(readValue() ?? '', 10);
+				break;
+			case '--regex':
+				result.regex = true;
+				break;
+			case '--ignore-case':
+				result.ignoreCase = true;
+				break;
+			case '--sync-only':
+				result.syncOnly = true;
+				break;
+			case '--reset':
+				result.reset = true;
+				break;
+			case '--resync':
+				result.resync = true;
+				break;
+			case '--dry-run':
+				result.dryRun = true;
+				break;
+			case '--quiet':
+				result.quiet = true;
+				break;
+			default:
+				if (arg.startsWith('-')) {
+					console.error(`未知参数: ${arg}`);
+					return null;
+				}
+				positional.push(arg);
+		}
+	}
+	result.from = positional[0];
+	result.to = positional[1];
+	if (positional.length > 2) {
+		console.error('位置参数最多两个（from、to）');
+		return null;
+	}
+	if (result.wiki !== 'zh' && result.wiki !== 'cm') {
+		console.error('--wiki 只能是 zh 或 cm');
+		return null;
+	}
+	if (!Number.isFinite(result.interval) || result.interval < 0) {
+		console.error('--interval 必须是非负整数');
+		return null;
+	}
+	if (result.configPage !== undefined) {
+		if (result.configPage === '') {
+			console.error('--config 需要配置页标题');
+			return null;
+		}
+		if (result.from !== undefined || result.to !== undefined) {
+			console.error('使用 --config 时不能同时传位置参数 from/to');
+			return null;
+		}
+	} else if (!result.syncOnly && (result.from === undefined || result.to === undefined)) {
+		console.error(USAGE);
+		return null;
+	}
+	return result;
+}
+
+/** 拉取页面最新正文与修订 ID。镜像可能过期，编辑前必须以最新内容为准 */
+async function fetchPageData(api: MediaWikiApi, title: string): Promise<{ content: string | null; revid: number | null }> {
+	const { data } = await api.post<ApiQueryResponse>({
+		action: 'query',
+		format: 'json',
+		formatversion: '2',
+		prop: 'revisions',
+		rvprop: ['content', 'ids'],
+		rvslots: 'main',
+		titles: title,
+	});
+	const pages = data?.query?.pages;
+	const page = pages?.[0];
+	if (page?.missing) return { content: null, revid: null };
+	const revision = page?.revisions?.[0];
+	const content = revision?.slots?.main?.content;
+	if (typeof content !== 'string') return { content: null, revid: null };
+	return { content, revid: typeof revision?.revid === 'number' ? revision.revid : null };
+}
+
+/**
+ * AbuseFilter 分类：萌百的 warn 类过滤器在同一会话内记录"已警告"标记，
+ * 重新提交一次即可通过；disallowed 是硬拒绝。判定来源包括 200 响应体与抛出的错误对象。
+ */
+function classifyAbuseFilter(sources: unknown[]): 'retry' | 'disallowed' | 'none' {
+	const text = sources
+		.filter(Boolean)
+		.map((s) => (s instanceof Error ? `${s.message}:${JSON.stringify((s as { cause?: unknown }).cause ?? '')}` : JSON.stringify(s)))
+		.join('\n');
+	const codes: string[] = text.match(/abusefilter-[\w-]+/g) ?? [];
+	if (codes.includes('abusefilter-disallowed')) return 'disallowed';
+	return codes.length > 0 ? 'retry' : 'none';
+}
+
+async function attemptEdit(api: MediaWikiApi, params: MwApiParams): Promise<{ data: ApiEditResponse | null; thrown: Error | null }> {
+	try {
+		const { data } = await api.postWithEditToken<ApiEditResponse>(params);
+		return { data, thrown: null };
+	} catch (error) {
+		return { data: null, thrown: error as Error };
+	}
+}
+
+/** 提交单页编辑；baserevid 提供编辑冲突检测，nocreate 防止竞态下意外创建页面 */
+async function submitEdit(api: MediaWikiApi, title: string, text: string, baserevid: number, summary: string, log: (msg: string) => void): Promise<void> {
+	const params = {
+		action: 'edit',
+		format: 'json',
+		formatversion: '2',
+		title,
+		text,
+		summary,
+		baserevid,
+		nocreate: 1,
+		bot: true,
+		minor: true,
+		tags: 'Bot',
+		watchlist: 'nochange',
+	};
+	let { data, thrown } = await attemptEdit(api, params);
+	let classification = classifyAbuseFilter([data, thrown]);
+	if (classification === 'retry') {
+		log('  AbuseFilter 警告，同会话重试一次');
+		({ data, thrown } = await attemptEdit(api, params));
+		classification = classifyAbuseFilter([data, thrown]);
+	}
+	if (classification !== 'none') {
+		throw new Error(`AbuseFilter ${classification === 'disallowed' ? '拒绝编辑' : '警告重试后仍未通过'}: ${data ? JSON.stringify(data) : thrown?.message}`);
+	}
+	if (thrown) {
+		// moderation-*-queued 也可能以抛出的错误形态出现，同样视为成功
+		if (checkModerationQueuedError(thrown, '  编辑请求已进入审核队列（视为成功）')) return;
+		throw thrown;
+	}
+	// moderation-*-queued 是 error 形态的成功响应，必须在 extractApiError 判失败之前处理
+	if (checkModerationQueued(data, '  编辑请求已进入审核队列（视为成功）')) return;
+	const apiError = extractApiError(data);
+	if (apiError) throw new Error(`[${apiError.code}] ${apiError.info}`);
+	if (data?.edit?.result !== 'Success') {
+		throw new Error(`编辑响应异常: ${JSON.stringify(data)}`);
+	}
+}
+
+/** 默认编辑摘要 */
+function defaultSummary(rules: ReplaceRule[]): string {
+	if (rules.length === 1) {
+		return `机器人：文本替换 "${trunc(rules[0].from)}" → "${trunc(rules[0].to)}"`;
+	}
+	return `机器人：批量文本替换（${rules.length} 条规则）`;
+}
+
+/** 组装替换任务：CLI 单条规则或 JSON 配置页多条规则，统一做校验与指纹计算 */
+async function buildTask(api: MediaWikiApi, cliArgs: CliArgs, mirrorNamespaces: number[], log: (msg: string) => void): Promise<ReplaceTask> {
+	let rules: ReplaceRule[];
+	let namespaces: number[] | undefined;
+	let summary: string | undefined;
+	let checkpointLabel: string;
+	if (cliArgs.configPage !== undefined) {
+		const { content } = await fetchPageData(api, cliArgs.configPage);
+		if (content === null) throw new Error(`配置页面 "${cliArgs.configPage}" 不存在或无法获取内容`);
+		let taskConfig: TaskConfig;
+		try {
+			taskConfig = JSON.parse(content) as TaskConfig;
+		} catch (error) {
+			throw new Error(`配置页 JSON 解析失败: ${(error as Error).message}`, { cause: error });
+		}
+		if (!Array.isArray(taskConfig.rules) || taskConfig.rules.length === 0) throw new Error('配置校验失败: rules 不能为空');
+		for (const [i, rule] of taskConfig.rules.entries()) {
+			const message = validateRule(rule, `rules[${i}]`);
+			if (message) throw new Error(`配置校验失败: ${message}`);
+		}
+		rules = taskConfig.rules;
+		namespaces = taskConfig.namespaces;
+		summary = cliArgs.summary ?? taskConfig.summary;
+		checkpointLabel = `${cliArgs.wiki}:${cliArgs.configPage}`;
+		log(`配置页规则 ${rules.length} 条`);
+	} else {
+		const rule: ReplaceRule = {
+			from: cliArgs.from!,
+			to: cliArgs.to!,
+			regex: cliArgs.regex || undefined,
+			ignoreCase: cliArgs.ignoreCase || undefined,
+		};
+		const message = validateRule(rule, '规则');
+		if (message) throw new Error(`参数校验失败: ${message}`);
+		rules = [rule];
+		checkpointLabel = `${cliArgs.wiki}:${rule.from}→${rule.to}`;
+	}
+
+	const effectiveNamespaces = cliArgs.namespaces && cliArgs.namespaces.length > 0 ? cliArgs.namespaces : namespaces ?? mirrorNamespaces;
+	const invalid = effectiveNamespaces.filter((ns) => !mirrorNamespaces.includes(ns));
+	if (invalid.length > 0) {
+		throw new Error(`命名空间 ${invalid.join(',')} 不在镜像范围内（${mirrorNamespaces.join(',')}）；如需扩充请调整 MIRROR_NAMESPACES 后用 --resync 重新全量同步`);
+	}
+
+	return {
+		summary: summary ?? defaultSummary(rules),
+		namespaces: effectiveNamespaces,
+		rules: rules.map(prepareRule),
+		checkpointLabel,
+		fingerprint: createHash('sha256').update(JSON.stringify({ wiki: cliArgs.wiki, namespaces: effectiveNamespaces, rules })).digest('hex'),
+	};
+}
+
+/** checkpoint 文件路径（含 wiki 与任务标签，跨站同名任务互不干扰） */
+function checkpointFile(label: string): string {
+	const safe = label.replace(/[\\/:*?"<>|\s]+/g, '_').slice(0, 40);
+	const hash = createHash('md5').update(label).digest('hex').slice(0, 8);
+	return resolve(CHECKPOINT_DIR, `text_replace_${safe}_${hash}.json`);
+}
+
+function loadCheckpoint(cliArgs: CliArgs, task: ReplaceTask): LoadedCheckpoint {
+	if (cliArgs.dryRun) {
+		return { wiki: cliArgs.wiki, fingerprint: task.fingerprint, completed: [], failed: {}, completedSet: new Set() };
+	}
+	const file = checkpointFile(task.checkpointLabel);
+	if (cliArgs.reset && existsSync(file)) {
+		rmSync(file);
+		console.log('已清除 checkpoint');
+	}
+	if (existsSync(file)) {
+		try {
+			const parsed = JSON.parse(readFileSync(file, 'utf-8')) as Checkpoint;
+			if (parsed.wiki === cliArgs.wiki && parsed.fingerprint === task.fingerprint) {
+				console.log(`续跑：checkpoint 中已完成 ${parsed.completed.length} 页，将跳过`);
+				return { ...parsed, completedSet: new Set(parsed.completed) };
+			}
+			console.log('任务指纹变化，作废旧 checkpoint，重新开始');
+		} catch {
+			console.log('checkpoint 损坏，重新开始');
+		}
+	}
+	return { wiki: cliArgs.wiki, fingerprint: task.fingerprint, completed: [], failed: {}, completedSet: new Set() };
+}
+
+function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
+	if (!existsSync(CHECKPOINT_DIR)) mkdirSync(CHECKPOINT_DIR, { recursive: true });
+	const { completedSet, ...rest } = checkpoint;
+	void completedSet;
+	writeFileSync(file, JSON.stringify(rest, null, 2), 'utf-8');
+}
+
+(async () => {
+	console.log(`Start time: ${new Date().toISOString()}`);
+	const cliArgs = parseArgs(process.argv.slice(2));
+	if (!cliArgs) process.exit(1);
+	const verbose = !cliArgs.quiet;
+	const log = (msg: string) => {
+		if (verbose) console.log(msg);
+	};
+	let mirror: SiteMirror | null = null;
+	try {
+		if (cliArgs.resync) {
+			for (const suffix of ['', '-wal', '-shm']) {
+				const file = resolve(MIRROR_DIR, `${cliArgs.wiki}.db${suffix}`);
+				if (existsSync(file)) rmSync(file);
+			}
+			log('已清空本地镜像，将重新全量同步');
+		}
+
+		const api = cliArgs.wiki === 'zh' ? createZhApi() : createCmApi();
+		const siteConfig = config[cliArgs.wiki];
+		await clientlogin(api, siteConfig.bot.clientUsername!, siteConfig.bot.clientPassword!, siteConfig.api);
+
+		const mirrorNamespaces = MIRROR_NAMESPACES[cliArgs.wiki];
+		mirror = new SiteMirror(resolve(MIRROR_DIR, `${cliArgs.wiki}.db`));
+
+		// 任务构建在同步之前：配置页拉取或参数错误应尽快失败，不浪费时间等待同步
+		const task = cliArgs.syncOnly ? null : await buildTask(api, cliArgs, mirrorNamespaces, log);
+		if (task) log(`站点 ${cliArgs.wiki}，命名空间 ${task.namespaces.join('|')}，规则 ${task.rules.length} 条`);
+
+		const syncResult = await syncMirror({ api, mirror, namespaces: mirrorNamespaces, requestInterval: SYNC_REQUEST_INTERVAL, log });
+		console.log(`镜像同步完成（${SYNC_MODE_LABEL[syncResult.mode]}）：写入 ${syncResult.upserted} 页` + (syncResult.deleted > 0 ? `，删除 ${syncResult.deleted} 页` : '') + `，镜像共 ${mirror.getPageCount()} 页`);
+
+		if (cliArgs.syncOnly || !task) {
+			console.log('--sync-only 完成，未执行替换');
+			return;
+		}
+
+		// #region 本地搜索命中页
+		log(`开始本地搜索（镜像 ${mirror.getPageCount()} 页）…`);
+		const nsFilter = new Set(task.namespaces);
+		const candidates = new Map<string, number[]>();
+		const rulePageHits = new Array<number>(task.rules.length).fill(0);
+		let scanned = 0;
+		for await (const page of mirror.iteratePages()) {
+			scanned++;
+			if (scanned % LOG_INTERVAL === 0) log(`已扫描 ${scanned} 页…`);
+			if (!nsFilter.has(page.ns)) continue;
+			let hits: number[] | null = null;
+			for (const [i, prepared] of task.rules.entries()) {
+				if (prepared.countMatches(page.text) > 0) (hits ??= []).push(i);
+			}
+			if (hits) {
+				candidates.set(page.title, hits);
+				for (const i of hits) rulePageHits[i]++;
+			}
+		}
+		log(`搜索完毕，共扫描 ${scanned} 页`);
+		for (const [i, prepared] of task.rules.entries()) {
+			console.log(`规则 ${describeRule(prepared.rule)}：命中 ${rulePageHits[i]} 页`);
+		}
+		if (candidates.size === 0) {
+			console.log('没有命中页面，结束');
+			return;
+		}
+		console.log(`命中页面共 ${candidates.size} 个，开始逐页处理${cliArgs.dryRun ? '（dry-run）' : ''}`);
+		// #endregion
+
+		// #region 逐页重拉最新内容并替换编辑
+		const checkpoint = loadCheckpoint(cliArgs, task);
+		const checkpointPath = checkpointFile(task.checkpointLabel);
+		let changed = 0;
+		let staleSkipped = 0;
+		let failed = 0;
+		const titles = [...candidates.keys()].sort();
+		for (const title of titles) {
+			if (checkpoint.completedSet.has(title)) {
+				log(`跳过（checkpoint 已完成）: ${title}`);
+				continue;
+			}
+			try {
+				const { content, revid } = await fetchPageData(api, title);
+				if (content === null || revid === null) throw new Error('页面不存在或无法获取内容');
+				let text = content;
+				const applied: string[] = [];
+				for (const i of candidates.get(title)!) {
+					const result = task.rules[i].apply(text);
+					if (result.count > 0) {
+						text = result.text;
+						applied.push(`${describeRule(task.rules[i].rule)} ×${result.count}`);
+					}
+				}
+				if (text === content) {
+					// 镜像命中但最新内容已无匹配：他人已处理或镜像期间过期
+					log(`  最新内容已无匹配，跳过: ${title}`);
+					staleSkipped++;
+				} else if (cliArgs.dryRun) {
+					log(`  [DRY-RUN] 将提交编辑: ${title}（${applied.join('，')}）`);
+					changed++;
+				} else {
+					await submitEdit(api, title, text, revid, task.summary, log);
+					console.log(`${title}: ${applied.join('，')}`);
+					changed++;
+				}
+				// 无论结果如何均标记完成：无变化页重跑也不会有变化
+				checkpoint.completed.push(title);
+				checkpoint.completedSet.add(title);
+				delete checkpoint.failed[title];
+			} catch (error) {
+				const err = error as Error;
+				if (isPermissionDeniedError(err)) {
+					console.error('权限不足，终止');
+					process.exit(1);
+				}
+				console.error(`处理失败 ${title}: ${err.message}`);
+				checkpoint.failed[title] = err.message;
+				failed++;
+			}
+			if (!cliArgs.dryRun) saveCheckpoint(checkpointPath, checkpoint);
+			await sleep(cliArgs.interval);
+		}
+
+		console.log(`\n汇总：修改 ${changed} 页，最新内容已无匹配 ${staleSkipped} 页，失败 ${failed} 页` + (cliArgs.dryRun ? '（dry-run，未提交任何编辑）' : ''));
+		if (!cliArgs.dryRun && Object.keys(checkpoint.failed).length > 0) {
+			console.log('失败页面（续跑将自动重试）:');
+			for (const [title, message] of Object.entries(checkpoint.failed)) {
+				console.log(`  ${title}: ${message}`);
+			}
+		}
+		// #endregion
+	} catch (error) {
+		const err = error as Error;
+		console.error(`发生错误: ${err.name}: ${err.message}`);
+		if (err.stack) console.error(err.stack);
+		process.exitCode = 1;
+	} finally {
+		mirror?.close();
+	}
+	console.log(`End time: ${new Date().toISOString()}`);
+})();

@@ -1,5 +1,6 @@
 ﻿import Parser from 'wikiparser-node';
 import { mkdir, unlink, writeFile } from 'fs/promises';
+import type { ApiEditResponse, ApiPage, ApiQueryResponse } from 'types-mediawiki-response';
 import { createZhApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
@@ -121,7 +122,7 @@ function processPage(
 	).then(console.log);
 
 	const whitelistRegexes: RegExp[] = await (async () => {
-		const { data } = await api.post({
+		const { data } = await api.post<ApiQueryResponse>({
 			action: 'query',
 			prop: 'revisions',
 			rvprop: 'content',
@@ -129,12 +130,12 @@ function processPage(
 		}, {
 			retry: 15,
 		} as any);
-		const page = Object.values(data.query.pages)[0] as any;
+		const page = Object.values(data.query.pages as ApiPage[])[0];
 		if (!page || !page.revisions) {
 			console.error('Failed to get external image whitelist');
 			return [];
 		}
-		const content: string = page.revisions[0].content;
+		const content = page.revisions[0].content as string;
 		const regexes = content
 			.split('\n')
 			.filter((line: string) => line.trim() && !line.trim().startsWith('#'))
@@ -172,20 +173,21 @@ function processPage(
 		let apcontinue: string | symbol | undefined = checkpoint?.gapContinue !== undefined ? checkpoint.gapContinue : undefined;
 
 		while (apcontinue !== eol) {
-			const { data } = await api.post({
+			const gapcontinue: string | undefined = apcontinue as string | undefined;
+			const { data } = await api.post<ApiQueryResponse>({
 				action: 'query',
 				generator: 'allpages',
 				gapnamespace: NAMESPACE,
 				gaplimit: 500,
-				gapcontinue: apcontinue as string | undefined,
+				gapcontinue,
 			}, {
 				retry: 15,
-			} as any) as any;
+			} as any);
 
 			apcontinue = data.continue?.gapcontinue ?? eol;
 			console.log(`gapcontinue: ${apcontinue === eol ? 'END_OF_LIST' : String(apcontinue)}`);
 
-			const batchTitles = Object.values(data.query.pages).map((page: any) => page.title);
+			const batchTitles = Object.values(data.query.pages as ApiPage[]).map((page: any) => page.title);
 			allPageTitles.push(...batchTitles);
 			console.log(`本批次获取 ${batchTitles.length} 个页面标题`);
 
@@ -222,16 +224,16 @@ function processPage(
 		for (let i = startIndex; i < allPageTitles.length; i += BATCH_SIZE) {
 			const batch = allPageTitles.slice(i, i + BATCH_SIZE);
 
-			const { data } = await api.post({
+			const { data } = await api.post<ApiQueryResponse>({
 				action: 'query',
 				prop: 'revisions',
 				rvprop: 'content',
 				titles: batch.join('|'),
 			}, {
 				retry: 15,
-			} as any) as any;
+			} as any);
 
-			const batchPages = Object.values(data.query.pages)
+			const batchPages = Object.values(data.query.pages as ApiPage[])
 				.filter((page: any) => page.revisions?.length) as Array<{ title: string; revisions: Array<{ content: string }> }>;
 
 			for (const page of batchPages) {
@@ -294,7 +296,7 @@ function processPage(
 
 		console.log(`Submitting batch ${batchIndex + 1}/${totalBatches} (${batchIssues.length} issues)`);
 
-		const editResult = await api.postWithToken('csrf', {
+		const editResult = await api.postWithToken<ApiEditResponse>('csrf', {
 			action: 'edit',
 			title: batchTitle,
 			text: batchReportContent,

@@ -1,4 +1,5 @@
 import { MediaWikiApi } from 'wiki-saikou';
+import type { ApiEditResponse, ApiPage, ApiQueryResponse, ApiUndeleteResponse } from 'types-mediawiki-response';
 import Parser from 'wikiparser-node';
 import process from 'process';
 import { createZhApi, createCmApi } from '../utils/createApi.js';
@@ -31,7 +32,7 @@ const DEFAULT_COMMENT = '机器人：还原被删除的文件';
 const CONFIG_PAGE = 'User:没有羽翼的格雷塔/BotConfig/FileRestore';
 
 async function fetchFileList(api: MediaWikiApi, pageTitle: string): Promise<string[]> {
-	const { data } = await api.post({
+	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
 		prop: 'revisions',
 		rvprop: 'content',
@@ -40,13 +41,13 @@ async function fetchFileList(api: MediaWikiApi, pageTitle: string): Promise<stri
 		retry: 15,
 	} as Parameters<typeof api.post>[1]);
 
-	const pages = data.query.pages as Record<string, { revisions?: { content: string }[] }>;
+	const pages = data.query.pages as ApiPage[];
 	const page = Object.values(pages)[0];
 	if (!page || !page.revisions) {
 		throw new Error(`配置页面 "${pageTitle}" 不存在或无法获取内容`);
 	}
 
-	const content = page.revisions[0].content;
+	const content = page.revisions[0].content as string;
 	const parsed = Parser.parse(content, pageTitle);
 	const poemNodes = parsed.querySelectorAll<Parser.ExtToken>('ext#poem');
 
@@ -70,7 +71,7 @@ async function fetchFileList(api: MediaWikiApi, pageTitle: string): Promise<stri
 }
 
 async function clearPoemQueue(api: MediaWikiApi, pageTitle: string): Promise<void> {
-	const { data } = await api.post({
+	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
 		prop: 'revisions',
 		rvprop: 'content',
@@ -79,14 +80,14 @@ async function clearPoemQueue(api: MediaWikiApi, pageTitle: string): Promise<voi
 		retry: 15,
 	} as Parameters<typeof api.post>[1]);
 
-	const pages = data.query.pages as Record<string, { revisions?: { content: string }[] }>;
+	const pages = data.query.pages as ApiPage[];
 	const page = Object.values(pages)[0];
 	if (!page || !page.revisions) {
 		console.error('  无法读取配置页面内容，跳过清空队列');
 		return;
 	}
 
-	const content = page.revisions[0].content;
+	const content = page.revisions[0].content as string;
 	const newContent = "{{用户 允许他人编辑}}\n需要还原的文件请填入下方<code><nowiki><poem></nowiki></code>标签中，一行一个，带File前缀。填写后请联系[[User talk:没有羽翼的格雷塔|操作者]]手动运行脚本。\n----\n<poem>\n</poem>";
 
 	if (newContent === content) {
@@ -115,7 +116,7 @@ async function fetchDeletedRevisions(
 	api: MediaWikiApi,
 	title: string,
 ): Promise<Array<{ revid: number; user: string; comment: string; timestamp: string }>> {
-	const { data } = await api.post({
+	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
 		list: 'deletedrevs',
 		drtitle: title,
@@ -125,12 +126,12 @@ async function fetchDeletedRevisions(
 		retry: 15,
 	} as Parameters<typeof api.post>[1]);
 
-	const deletedrevs = (data.query as any).deletedrevs;
+	const deletedrevs = data.query.deletedrevs;
 	if (!deletedrevs || !Array.isArray(deletedrevs) || deletedrevs.length === 0) {
 		return [];
 	}
 
-	return deletedrevs[0].revisions || [];
+	return (deletedrevs[0].revisions || []) as Array<{ revid: number; user: string; comment: string; timestamp: string }>;
 }
 
 async function undeleteFile(
@@ -141,7 +142,7 @@ async function undeleteFile(
 	let lastError: Error | null = null;
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 		try {
-			const { data } = await api.postWithToken('csrf', {
+			const { data } = await api.postWithToken<ApiUndeleteResponse>('csrf', {
 				action: 'undelete',
 				title,
 				reason: comment,
@@ -153,11 +154,11 @@ async function undeleteFile(
 				noCache: true,
 			});
 
-			if ((data as any).undelete) {
+			if (data.undelete) {
 				return { success: true };
 			}
 
-			if ((data as any).error?.code === 'undelete-no-results') {
+			if (data.error?.code === 'undelete-no-results') {
 				return { success: false, noResults: true };
 			}
 
@@ -186,7 +187,7 @@ async function undoLastEdit(
 	let revisions: Array<{ revid: number; user: string; comment: string }>;
 
 	try {
-		const { data } = await api.post({
+		const { data } = await api.post<ApiQueryResponse>({
 			action: 'query',
 			prop: 'revisions',
 			rvprop: 'ids|user|comment',
@@ -196,13 +197,13 @@ async function undoLastEdit(
 			retry: 15,
 		} as Parameters<typeof api.post>[1]);
 
-		const pages = (data.query as any).pages;
-		const page = Object.values(pages)[0] as any;
+		const pages = data.query.pages as ApiPage[];
+		const page = Object.values(pages)[0];
 		if (!page || !page.revisions || page.revisions.length === 0) {
 			return { success: false, error: '页面无修订记录', noEdits: true };
 		}
 
-		revisions = page.revisions;
+		revisions = page.revisions as Array<{ revid: number; user: string; comment: string }>;
 	} catch (error: any) {
 		return { success: false, error: `查询修订失败: ${error.message}` };
 	}
@@ -220,7 +221,7 @@ async function undoLastEdit(
 	let lastError: Error | null = null;
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 		try {
-			const { data } = await api.postWithToken('csrf', {
+			const { data } = await api.postWithToken<ApiEditResponse>('csrf', {
 				action: 'edit',
 				title,
 				undo: lastRevId,
@@ -234,7 +235,7 @@ async function undoLastEdit(
 				noCache: true,
 			});
 
-			if ((data as any).edit && (data as any).edit.result === 'Success') {
+			if (data.edit && data.edit.result === 'Success') {
 				return { success: true };
 			}
 

@@ -1,4 +1,5 @@
 import { MediaWikiApi } from 'wiki-saikou';
+import type { ApiQueryResponse } from 'types-mediawiki-response';
 import { createZhApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
@@ -11,9 +12,7 @@ interface CliArgs {
 	concurrency: number;
 }
 
-interface ListResponse {
-	query?: Record<string, Array<{ title: string }> | undefined>;
-	continue?: Record<string, string | undefined>;
+interface ListResponse extends ApiQueryResponse {
 	error?: {
 		code: string;
 		info: string;
@@ -60,7 +59,7 @@ interface ListConfig {
 	titleParam: string;
 	limitParam: string;
 	contParam: string;
-	resultKey: string;
+	resultKey: 'backlinks' | 'embeddedin';
 }
 
 const LIST_CONFIGS: Record<ListType, ListConfig> = {
@@ -118,7 +117,7 @@ async function collectPages(
 			break;
 		}
 
-		continueParam = data.continue?.[contParam] ?? eol;
+		continueParam = data.continue?.[contParam] as string | undefined ?? eol;
 		genericContinue = data.continue?.continue;
 
 		const items = data.query[resultKey];

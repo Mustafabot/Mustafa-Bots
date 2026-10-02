@@ -8,6 +8,8 @@ import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { buildTemplateNameMap } from '../utils/templateRedirects.js';
 import { checkModerationQueued, checkModerationQueuedError, extractApiError, isPermissionDeniedError } from '../utils/retry.js';
+import type { MwApiParams } from 'wiki-saikou';
+import type { ApiEditResponse, ApiMoveResponse, ApiParseResponse, ApiQueryResponse } from 'types-mediawiki-response';
 
 Parser.config = 'moegirl';
 
@@ -142,7 +144,7 @@ async function buildTitleVariants(rules: PreparedRule[], log: (msg: string) => v
 		const set = new Set<string>([title]);
 		for (const variant of ZH_VARIANTS) {
 			try {
-				const { data } = await api.post({
+				const { data } = await api.post<ApiParseResponse>({
 					action: 'parse',
 					text: title,
 					contentmodel: 'wikitext',
@@ -170,7 +172,7 @@ async function buildTitleVariants(rules: PreparedRule[], log: (msg: string) => v
 		const sets = new Map<string, Set<string>>(batch.map((key): [string, Set<string>] => [key, new Set<string>([key])]));
 		for (const variant of ZH_VARIANTS) {
 			try {
-				const { data } = await api.post({
+				const { data } = await api.post<ApiParseResponse>({
 					action: 'parse',
 					text: batch.join('\n'),
 					contentmodel: 'wikitext',
@@ -531,7 +533,7 @@ async function fetchJsonConfig(pageTitle: string): Promise<BotConfig> {
 
 /** 取页面正文与是否为消歧义页（pageprops.disambiguation） */
 async function fetchPageData(title: string): Promise<{ content: string | null; isDisambiguation: boolean }> {
-	const { data } = await api.post({
+	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
 		prop: 'revisions|pageprops',
 		rvprop: 'content',
@@ -540,7 +542,7 @@ async function fetchPageData(title: string): Promise<{ content: string | null; i
 		retry: 15,
 	} as any);
 
-	const pages = data.query?.pages as Record<string, { revisions?: Array<{ content: string }>; pageprops?: Record<string, unknown> }> | undefined;
+	const pages = data.query?.pages;
 	const page = pages ? Object.values(pages)[0] : undefined;
 	const content = page?.revisions?.[0]?.content ?? null;
 	const isDisambiguation = page?.pageprops !== undefined && 'disambiguation' in page.pageprops;
@@ -588,7 +590,7 @@ async function checkMoveState(from: string, to: string): Promise<'redirected' | 
 	// 注意：带 redirects=1 时 MediaWiki 会把 pages 数组中的重定向条目替换为其指向的
 	// 最终页面，因此不能直接用 pages[0].missing 判断 from 是否存在——当 from 是指向
 	// 缺失页的重定向时会被误判为 missing。故 missing 判定须锚定 from 原标题。
-	const { data } = await api.post({
+	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
 		format: 'json',
 		formatversion: '2',
@@ -604,15 +606,15 @@ async function checkMoveState(from: string, to: string): Promise<'redirected' | 
 	const missingSelf = pages.some((p: { title?: string; missing?: boolean }) => p.missing && normalizeTitle(p.title ?? '') === normalizeTitle(from));
 	if (missingSelf) return 'missing';
 	const redirects = data?.query?.redirects ?? [];
-	if (redirects.some((r: { from: string; to: string }) => normalizeTitle(r.from) === normalizeTitle(from) && normalizeTitle(r.to) === normalizeTitle(to))) {
+	if (redirects.some((r) => normalizeTitle(r.from as string) === normalizeTitle(from) && normalizeTitle(r.to as string) === normalizeTitle(to))) {
 		return 'redirected';
 	}
 	return 'exists';
 }
 
-async function attemptMove(params: Record<string, unknown>): Promise<{ ok: boolean; code?: string; info?: string }> {
+async function attemptMove(params: MwApiParams): Promise<{ ok: boolean; code?: string; info?: string }> {
 	try {
-		const { data } = await api.postWithToken('csrf', params as any, {
+		const { data } = await api.postWithToken<ApiMoveResponse>('csrf', params, {
 			retry: 3,
 			noCache: true,
 		} as any);
@@ -654,7 +656,7 @@ async function runMovePhase(cfg: BotConfig, summary: string, interval: number, d
 			log(`  [DRY-RUN] 将移动 ${rule.fromTitle} → ${rule.toTitle}`);
 			applicable.push(rule);
 		} else {
-			const params: Record<string, unknown> = {
+			const params: MwApiParams = {
 				action: 'move',
 				format: 'json',
 				formatversion: '2',
@@ -702,7 +704,7 @@ async function discoverPages(cfg: BotConfig, applicableRules: PreparedRule[], lo
 	for (const queryTitle of queryTitles) {
 		let blcontinue: string | undefined;
 		do {
-			const { data } = await api.post({
+			const { data } = await api.post<ApiQueryResponse>({
 				action: 'query',
 				list: 'backlinks',
 				bltitle: queryTitle,
@@ -721,7 +723,7 @@ async function discoverPages(cfg: BotConfig, applicableRules: PreparedRule[], lo
 
 		let eicontinue: string | undefined;
 		do {
-			const { data } = await api.post({
+			const { data } = await api.post<ApiQueryResponse>({
 				action: 'query',
 				list: 'embeddedin',
 				eititle: queryTitle,
@@ -742,9 +744,9 @@ async function discoverPages(cfg: BotConfig, applicableRules: PreparedRule[], lo
 	return [...found].sort();
 }
 
-async function attemptEdit(params: Record<string, unknown>): Promise<{ data: any; thrown: Error | null }> {
+async function attemptEdit(params: MwApiParams): Promise<{ data: ApiEditResponse | null; thrown: Error | null }> {
 	try {
-		const { data } = await api.postWithEditToken(params as any);
+		const { data } = await api.postWithEditToken<ApiEditResponse>(params);
 		return { data, thrown: null };
 	} catch (error) {
 		return { data: null, thrown: error as Error };

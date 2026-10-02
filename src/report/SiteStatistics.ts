@@ -2,6 +2,7 @@ import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import type { MediaWikiApi } from 'wiki-saikou';
+import type { ApiEditResponse, ApiQueryResponse } from 'types-mediawiki-response';
 
 const PREFIX = '[SiteStatistics]';
 
@@ -14,7 +15,7 @@ function parseArgs() {
 }
 
 async function queryStatistics(api: MediaWikiApi, label: string, verbose: boolean): Promise<Record<string, number>> {
-	const { data } = await api.post({
+	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
 		format: 'json',
 		meta: 'siteinfo',
@@ -25,7 +26,7 @@ async function queryStatistics(api: MediaWikiApi, label: string, verbose: boolea
 		console.log(`${PREFIX} ${label} 原始响应:`, JSON.stringify(data, null, 2));
 	}
 
-	const stats = (data as any)?.query?.statistics;
+	const stats = data.query?.statistics;
 	return {
 		pages: stats?.pages ?? 0,
 		articles: stats?.articles ?? 0,
@@ -77,7 +78,7 @@ async function queryStatistics(api: MediaWikiApi, label: string, verbose: boolea
 
 	const REPORT_TITLE = 'User:没有羽翼的格雷塔/Report/statistics';
 
-	const editResult = await api.postWithToken('csrf', {
+	const editResult = await api.postWithToken<ApiEditResponse>('csrf', {
 		action: 'edit',
 		title: REPORT_TITLE,
 		appendtext: wikitext,
