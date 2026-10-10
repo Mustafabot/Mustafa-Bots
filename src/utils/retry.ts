@@ -75,10 +75,10 @@ export function extractApiError(data: any): ApiError | null {
 	return null;
 }
 
-/** Moderation 扩展的入队响应码（moderation-image-queued / moderation-move-queued 等） */
+/** MoeModeration 扩展的入队响应码（目前仅moderation-image-queued / moderation-move-queued） */
 const MODERATION_QUEUED_RE = /moderation-[a-z]+-queued/;
 
-/** 判断文本是否为 Moderation 扩展的「已入审核队列」响应码 */
+/** 判断文本是否为 MoeModeration 扩展的「已入审核队列」响应码 */
 export function isModerationQueuedCode(text: string): boolean {
 	return MODERATION_QUEUED_RE.test(text);
 }

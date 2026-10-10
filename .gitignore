@@ -19,3 +19,4 @@ temp/
 .playwright-mcp/
 .zcode/
 .commandcode/
+.firecrawl/
