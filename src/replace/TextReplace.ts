@@ -48,6 +48,7 @@ interface CliArgs {
 	syncOnly: boolean;
 	reset: boolean;
 	resync: boolean;
+	purgeDeleted: boolean;
 	dryRun: boolean;
 	quiet: boolean;
 	interval: number;
@@ -112,6 +113,7 @@ const USAGE = [
 	'  [--sync-only]           仅同步本地镜像，不执行替换',
 	'  [--reset]               丢弃编辑阶段 checkpoint 重跑（镜像保留）',
 	'  [--resync]              清空本地镜像，重新全量同步',
+	'  [--purge-deleted]       真正删除线上已不存在的页面（并清空历史标记），默认仅标记保留正文',
 	'  [--dry-run] [--quiet] [--interval <ms>]',
 	'JSON 配置页格式:',
 	'  { "summary": "可选", "namespaces": [0], "rules": [{ "from": "...", "to": "...", "regex": false, "ignoreCase": false }] }',
@@ -207,6 +209,7 @@ function parseArgs(argv: string[]): CliArgs | null {
 		syncOnly: false,
 		reset: false,
 		resync: false,
+		purgeDeleted: false,
 		dryRun: false,
 		quiet: false,
 		interval: DEFAULT_INTERVAL,
@@ -268,6 +271,9 @@ function parseArgs(argv: string[]): CliArgs | null {
 				break;
 			case '--resync':
 				result.resync = true;
+				break;
+			case '--purge-deleted':
+				result.purgeDeleted = true;
 				break;
 			case '--dry-run':
 				result.dryRun = true;
@@ -524,8 +530,13 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		const task = cliArgs.syncOnly ? null : await buildTask(api, cliArgs, mirrorNamespaces, log);
 		if (task) log(`站点 ${cliArgs.wiki}，命名空间 ${task.namespaces.join('|')}，规则 ${task.rules.length} 条`);
 
-		const syncResult = await syncMirror({ api, mirror, namespaces: mirrorNamespaces, requestInterval: SYNC_REQUEST_INTERVAL, log });
-		console.log(`镜像同步完成（${SYNC_MODE_LABEL[syncResult.mode]}）：写入 ${syncResult.upserted} 页` + (syncResult.deleted > 0 ? `，删除 ${syncResult.deleted} 页` : '') + `，镜像共 ${mirror.getPageCount()} 页`);
+		const syncResult = await syncMirror({ api, mirror, namespaces: mirrorNamespaces, requestInterval: SYNC_REQUEST_INTERVAL, log, purgeDeleted: cliArgs.purgeDeleted });
+		const deletedNote = syncResult.markedDeleted > 0 ? `，${cliArgs.purgeDeleted ? '删除' : '标记删除'} ${syncResult.markedDeleted} 页` : '';
+		const deletedTotal = mirror.getDeletedPageCount();
+		console.log(
+			`镜像同步完成（${SYNC_MODE_LABEL[syncResult.mode]}）：写入 ${syncResult.upserted} 页${deletedNote}，镜像共 ${mirror.getPageCount()} 页` +
+				(deletedTotal > 0 ? `（另有 ${deletedTotal} 页已标记删除）` : ''),
+		);
 
 		if (cliArgs.syncOnly || !task) {
 			console.log('--sync-only 完成，未执行替换');

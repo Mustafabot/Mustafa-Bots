@@ -28,12 +28,14 @@ export interface MirrorSyncOptions {
 	api: MediaWikiApi;
 	/** 镜像库实例 */
 	mirror: SiteMirror;
-	/** 同步覆盖的命名空间编号列表（增量模式会删除不在这些命名空间的过期页面） */
+	/** 同步覆盖的命名空间编号列表（增量模式会把线上已不存在的页面标记为已删除） */
 	namespaces: number[];
 	/** 相邻 API 请求的间隔毫秒数 */
 	requestInterval: number;
 	/** 进度日志（调用方控制 verbose） */
 	log: (message: string) => void;
+	/** true=真正删除线上已不存在的页面（并顺带清空历史标记），默认仅标记为已删除 */
+	purgeDeleted?: boolean;
 }
 
 /** 镜像同步结果 */
@@ -42,8 +44,8 @@ export interface MirrorSyncResult {
 	mode: 'full' | 'resume' | 'incremental';
 	/** 本次写入（新增或更新）的页面数 */
 	upserted: number;
-	/** 本次删除的过期页面数（仅增量模式） */
-	deleted: number;
+	/** 本次标记为已删除的过期页面数；purgeDeleted 时为真正删除的页数（含清空的历史标记） */
+	markedDeleted: number;
 }
 
 /** 单次镜像查询请求的超时毫秒数 */
@@ -101,20 +103,31 @@ export class SiteMirror {
 				value TEXT NOT NULL
 			);
 		`);
+		// 老库的 pages 表没有 deleted 列，CREATE TABLE IF NOT EXISTS 不会补列，需单独迁移
+		const columns = this.db.prepare("SELECT name FROM pragma_table_info('pages')").all() as unknown as Array<{ name: string }>;
+		if (!columns.some((column) => column.name === 'deleted')) {
+			this.db.exec('ALTER TABLE pages ADD COLUMN deleted INTEGER NOT NULL DEFAULT 0');
+		}
 	}
 
-	/** 页面总数 */
+	/** 有效页面总数（不含已标记为已删除的页面） */
 	getPageCount(): number {
-		const row = this.db.prepare('SELECT COUNT(*) AS count FROM pages').get() as { count: number };
+		const row = this.db.prepare('SELECT COUNT(*) AS count FROM pages WHERE deleted = 0').get() as { count: number };
 		return row.count;
 	}
 
-	/** 批量插入或更新页面（事务内逐行 upsert） */
+	/** 已标记为已删除的页面数 */
+	getDeletedPageCount(): number {
+		const row = this.db.prepare('SELECT COUNT(*) AS count FROM pages WHERE deleted = 1').get() as { count: number };
+		return row.count;
+	}
+
+	/** 批量插入或更新页面（事务内逐行 upsert）；页面重新出现时清除已删除标记 */
 	upsertPages(pages: MirrorPage[]): void {
 		if (pages.length === 0) return;
 		const stmt = this.db.prepare(`
 			INSERT INTO pages (title, pageid, ns, revid, text) VALUES (?, ?, ?, ?, ?)
-			ON CONFLICT(title) DO UPDATE SET pageid = excluded.pageid, ns = excluded.ns, revid = excluded.revid, text = excluded.text
+			ON CONFLICT(title) DO UPDATE SET pageid = excluded.pageid, ns = excluded.ns, revid = excluded.revid, text = excluded.text, deleted = 0
 		`);
 		this.db.exec('BEGIN');
 		try {
@@ -128,8 +141,8 @@ export class SiteMirror {
 		}
 	}
 
-	/** 批量删除页面（按标题，分批避免占位符超限），返回实际删除行数 */
-	deletePages(titles: string[]): number {
+	/** 按标题分批执行 `... WHERE title IN` 语句（分批避免占位符超限），返回实际变更行数 */
+	private runByTitles(sql: string, titles: string[]): number {
 		if (titles.length === 0) return 0;
 		const BATCH = 500;
 		let total = 0;
@@ -138,7 +151,7 @@ export class SiteMirror {
 			for (let i = 0; i < titles.length; i += BATCH) {
 				const batch = titles.slice(i, i + BATCH);
 				const placeholders = batch.map(() => '?').join(',');
-				const info = this.db.prepare(`DELETE FROM pages WHERE title IN (${placeholders})`).run(...batch);
+				const info = this.db.prepare(`${sql} (${placeholders})`).run(...batch);
 				total += Number(info.changes);
 			}
 			this.db.exec('COMMIT');
@@ -149,18 +162,37 @@ export class SiteMirror {
 		return total;
 	}
 
-	/** 所有页面的标题到 revid 映射（增量比对用，不载入正文） */
+	/** 批量删除页面（按标题），返回实际删除行数 */
+	deletePages(titles: string[]): number {
+		return this.runByTitles('DELETE FROM pages WHERE title IN', titles);
+	}
+
+	/** 批量标记页面为已删除（保留正文，仅置 deleted 标志），返回实际标记行数 */
+	markDeleted(titles: string[]): number {
+		return this.runByTitles('UPDATE pages SET deleted = 1 WHERE title IN', titles);
+	}
+
+	/** 所有已标记为已删除的页面标题 */
+	getDeletedTitles(): string[] {
+		const rows = this.db.prepare('SELECT title FROM pages WHERE deleted = 1').all() as unknown as Array<{ title: string }>;
+		return rows.map((row) => row.title);
+	}
+
+	/** 所有有效页面的标题到 revid 映射（增量比对用，不载入正文；已标记删除的页面不参与比对） */
 	getPageRevids(): Map<string, number> {
-		const rows = this.db.prepare('SELECT title, revid FROM pages').all() as unknown as Array<{ title: string; revid: number }>;
+		const rows = this.db.prepare('SELECT title, revid FROM pages WHERE deleted = 0').all() as unknown as Array<{ title: string; revid: number }>;
 		return new Map(rows.map((row) => [row.title, row.revid]));
 	}
 
 	/**
-	 * 流式迭代全部页面记录。
+	 * 流式迭代页面记录。
 	 * 按 rowid 分页惰性产出，避免把全表正文一次性载入内存；批次间让出事件循环。
+	 * 默认跳过已标记为已删除的页面（其正文已过期且无法再编辑），includeDeleted=true 时全部产出。
 	 */
-	async *iteratePages(chunkSize = 2000): AsyncGenerator<MirrorPage> {
-		const stmt = this.db.prepare('SELECT rowid, title, pageid, ns, revid, text FROM pages WHERE rowid > ? ORDER BY rowid LIMIT ?');
+	async *iteratePages(chunkSize = 2000, includeDeleted = false): AsyncGenerator<MirrorPage> {
+		const stmt = this.db.prepare(
+			`SELECT rowid, title, pageid, ns, revid, text FROM pages WHERE rowid > ?${includeDeleted ? '' : ' AND deleted = 0'} ORDER BY rowid LIMIT ?`,
+		);
 		let lastRowid = 0;
 		for (;;) {
 			const rows = stmt.all(lastRowid, chunkSize) as unknown as Array<MirrorPage & { rowid: number }>;
@@ -229,10 +261,11 @@ function mergePages(pageMap: Map<string, MirrorPage>, responsePages: ApiPage[]):
  *
  * 全量使用 `generator=allpages` + 正文，按命名空间在 meta 表存 gapcontinue 断点（父子循环：
  * 外层 gapcontinue 翻批次并落库，内层 rvcontinue 取全批次源代码）。增量先拉全量 revid 清单
- * （不含正文，分钟级），与本地比对后仅补拉变更页、删除过期页。
+ * （不含正文，分钟级），与本地比对后仅补拉变更页，把线上已不存在的页面标记为已删除
+ * （页面重新出现时由 upsert 自动清除标记；purgeDeleted 为 true 时才真正删除并清理历史标记）。
  */
 export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSyncResult> {
-	const { api, mirror, namespaces, requestInterval, log } = options;
+	const { api, mirror, namespaces, requestInterval, log, purgeDeleted = false } = options;
 
 	/** 发起一次查询：超时控制 + 失败重试（镜像查询只读，重试无副作用）+ 200 响应体内 API 错误检查 */
 	const query = async (params: Record<string, string | number | string[] | boolean | undefined>): Promise<MwApiResponse<ApiQueryResponse>> => {
@@ -335,20 +368,20 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 		return result;
 	};
 
-	/** 对比 API revid 清单与镜像库：API 有且 revid 不同 → 待补拉；本地有而 API 无 → 待删除 */
-	const reconcileRevids = (apiRevids: Map<string, number>, dbRevids: Map<string, number>): { titlesToFetch: Set<string>; titlesToDelete: Set<string> } => {
+	/** 对比 API revid 清单与镜像库：API 有且 revid 不同 → 待补拉；本地有而 API 无 → 线上已不存在 */
+	const reconcileRevids = (apiRevids: Map<string, number>, dbRevids: Map<string, number>): { titlesToFetch: Set<string>; titlesNoLongerOnWiki: Set<string> } => {
 		const titlesToFetch = new Set<string>();
-		const titlesToDelete = new Set<string>();
+		const titlesNoLongerOnWiki = new Set<string>();
 		for (const [title, apiRevid] of apiRevids) {
 			if (dbRevids.get(title) !== apiRevid) titlesToFetch.add(title);
 		}
 		for (const title of dbRevids.keys()) {
-			if (!apiRevids.has(title)) titlesToDelete.add(title);
+			if (!apiRevids.has(title)) titlesNoLongerOnWiki.add(title);
 		}
-		return { titlesToFetch, titlesToDelete };
+		return { titlesToFetch, titlesNoLongerOnWiki };
 	};
 
-	/** 按标题批量补拉正文并写入镜像（跳过已移出跟踪命名空间的页面，这类页面由删除步骤清理） */
+	/** 按标题批量补拉正文并写入镜像（跳过已移出跟踪命名空间的页面，这类页面由标记步骤处理） */
 	const fetchPagesByTitles = async (titles: Set<string>): Promise<number> => {
 		if (titles.size === 0) return 0;
 		const titleList = [...titles];
@@ -379,8 +412,8 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 		return count;
 	};
 
-	/** 增量同步：revid 清单比对 → 补拉变更页 → 删除过期页（删除放在补拉后，中断时不会误删未补拉页） */
-	const syncIncremental = async (): Promise<{ upserted: number; deleted: number }> => {
+	/** 增量同步：revid 清单比对 → 补拉变更页 → 标记（或删除）过期页；标记放在补拉后，中断时不会误标未补拉页 */
+	const syncIncremental = async (): Promise<{ upserted: number; markedDeleted: number }> => {
 		log('开始增量同步（拉取全量 revid 清单比对）…');
 		const apiRevids = new Map<string, number>();
 		for (const ns of namespaces) {
@@ -388,12 +421,19 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 			for (const [title, revid] of revids) apiRevids.set(title, revid);
 			log(`命名空间${ns}：清单 ${revids.size} 个页面`);
 		}
-		const { titlesToFetch, titlesToDelete } = reconcileRevids(apiRevids, mirror.getPageRevids());
-		log(`比对完毕：待补拉 ${titlesToFetch.size} 个，待删除 ${titlesToDelete.size} 个`);
+		const { titlesToFetch, titlesNoLongerOnWiki } = reconcileRevids(apiRevids, mirror.getPageRevids());
+		log(`比对完毕：待补拉 ${titlesToFetch.size} 个，${purgeDeleted ? '待删除' : '待标记删除'} ${titlesNoLongerOnWiki.size} 个`);
 		const upserted = await fetchPagesByTitles(titlesToFetch);
-		const deleted = mirror.deletePages([...titlesToDelete]);
-		return { upserted, deleted };
+		const markedDeleted = purgeDeleted ? mirror.deletePages([...titlesNoLongerOnWiki]) : mirror.markDeleted([...titlesNoLongerOnWiki]);
+		return { upserted, markedDeleted };
 	};
+
+	// --purge-deleted：先清空历史累积的标记（否则标记行会永久留在镜像里），并计入本次删除总数
+	let purgedHistory = 0;
+	if (purgeDeleted) {
+		purgedHistory = mirror.deletePages(mirror.getDeletedTitles());
+		if (purgedHistory > 0) log(`已清除 ${purgedHistory} 个历史标记为已删除的页面`);
+	}
 
 	const progress = loadProgress();
 	const pending = namespaces.filter((ns) => typeof progress[String(ns)] === 'string');
@@ -406,14 +446,14 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 			if (typeof state === 'string') upserted += await fetchAllPages(ns, state);
 			else if (state !== true) upserted += await fetchAllPages(ns);
 		}
-		return { mode: 'resume', upserted, deleted: 0 };
+		return { mode: 'resume', upserted, markedDeleted: purgedHistory };
 	}
 	if (mirror.getPageCount() === 0) {
 		log('本地镜像为空，开始首次全量同步');
 		let upserted = 0;
 		for (const ns of namespaces) upserted += await fetchAllPages(ns);
-		return { mode: 'full', upserted, deleted: 0 };
+		return { mode: 'full', upserted, markedDeleted: purgedHistory };
 	}
-	const { upserted, deleted } = await syncIncremental();
-	return { mode: 'incremental', upserted, deleted };
+	const { upserted, markedDeleted } = await syncIncremental();
+	return { mode: 'incremental', upserted, markedDeleted: markedDeleted + purgedHistory };
 }
