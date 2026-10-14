@@ -41,6 +41,10 @@ interface CliArgs {
 	/** 位置参数：替换文本（非 --config 模式必填） */
 	to?: string;
 	configPage?: string;
+	/** 本地 JSON 配置文件路径（与 --config 页面标题语义一致、二者互斥） */
+	configFile?: string;
+	/** 以 JSON 行向 stdout 输出进度事件（供 GUI 子进程消费，本模块暂不读取） */
+	progressJson?: boolean;
 	summary?: string;
 	namespaces?: number[];
 	regex?: boolean;
@@ -107,6 +111,7 @@ const USAGE = [
 	'用法:',
 	'  npx tsx src/replace/TextReplace.ts <from> <to> [--summary <文本>] [--regex] [--ignore-case]',
 	'  npx tsx src/replace/TextReplace.ts --config <JSON配置页标题>',
+	'  npx tsx src/replace/TextReplace.ts --config-file <本地JSON路径>',
 	'通用参数:',
 	'  [--wiki zh|cm]          目标站点，默认 zh（决定 API、镜像库与默认命名空间：zh=0，cm=6）',
 	'  [--namespace <ns,ns>]   替换时筛选的命名空间，须为镜像已覆盖范围',
@@ -238,6 +243,9 @@ function parseArgs(argv: string[]): CliArgs | null {
 			case '--config':
 				result.configPage = readValue() ?? '';
 				break;
+			case '--config-file':
+				result.configFile = readValue() ?? '';
+				break;
 			case '--wiki':
 				result.wiki = (readValue() ?? '') as WikiName;
 				break;
@@ -281,6 +289,9 @@ function parseArgs(argv: string[]): CliArgs | null {
 			case '--quiet':
 				result.quiet = true;
 				break;
+			case '--progress-json':
+				result.progressJson = true;
+				break;
 			default:
 				if (arg.startsWith('-')) {
 					console.error(`未知参数: ${arg}`);
@@ -303,7 +314,15 @@ function parseArgs(argv: string[]): CliArgs | null {
 		console.error('--interval 必须是非负整数');
 		return null;
 	}
-	if (result.configPage !== undefined) {
+	if (result.configFile !== undefined && result.configPage !== undefined) {
+		console.error('--config 与 --config-file 不能同时使用');
+		return null;
+	}
+	if (result.configFile !== undefined && result.configFile === '') {
+		console.error('--config-file 需要本地文件路径');
+		return null;
+	}
+	if (result.configPage !== undefined || result.configFile !== undefined) {
 		if (result.configPage === '') {
 			console.error('--config 需要配置页标题');
 			return null;
@@ -416,14 +435,25 @@ async function buildTask(api: MediaWikiApi, cliArgs: CliArgs, mirrorNamespaces: 
 	let namespaces: number[] | undefined;
 	let summary: string | undefined;
 	let checkpointLabel: string;
-	if (cliArgs.configPage !== undefined) {
-		const { content } = await fetchPageData(api, cliArgs.configPage);
-		if (content === null) throw new Error(`配置页面 "${cliArgs.configPage}" 不存在或无法获取内容`);
+	if (cliArgs.configFile !== undefined || cliArgs.configPage !== undefined) {
+		const sourceLabel = cliArgs.configFile ?? cliArgs.configPage!;
+		let rawContent: string | null;
+		if (cliArgs.configFile !== undefined) {
+			try {
+				rawContent = readFileSync(cliArgs.configFile, 'utf-8');
+			} catch (error) {
+				throw new Error(`本地配置文件 "${cliArgs.configFile}" 读取失败: ${(error as Error).message}`);
+			}
+		} else {
+			const { content } = await fetchPageData(api, cliArgs.configPage!);
+			rawContent = content;
+		}
+		if (rawContent === null) throw new Error(`配置来源 "${sourceLabel}" 不存在或无法获取内容`);
 		let taskConfig: TaskConfig;
 		try {
-			taskConfig = JSON.parse(content) as TaskConfig;
+			taskConfig = JSON.parse(rawContent) as TaskConfig;
 		} catch (error) {
-			throw new Error(`配置页 JSON 解析失败: ${(error as Error).message}`, { cause: error });
+			throw new Error(`配置 JSON 解析失败: ${(error as Error).message}`, { cause: error });
 		}
 		if (!Array.isArray(taskConfig.rules) || taskConfig.rules.length === 0) throw new Error('配置校验失败: rules 不能为空');
 		for (const [i, rule] of taskConfig.rules.entries()) {
@@ -433,8 +463,8 @@ async function buildTask(api: MediaWikiApi, cliArgs: CliArgs, mirrorNamespaces: 
 		rules = taskConfig.rules;
 		namespaces = taskConfig.namespaces;
 		summary = cliArgs.summary ?? taskConfig.summary;
-		checkpointLabel = `${cliArgs.wiki}:${cliArgs.configPage}`;
-		log(`配置页规则 ${rules.length} 条`);
+		checkpointLabel = `${cliArgs.wiki}:${sourceLabel}`;
+		log(`规则集「${sourceLabel}」共 ${rules.length} 条`);
 	} else {
 		const rule: ReplaceRule = {
 			from: cliArgs.from!,
