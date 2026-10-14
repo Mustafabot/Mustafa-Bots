@@ -57,32 +57,42 @@ export class HistoryStore {
 	}
 
 	saveTask(record: TaskRecord, params: Record<string, unknown>): void {
-		this.db
-			.prepare(
-				`INSERT INTO tasks (id, descriptor_id, label, params_json, started_at, ended_at, status, summary_json)
-				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-				 ON CONFLICT(id) DO UPDATE SET
-					ended_at = excluded.ended_at,
-					status = excluded.status,
-					summary_json = excluded.summary_json`,
-			)
-			.run(
-				record.id,
-				record.descriptorId,
-				record.label,
-				JSON.stringify(params),
-				record.startedAt,
-				record.endedAt,
-				record.status,
-				record.summary ? JSON.stringify(record.summary) : null,
+		// 整段包在事务里：中途抛错时绝不能留下「页面清单已删、尚未回填」的残缺状态
+		this.db.exec('BEGIN');
+		try {
+			this.db
+				.prepare(
+					`INSERT INTO tasks (id, descriptor_id, label, params_json, started_at, ended_at, status, summary_json)
+					 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+					 ON CONFLICT(id) DO UPDATE SET
+						ended_at = excluded.ended_at,
+						status = excluded.status,
+						summary_json = excluded.summary_json`,
+				)
+				.run(
+					record.id,
+					record.descriptorId,
+					record.label,
+					JSON.stringify(params),
+					record.startedAt,
+					record.endedAt,
+					record.status,
+					record.summary ? JSON.stringify(record.summary) : null,
+				);
+			this.db.prepare('DELETE FROM task_pages WHERE task_id = ?').run(record.id);
+			const insertPage = this.db.prepare(
+				'INSERT OR REPLACE INTO task_pages (task_id, title, action, old_revid, new_revid, message) VALUES (?, ?, ?, ?, ?, ?)',
 			);
-		this.db.prepare('DELETE FROM task_pages WHERE task_id = ?').run(record.id);
-		const insertPage = this.db.prepare(
-			'INSERT OR REPLACE INTO task_pages (task_id, title, action, old_revid, new_revid, message) VALUES (?, ?, ?, ?, ?, ?)',
-		);
-		for (const event of record.events) {
-			if (event.type !== 'edit') continue;
-			insertPage.run(record.id, event.title, event.status, event.oldRevid, event.newRevid, event.message ?? null);
+			for (const event of record.events) {
+				if (event.type !== 'edit') continue;
+				// ?? null 是防御性的：parseChildLine 只做 JSON.parse 不做运行时校验，
+				// 缺字段的事件会成为 undefined，而 node:sqlite 只接受 null
+				insertPage.run(record.id, event.title, event.status, event.oldRevid ?? null, event.newRevid ?? null, event.message ?? null);
+			}
+			this.db.exec('COMMIT');
+		} catch (error) {
+			this.db.exec('ROLLBACK');
+			throw error;
 		}
 	}
 

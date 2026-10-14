@@ -72,3 +72,55 @@ test('取不存在的任务返回 null', () => {
 		rmSync(dir, { recursive: true, force: true });
 	}
 });
+
+test('第二次保存的页面清单更短时，陈旧行被清除', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'gui-history-'));
+	const store = new HistoryStore(join(dir, 'history.db'));
+	try {
+		store.saveTask(makeRecord(), {});
+		assert.equal(store.getTask('task-1')?.pages.length, 2);
+
+		const shorter: TaskRecord = {
+			...makeRecord(),
+			events: [{ type: 'edit', title: '页面乙', status: 'skipped', oldRevid: 200, newRevid: null, at: 2 }],
+		};
+		store.saveTask(shorter, {});
+
+		const detail = store.getTask('task-1');
+		assert.ok(detail);
+		assert.equal(detail.pages.length, 1);
+		assert.equal(detail.pages[0].title, '页面乙');
+	} finally {
+		store.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test('写入中途抛错时回滚，页面清单保持原样', () => {
+	const dir = mkdtempSync(join(tmpdir(), 'gui-history-'));
+	const store = new HistoryStore(join(dir, 'history.db'));
+	try {
+		store.saveTask(makeRecord(), {});
+
+		// 让第二行插入必然抛错：title 不是可空字段，node:sqlite 又只接受 null，
+		// 传 undefined 会 TypeError。此时 DELETE 已执行完毕，正是最考验回滚的时机。
+		const broken: TaskRecord = {
+			...makeRecord(),
+			events: [
+				{ type: 'edit', title: '页面丙', status: 'changed', oldRevid: 300, newRevid: 301, at: 1 },
+				{ type: 'edit', title: undefined as unknown as string, status: 'changed', oldRevid: 400, newRevid: 401, at: 2 },
+			],
+		};
+		assert.throws(() => store.saveTask(broken, {}));
+
+		const detail = store.getTask('task-1');
+		assert.ok(detail);
+		assert.deepEqual(
+			detail.pages.map((p) => p.title),
+			['页面甲', '页面乙'],
+		);
+	} finally {
+		store.close();
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
