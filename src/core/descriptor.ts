@@ -38,6 +38,8 @@ export interface TaskDescriptor {
 	params: AnySpec[];
 	/** 打开进度事件输出的开关，由服务端自动附加 */
 	progressFlag: string;
+	/** 该脚本的人类可读日志静默开关，由服务端自动附加：GUI 拉起的任务不需要逐页日志 */
+	quietFlag: string;
 	/** 规则集参数开关；存在则该任务必须选择一个规则集 */
 	rulesetFlag?: string;
 }

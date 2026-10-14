@@ -21,7 +21,25 @@ export interface TaskRecord {
 }
 
 /** 保留的事件上限，避免长任务把内存吃干 */
-const MAX_EVENTS = 5000;
+export const MAX_EVENTS = 5000;
+
+/** 单任务的编辑结果计数，供 done 事件丢失时的兜底摘要使用 */
+interface EditCounts {
+	changed: number;
+	skipped: number;
+	failed: number;
+}
+
+/**
+ * 追加事件；超过上限时丢弃最旧的一段、保留最新。
+ *
+ * 长任务里用户关心的是尾部进度，丢头部（历史可查库）而不是丢新事件——
+ * 原先"到上限后不再追加"会把之后的 edit 事件全部静默吞掉，task_pages 会不完整。
+ */
+export function appendCapped(events: ProgressEvent[], event: ProgressEvent, cap: number): void {
+	events.push(event);
+	if (events.length > cap) events.splice(0, events.length - cap);
+}
 
 export function buildChildArgs(entry: string, argv: string[]): string[] {
 	return ['--import', 'tsx', entry, ...argv];
@@ -65,6 +83,8 @@ export class TaskRunner {
 	private child: ChildProcess | null = null;
 	private readonly bus = new EventEmitter();
 	private readonly repoRoot: string;
+	/** 各任务的编辑计数；事件缓冲有上限会丢历史，计数必须独立累积 */
+	private readonly counters = new Map<string, EditCounts>();
 
 	constructor(repoRoot: string = resolve(process.cwd())) {
 		this.repoRoot = repoRoot;
@@ -92,6 +112,7 @@ export class TaskRunner {
 			summary: null,
 		};
 		this.active = record;
+		this.counters.set(record.id, { changed: 0, skipped: 0, failed: 0 });
 
 		const child = spawn(process.execPath, buildChildArgs(descriptor.entry, argv), {
 			cwd: this.repoRoot,
@@ -152,7 +173,16 @@ export class TaskRunner {
 	}
 
 	private record(record: TaskRecord, event: ProgressEvent): void {
-		if (record.events.length < MAX_EVENTS) record.events.push(event);
+		// 事件缓冲只保留尾部（见 appendCapped），计数器必须独立累积才能在 done 丢失时兜底
+		appendCapped(record.events, event, MAX_EVENTS);
+		if (event.type === 'edit') {
+			const counts = this.counters.get(record.id);
+			if (counts) {
+				if (event.status === 'changed') counts.changed++;
+				else if (event.status === 'skipped') counts.skipped++;
+				else counts.failed++;
+			}
+		}
 		if (event.type === 'done') record.summary = event.summary;
 		this.bus.emit('event', record, event);
 	}
@@ -163,7 +193,15 @@ export class TaskRunner {
 		// abort() 已把状态置为 aborted，不要被随后的 close 覆盖
 		if (record.status === 'running') record.status = status;
 		record.endedAt = Date.now();
-		if (record.summary === null) record.summary = { changed: 0, staleSkipped: 0, failed: status === 'failed' ? 1 : 0 };
+		if (record.summary === null) {
+			// done 事件丢失（子进程被 kill、事件行被切坏等）时用累积的计数兜底，
+			// 而不是伪造全零——abort 前往往已完成大量真实编辑，数字必须如实
+			const counts = this.counters.get(record.id) ?? { changed: 0, skipped: 0, failed: 0 };
+			// 从未产出任何 edit 事件就以 failed 告终（如启动即崩溃）：至少计一次失败
+			if (status === 'failed' && counts.changed + counts.skipped + counts.failed === 0) counts.failed = 1;
+			record.summary = { changed: counts.changed, staleSkipped: counts.skipped, failed: counts.failed };
+		}
+		this.counters.delete(record.id);
 		this.bus.emit('event', record, { type: 'log', level: 'info', message: `任务结束：${record.status}`, at: Date.now() });
 		this.bus.emit('finish', record);
 		this.child = null;

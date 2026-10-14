@@ -552,6 +552,11 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 	const emit: EmitProgress = createEmitter(cliArgs.progressJson === true);
 	emit({ type: 'start', task: 'text-replace' });
 	let mirror: SiteMirror | null = null;
+	// 三个计数器必须声明在 try 之外：外层 catch 也要读它们——
+	// 循环中途抛错（如 checkpoint 写入失败）时，已完成的编辑数不能被伪造成 0
+	let changed = 0;
+	let staleSkipped = 0;
+	let failed = 0;
 	try {
 		if (cliArgs.resync) {
 			for (const suffix of ['', '-wal', '-shm']) {
@@ -625,9 +630,6 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		// #region 逐页重拉最新内容并替换编辑
 		const checkpoint = loadCheckpoint(cliArgs, task);
 		const checkpointPath = checkpointFile(task.checkpointLabel);
-		let changed = 0;
-		let staleSkipped = 0;
-		let failed = 0;
 		const titles = [...candidates.keys()].sort();
 		emit({ type: 'progress', done: 0, total: titles.length, message: '准备编辑' });
 		for (const [index, title] of titles.entries()) {
@@ -697,7 +699,7 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		const err = error as Error;
 		console.error(`发生错误: ${err.name}: ${err.message}`);
 		emit({ type: 'log', level: 'error', message: err.message });
-		emit({ type: 'done', summary: { changed: 0, staleSkipped: 0, failed: 1 } });
+		emit({ type: 'done', summary: { changed, staleSkipped, failed: failed + 1 } });
 		if (err.stack) console.error(err.stack);
 		process.exitCode = 1;
 	} finally {

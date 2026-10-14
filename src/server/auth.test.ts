@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { assertSafeBind, isLoopbackHost, verifyPassword, issueToken } from './auth.js';
+import { assertSafeBind, isLocalHeaderHost, isLocalOriginUrl, isLoopbackHost, verifyPassword, issueToken } from './auth.js';
 
 test('识别本机回环地址', () => {
 	assert.equal(isLoopbackHost('127.0.0.1'), true);
@@ -35,4 +35,32 @@ test('每次签发的令牌都不同且长度足够', () => {
 	const b = issueToken();
 	assert.notEqual(a, b);
 	assert.ok(a.length >= 32);
+});
+
+test('Host 头只放行本机名，可带端口', () => {
+	assert.equal(isLocalHeaderHost('localhost'), true);
+	assert.equal(isLocalHeaderHost('localhost:8787'), true);
+	assert.equal(isLocalHeaderHost('127.0.0.1'), true);
+	assert.equal(isLocalHeaderHost('127.0.0.1:8787'), true);
+	assert.equal(isLocalHeaderHost('[::1]'), true);
+	assert.equal(isLocalHeaderHost('[::1]:8787'), true);
+	assert.equal(isLocalHeaderHost('::1'), true);
+	assert.equal(isLocalHeaderHost('LOCALHOST:8787'), true);
+	// DNS 重绑定：攻击者自己的域名解析到 127.0.0.1 也必须被挡下
+	assert.equal(isLocalHeaderHost('evil.example.com'), false);
+	assert.equal(isLocalHeaderHost('evil.example.com:8787'), false);
+	assert.equal(isLocalHeaderHost('127.0.0.2'), false);
+	assert.equal(isLocalHeaderHost('127.0.0.1.evil.com'), false);
+	assert.equal(isLocalHeaderHost(''), false);
+});
+
+test('Origin/Referer 头只放行指向本机的 URL', () => {
+	assert.equal(isLocalOriginUrl('http://localhost:8787/'), true);
+	assert.equal(isLocalOriginUrl('http://127.0.0.1:8787/'), true);
+	assert.equal(isLocalOriginUrl('http://[::1]:8787/'), true);
+	assert.equal(isLocalOriginUrl('https://localhost/'), true);
+	assert.equal(isLocalOriginUrl('http://evil.example.com/'), false);
+	assert.equal(isLocalOriginUrl('http://evil.example.com:8787/'), false);
+	assert.equal(isLocalOriginUrl('null'), false);
+	assert.equal(isLocalOriginUrl(''), false);
 });

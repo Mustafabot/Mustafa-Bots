@@ -2,18 +2,19 @@ import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { validateValues } from '../core/descriptor.js';
+import type { ProgressEvent } from '../core/progress.js';
 import { DESCRIPTORS, findDescriptor } from '../core/registry.js';
-import { issueToken, verifyPassword, type ServerConfig } from './auth.js';
+import { isLocalHeaderHost, isLocalOriginUrl, issueToken, verifyPassword, type ServerConfig } from './auth.js';
 import { HistoryStore } from './history.js';
 import { RulesetPublisher, RulesetStore } from './rulesets.js';
-import { TaskRunner } from './taskRunner.js';
+import { TaskRunner, type TaskRecord } from './taskRunner.js';
 
 // fileURLToPath 对以 / 结尾的 URL 会保留尾部路径分隔符，必须先 resolve 归一化，
 // 否则下面 `PUBLIC_DIR + sep` 会成为双分隔符前缀，把正常文件也判成越界。
 const PUBLIC_DIR = resolve(fileURLToPath(new URL('./public/', import.meta.url)));
 
-export function createRouter(config: ServerConfig) {
-	const runner = new TaskRunner();
+export function createRouter(config: ServerConfig, runner: TaskRunner = new TaskRunner()) {
 	const history = new HistoryStore('data/gui/history.db');
 	const rulesets = new RulesetStore('data/gui/rulesets');
 	const publisher = new RulesetPublisher(rulesets);
@@ -24,6 +25,20 @@ export function createRouter(config: ServerConfig) {
 	const authRequired = config.password !== undefined;
 
 	return (req: IncomingMessage, res: ServerResponse): void => {
+		// 无口令模式下的 DNS 重绑定防护：恶意页面可把自己的域名解析到 127.0.0.1，
+		// 再以 text/plain 发简单跨站请求（无 CORS 预检）驱动本服务真实编辑 wiki。
+		// 于是无口令时要求 Host（及出现的 Origin/Referer）都指向本机；
+		// 设了口令则由会话校验兜底，不限制访问来源。
+		if (!authRequired) {
+			const host = req.headers.host;
+			const origin = req.headers.origin;
+			const referer = req.headers.referer;
+			if ((host !== undefined && !isLocalHeaderHost(host)) || (origin !== undefined && !isLocalOriginUrl(origin)) || (referer !== undefined && !isLocalOriginUrl(referer))) {
+				sendJson(res, 403, { error: '仅接受来自本机地址的请求（Host/Origin/Referer 校验未通过）' });
+				return;
+			}
+		}
+
 		// 整段分派包进 try/catch：畸形 Host 头等会让 new URL 抛错，
 		// 未捕获的异常会终结整个服务进程，这里降级为 400。
 		try {
@@ -79,6 +94,13 @@ export function createRouter(config: ServerConfig) {
 						};
 						const descriptor = findDescriptor(descriptorId);
 						if (!descriptor) throw new Error(`未知任务 ${descriptorId}`);
+						// 声明的约束（如 --days 最小值 1）必须在启动子进程前就拦下，
+						// 否则非法取值会一路传到脚本里才以奇怪的方式失败
+						const valueErrors = validateValues(descriptor, values ?? {});
+						if (valueErrors.length > 0) {
+							sendJson(res, 400, { error: `参数校验失败：${valueErrors.join('；')}` });
+							return;
+						}
 						const injected: string[] = [];
 						if (descriptor.rulesetFlag) {
 							if (!rulesetName) throw new Error('该任务必须先选择规则集');
@@ -89,6 +111,9 @@ export function createRouter(config: ServerConfig) {
 							writeFileSync(tempFile, draft.content, 'utf-8');
 							injected.push(descriptor.rulesetFlag, tempFile);
 						}
+						// GUI 拉起的任务一律静默：逐页人类可读日志既刷屏，
+						// 又会挤占事件缓冲的名额，结构化事件里已带全部信息
+						injected.push(descriptor.quietFlag);
 						const record = runner.start(descriptor, values, injected);
 						pendingParams.set(record.id, values ?? {});
 						runner.once('finish', () => {
@@ -120,11 +145,20 @@ export function createRouter(config: ServerConfig) {
 					'cache-control': 'no-cache',
 					connection: 'keep-alive',
 				});
-				const send = (task: unknown, event: unknown) => {
-					res.write(`data: ${JSON.stringify({ task, event })}\n\n`);
+				// 客户端可能中途断开：不挂 error 处理会让 write 抛出的 EPIPE
+				// 变成未捕获的 'error' 事件，直接把整个服务进程带下去
+				res.on('error', () => {});
+				const send = (task: TaskRecord, event: ProgressEvent) => {
+					// 每帧只带任务元信息，不带 events 数组：事件本来就逐条下发，
+					// 把整段历史随每帧重发一遍，帧体会随事件数线性膨胀（整体 O(n²)）。
+					// 浅拷贝去掉 events，其余字段原样保留。
+					const { events, ...taskMeta } = task;
+					void events;
+					res.write(`data: ${JSON.stringify({ task: taskMeta, event })}\n\n`);
 				};
 				// 先回放已发生的事件：任务状态存在服务端，断线重连或刷新后仍能补齐历史
-				for (const event of runner.current?.events ?? []) send(runner.current, event);
+				const current = runner.current;
+				if (current) for (const event of current.events) send(current, event);
 				const unsubscribe = runner.subscribe(send);
 				const keepAlive = setInterval(() => res.write(': ping\n\n'), 15000);
 				req.on('close', () => {
@@ -176,7 +210,13 @@ export function createRouter(config: ServerConfig) {
 				if (req.method === 'PUT') {
 					readBody(req).then((body) => {
 						try {
-							const { content } = JSON.parse(body || '{}') as { content: string };
+							const { content } = JSON.parse(body || '{}') as { content?: string };
+							// content 不是字符串（含空 body、上传中断被 readBody 兜底成 ''）时必须拒绝：
+							// 直接写盘会把已存草稿覆盖成没有正文的残骸，而 200 会让调用方毫无察觉
+							if (typeof content !== 'string') {
+								sendJson(res, 400, { error: '请求体缺少字符串字段 content，已取消保存' });
+								return;
+							}
 							const existing = rulesets.read(name);
 							sendJson(res, 200, { draft: rulesets.write(name, content, existing?.baseRevid ?? null) });
 						} catch (error) {

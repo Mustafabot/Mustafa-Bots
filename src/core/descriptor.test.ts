@@ -8,6 +8,7 @@ const spaceStyle: TaskDescriptor = {
 	entry: 'x.ts',
 	style: 'space',
 	progressFlag: '--progress-json',
+	quietFlag: '--quiet',
 	params: [
 		{ kind: 'enum', flag: '--wiki', label: '站点', default: 'zh', options: [{ value: 'zh', label: '主站' }] },
 		{ kind: 'stringList', flag: '--namespace', label: '命名空间', separator: ',' },
@@ -25,6 +26,7 @@ const equalsStyle: TaskDescriptor = {
 	entry: 'y.ts',
 	style: 'equals',
 	progressFlag: '--progress-json',
+	quietFlag: '--quiet',
 	params: [
 		{ kind: 'enum', flag: '--mode', label: '模式', default: 'all', options: [{ value: 'all', label: '全部' }] },
 		{ kind: 'number', flag: '--limit', label: '上限', default: 0 },

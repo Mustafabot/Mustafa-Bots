@@ -12,6 +12,7 @@ export const DESCRIPTORS: TaskDescriptor[] = [
 		entry: 'src/replace/TextReplace.ts',
 		style: 'space',
 		progressFlag: '--progress-json',
+		quietFlag: '--quiet',
 		rulesetFlag: '--config-file',
 		params: [
 			{
@@ -40,6 +41,7 @@ export const DESCRIPTORS: TaskDescriptor[] = [
 		entry: 'src/patrol/AutoPatrol.ts',
 		style: 'equals',
 		progressFlag: '--progress-json',
+		quietFlag: '--quiet',
 		params: [
 			{
 				kind: 'enum',
