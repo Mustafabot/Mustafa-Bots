@@ -452,7 +452,7 @@ async function buildTask(api: MediaWikiApi, cliArgs: CliArgs, mirrorNamespaces: 
 			try {
 				rawContent = readFileSync(cliArgs.configFile, 'utf-8');
 			} catch (error) {
-				throw new Error(`本地配置文件 "${cliArgs.configFile}" 读取失败: ${(error as Error).message}`);
+				throw new Error(`本地配置文件 "${cliArgs.configFile}" 读取失败: ${(error as Error).message}`, { cause: error });
 			}
 		} else {
 			const { content } = await fetchPageData(api, cliArgs.configPage!);
