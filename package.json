@@ -10,7 +10,8 @@
     "lint": "eslint .",
     "typecheck": "tsc --noEmit",
     "test": "echo \"Error: no test specified\" && exit 1",
-    "test:unit": "node --import tsx --test \"src/**/*.test.ts\""
+    "test:unit": "node --import tsx --test \"src/**/*.test.ts\"",
+    "gui": "tsx src/server/index.ts"
   },
   "author": "",
   "license": "ISC",
