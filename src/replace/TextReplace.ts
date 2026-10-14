@@ -9,6 +9,7 @@ import clientlogin from '../clientlogin.js';
 import { createCmApi, createZhApi } from '../utils/createApi.js';
 import { SiteMirror, syncMirror, type MirrorSyncResult } from '../utils/siteMirror.js';
 import { checkModerationQueued, checkModerationQueuedError, extractApiError, isPermissionDeniedError } from '../utils/retry.js';
+import { createEmitter, type EmitProgress } from '../core/progress.js';
 
 /** 单条替换规则（CLI 参数或 JSON 配置页的 rules 元素） */
 interface ReplaceRule {
@@ -382,7 +383,14 @@ async function attemptEdit(api: MediaWikiApi, params: MwApiParams): Promise<{ da
 }
 
 /** 提交单页编辑；baserevid 提供编辑冲突检测，nocreate 防止竞态下意外创建页面 */
-async function submitEdit(api: MediaWikiApi, title: string, text: string, baserevid: number, summary: string, log: (msg: string) => void): Promise<void> {
+async function submitEdit(
+	api: MediaWikiApi,
+	title: string,
+	text: string,
+	baserevid: number,
+	summary: string,
+	log: (msg: string) => void,
+): Promise<number | null> {
 	const params = {
 		action: 'edit',
 		format: 'json',
@@ -409,16 +417,18 @@ async function submitEdit(api: MediaWikiApi, title: string, text: string, basere
 	}
 	if (thrown) {
 		// moderation-*-queued 也可能以抛出的错误形态出现，同样视为成功
-		if (checkModerationQueuedError(thrown, '  编辑请求已进入审核队列（视为成功）')) return;
+		if (checkModerationQueuedError(thrown, '  编辑请求已进入审核队列（视为成功）')) return null;
 		throw thrown;
 	}
 	// moderation-*-queued 是 error 形态的成功响应，必须在 extractApiError 判失败之前处理
-	if (checkModerationQueued(data, '  编辑请求已进入审核队列（视为成功）')) return;
+	if (checkModerationQueued(data, '  编辑请求已进入审核队列（视为成功）')) return null;
 	const apiError = extractApiError(data);
 	if (apiError) throw new Error(`[${apiError.code}] ${apiError.info}`);
 	if (data?.edit?.result !== 'Success') {
 		throw new Error(`编辑响应异常: ${JSON.stringify(data)}`);
 	}
+	const newrevid = (data.edit as { newrevid?: number }).newrevid;
+	return typeof newrevid === 'number' ? newrevid : null;
 }
 
 /** 默认编辑摘要 */
@@ -539,6 +549,8 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 	const log = (msg: string) => {
 		if (verbose) console.log(msg);
 	};
+	const emit: EmitProgress = createEmitter(cliArgs.progressJson === true);
+	emit({ type: 'start', task: 'text-replace' });
 	let mirror: SiteMirror | null = null;
 	try {
 		if (cliArgs.resync) {
@@ -560,6 +572,7 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		const task = cliArgs.syncOnly ? null : await buildTask(api, cliArgs, mirrorNamespaces, log);
 		if (task) log(`站点 ${cliArgs.wiki}，命名空间 ${task.namespaces.join('|')}，规则 ${task.rules.length} 条`);
 
+		emit({ type: 'phase', name: '同步镜像' });
 		const syncResult = await syncMirror({ api, mirror, namespaces: mirrorNamespaces, requestInterval: SYNC_REQUEST_INTERVAL, log, purgeDeleted: cliArgs.purgeDeleted });
 		const deletedNote = syncResult.markedDeleted > 0 ? `，${cliArgs.purgeDeleted ? '删除' : '标记删除'} ${syncResult.markedDeleted} 页` : '';
 		const deletedTotal = mirror.getDeletedPageCount();
@@ -570,11 +583,13 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 
 		if (cliArgs.syncOnly || !task) {
 			console.log('--sync-only 完成，未执行替换');
+			emit({ type: 'done', summary: { changed: 0, staleSkipped: 0, failed: 0 } });
 			return;
 		}
 
 		// #region 本地搜索命中页
 		log(`开始本地搜索（镜像 ${mirror.getPageCount()} 页）…`);
+		emit({ type: 'phase', name: '本地搜索' });
 		const nsFilter = new Set(task.namespaces);
 		const candidates = new Map<string, number[]>();
 		const rulePageHits = new Array<number>(task.rules.length).fill(0);
@@ -582,6 +597,7 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		for await (const page of mirror.iteratePages()) {
 			scanned++;
 			if (scanned % LOG_INTERVAL === 0) log(`已扫描 ${scanned} 页…`);
+			if (scanned % LOG_INTERVAL === 0) emit({ type: 'progress', done: scanned, total: mirror.getPageCount(), message: '扫描镜像' });
 			if (!nsFilter.has(page.ns)) continue;
 			let hits: number[] | null = null;
 			for (const [i, prepared] of task.rules.entries()) {
@@ -593,14 +609,17 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 			}
 		}
 		log(`搜索完毕，共扫描 ${scanned} 页`);
+		emit({ type: 'progress', done: scanned, total: scanned, message: `命中 ${candidates.size} 页` });
 		for (const [i, prepared] of task.rules.entries()) {
 			console.log(`规则 ${describeRule(prepared.rule)}：命中 ${rulePageHits[i]} 页`);
 		}
 		if (candidates.size === 0) {
 			console.log('没有命中页面，结束');
+			emit({ type: 'done', summary: { changed: 0, staleSkipped: 0, failed: 0 } });
 			return;
 		}
 		console.log(`命中页面共 ${candidates.size} 个，开始逐页处理${cliArgs.dryRun ? '（dry-run）' : ''}`);
+		emit({ type: 'phase', name: '提交编辑' });
 		// #endregion
 
 		// #region 逐页重拉最新内容并替换编辑
@@ -610,7 +629,8 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		let staleSkipped = 0;
 		let failed = 0;
 		const titles = [...candidates.keys()].sort();
-		for (const title of titles) {
+		emit({ type: 'progress', done: 0, total: titles.length, message: '准备编辑' });
+		for (const [index, title] of titles.entries()) {
 			if (checkpoint.completedSet.has(title)) {
 				log(`跳过（checkpoint 已完成）: ${title}`);
 				continue;
@@ -631,13 +651,16 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 					// 镜像命中但最新内容已无匹配：他人已处理或镜像期间过期
 					log(`  最新内容已无匹配，跳过: ${title}`);
 					staleSkipped++;
+					emit({ type: 'edit', title, status: 'skipped', oldRevid: revid, newRevid: null, message: '最新内容已无匹配' });
 				} else if (cliArgs.dryRun) {
 					log(`  [DRY-RUN] 将提交编辑: ${title}（${applied.join('，')}）`);
 					changed++;
+					emit({ type: 'edit', title, status: 'changed', oldRevid: revid, newRevid: null, message: '[DRY-RUN] 未提交' });
 				} else {
-					await submitEdit(api, title, text, revid, task.summary, log);
+					const newRevid = await submitEdit(api, title, text, revid, task.summary, log);
 					console.log(`${title}: ${applied.join('，')}`);
 					changed++;
+					emit({ type: 'edit', title, status: 'changed', oldRevid: revid, newRevid, message: applied.join('，') });
 				}
 				// 无论结果如何均标记完成：无变化页重跑也不会有变化
 				checkpoint.completed.push(title);
@@ -652,12 +675,17 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 				console.error(`处理失败 ${title}: ${err.message}`);
 				checkpoint.failed[title] = err.message;
 				failed++;
+				emit({ type: 'edit', title, status: 'failed', oldRevid: null, newRevid: null, message: err.message });
 			}
 			if (!cliArgs.dryRun) saveCheckpoint(checkpointPath, checkpoint);
+			if (index % 50 === 0 || index === titles.length - 1) {
+				emit({ type: 'progress', done: index + 1, total: titles.length, message: '提交编辑' });
+			}
 			await sleep(cliArgs.interval);
 		}
 
 		console.log(`\n汇总：修改 ${changed} 页，最新内容已无匹配 ${staleSkipped} 页，失败 ${failed} 页` + (cliArgs.dryRun ? '（dry-run，未提交任何编辑）' : ''));
+		emit({ type: 'done', summary: { changed, staleSkipped, failed } });
 		if (!cliArgs.dryRun && Object.keys(checkpoint.failed).length > 0) {
 			console.log('失败页面（续跑将自动重试）:');
 			for (const [title, message] of Object.entries(checkpoint.failed)) {
@@ -668,6 +696,8 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 	} catch (error) {
 		const err = error as Error;
 		console.error(`发生错误: ${err.name}: ${err.message}`);
+		emit({ type: 'log', level: 'error', message: err.message });
+		emit({ type: 'done', summary: { changed: 0, staleSkipped: 0, failed: 1 } });
 		if (err.stack) console.error(err.stack);
 		process.exitCode = 1;
 	} finally {
