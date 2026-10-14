@@ -2,6 +2,7 @@ import { spawn, type ChildProcess } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { EventEmitter } from 'node:events';
 import { resolve } from 'node:path';
+import { StringDecoder } from 'node:string_decoder';
 import { buildArgv, type ParamValue, type TaskDescriptor } from '../core/descriptor.js';
 import { parseChildLine, type ProgressEvent } from '../core/progress.js';
 
@@ -24,6 +25,39 @@ const MAX_EVENTS = 5000;
 
 export function buildChildArgs(entry: string, argv: string[]): string[] {
 	return ['--import', 'tsx', entry, ...argv];
+}
+
+/**
+ * 行切分缓冲。
+ *
+ * 管道会在任意字节处把输出切断，因此必须跨 chunk 保留状态：
+ * - `decoder` 缓存未构成完整 UTF-8 序列的尾部字节（中文占 3 字节，边界落在字符中间尤为常见）
+ * - `residual` 缓存尚未出现换行符的半行
+ *
+ * 二者缺一，整行都会被切坏——事件行一旦被切坏就会 JSON 解析失败而被静默丢弃。
+ */
+export interface LineBuffer {
+	decoder: StringDecoder;
+	residual: string;
+}
+
+export function createLineBuffer(): LineBuffer {
+	return { decoder: new StringDecoder('utf-8'), residual: '' };
+}
+
+/** 并入一个字节块，返回其中已完整（以 \n 结尾）的行；末尾半行留在缓冲内待下一块 */
+export function feedLineBuffer(buffer: LineBuffer, chunk: Buffer): string[] {
+	const text = buffer.residual + buffer.decoder.write(chunk);
+	const lines = text.split('\n');
+	buffer.residual = lines.pop() ?? '';
+	return lines;
+}
+
+/** 流结束：把最后一行（可能没有换行结尾）冲出来，并清空缓冲 */
+export function flushLineBuffer(buffer: LineBuffer): string[] {
+	const tail = buffer.residual + buffer.decoder.end();
+	buffer.residual = '';
+	return tail.trim() === '' ? [] : [tail];
 }
 
 export class TaskRunner {
@@ -66,14 +100,24 @@ export class TaskRunner {
 		});
 		this.child = child;
 
-		const consume = (chunk: Buffer, level: 'info' | 'error') => {
-			for (const line of chunk.toString('utf-8').split('\n')) {
-				if (line.trim() === '') continue;
-				const event = parseChildLine(line);
-				if (event.type === 'log') event.level = level;
-				this.record(record, event);
-			}
+		// 管道会在任意字节处切断，故用 LineBuffer 跨 chunk 保留半行与半个多字节字符。
+		const buffers = { info: createLineBuffer(), error: createLineBuffer() };
+		const recordLine = (line: string, level: 'info' | 'error') => {
+			if (line.trim() === '') return;
+			const event = parseChildLine(line);
+			// 只把普通日志归到当前流；parseChildLine 已把解析失败降级为 warn，
+			// 不要覆盖成 info 而掩盖故障
+			if (event.type === 'log' && event.level === 'info') event.level = level;
+			this.record(record, event);
 		};
+		const consume = (chunk: Buffer, level: 'info' | 'error') => {
+			for (const line of feedLineBuffer(buffers[level], chunk)) recordLine(line, level);
+		};
+		// 进程结束时把两个流各自的残行冲出来（最后一行可能没有换行结尾）
+		const flush = (level: 'info' | 'error') => {
+			for (const line of flushLineBuffer(buffers[level])) recordLine(line, level);
+		};
+
 		child.stdout?.on('data', (chunk: Buffer) => consume(chunk, 'info'));
 		child.stderr?.on('data', (chunk: Buffer) => consume(chunk, 'error'));
 
@@ -82,6 +126,8 @@ export class TaskRunner {
 			this.finish(record, 'failed');
 		});
 		child.on('close', (code) => {
+			flush('info');
+			flush('error');
 			this.finish(record, code === 0 ? 'succeeded' : 'failed');
 		});
 
