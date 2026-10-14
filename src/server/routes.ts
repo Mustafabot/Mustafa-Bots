@@ -91,7 +91,15 @@ export function createRouter(config: ServerConfig) {
 						}
 						const record = runner.start(descriptor, values, injected);
 						pendingParams.set(record.id, values ?? {});
-						runner.once('finish', () => history.saveTask(record, pendingParams.get(record.id) ?? {}));
+						runner.once('finish', () => {
+							// 落库失败（例如双开实例时的 SQLITE_BUSY）不能让异常冒到
+							// EventEmitter 之外终结进程
+							try {
+								history.saveTask(record, pendingParams.get(record.id) ?? {});
+							} catch (error) {
+								console.error(`历史落库失败: ${(error as Error).message}`);
+							}
+						});
 						sendJson(res, 200, { task: record });
 					} catch (error) {
 						sendJson(res, 409, { error: (error as Error).message });
@@ -202,11 +210,13 @@ function parseCookies(header: string | undefined): Record<string, string> {
 }
 
 function readBody(req: IncomingMessage): Promise<string> {
-	return new Promise((resolve, reject) => {
+	// 出错也要 resolve：请求流出错（客户端中途断开等）时若 reject，
+	// 调用方 .then 无 .catch 就会变成未处理的 Promise 拒绝，Node ≥15 下直接终结进程
+	return new Promise((resolve) => {
 		const chunks: Buffer[] = [];
 		req.on('data', (chunk: Buffer) => chunks.push(chunk));
 		req.on('end', () => resolve(Buffer.concat(chunks).toString('utf-8')));
-		req.on('error', reject);
+		req.on('error', () => resolve(''));
 	});
 }
 
