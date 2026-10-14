@@ -7,6 +7,7 @@ import { withApiRetry } from '../utils/retry.js';
 import { readFile } from 'fs/promises';
 import path from 'path';
 import { fileURLToPath } from 'url';
+import { createEmitter, type EmitProgress } from '../core/progress.js';
 
 const PREFIX = '[AutoPatrol]';
 
@@ -43,6 +44,7 @@ function parseArgs() {
 		limit: parseInt(argv.find((a) => a.startsWith('--limit='))?.split('=')[1] || '0', 10),
 		mode: modeArg as PatrolMode,
 		wiki: wikiArg as 'zh' | 'cm' | 'both',
+		progressJson: argv.includes('--progress-json'),
 	};
 }
 
@@ -119,11 +121,13 @@ async function patrolEditPhase(
 	api: MediaWikiApi,
 	privilegedUsers: Set<string>,
 	opts: { dryRun: boolean; verbose: boolean; days: number; interval: number; limit: number },
+	emit: EmitProgress,
 ): Promise<PhaseResult> {
 	const { dryRun, verbose, days, interval, limit } = opts;
 
 	const rcEnd = new Date(Date.now() - days * 86400000).toISOString();
 	console.log(`${PREFIX} 扫描近${days}天未巡查编辑 (rcend=${rcEnd})...`);
+	emit({ type: 'phase', name: '阶段1 编辑巡查' });
 
 	let rccontinue: string | undefined;
 	let totalScanned = 0;
@@ -151,6 +155,7 @@ async function patrolEditPhase(
 		totalScanned += rcs.length;
 
 		if (verbose) console.log(`${PREFIX} 第${pageNum}页: ${rcs.length}条结果`);
+		emit({ type: 'progress', done: totalScanned, message: `阶段1 已扫描 ${totalScanned} 条` });
 
 		for (const rc of rcs) {
 			const tags: string[] = rc.tags || [];
@@ -206,10 +211,12 @@ async function patrolEditPhase(
 				);
 				successCount++;
 				if (verbose) console.log(`  rcid=${rcid} 用户:${user} → 已巡逻`);
+				emit({ type: 'edit', title: user, status: 'changed', oldRevid: null, newRevid: null, message: `rcid=${rcid}` });
 			} catch (err: unknown) {
 				skipCount++;
 				const reason = err instanceof Error ? err.message : String(err);
 				failures.push(`rcid=${rcid} (${reason})`);
+				emit({ type: 'edit', title: user, status: 'failed', oldRevid: null, newRevid: null, message: `rcid=${rcid} ${reason}` });
 				if (verbose) {
 					console.error(`  rcid=${rcid} 用户:${user} → 失败: ${reason}`);
 				}
@@ -225,6 +232,7 @@ async function patrolEditPhase(
 	// ── 汇总 ──
 	console.log(`${PREFIX} 扫描完成: ${totalScanned}条未巡查, ${totalHit}条命中, ${totalSkipped}条跳过`);
 	console.log(`${PREFIX} 巡逻: 成功 ${successCount}, 跳过 ${skipCount}`);
+	emit({ type: 'progress', done: totalScanned, total: totalScanned, message: `阶段1 命中 ${totalHit}，成功 ${successCount}，跳过 ${skipCount}` });
 	if (failures.length > 0) {
 		console.log(`${PREFIX} 失败明细:`);
 		for (const f of failures) {
@@ -239,11 +247,13 @@ async function patrolMovedPhase(
 	api: MediaWikiApi,
 	privilegedUsers: Set<string>,
 	opts: { dryRun: boolean; verbose: boolean; days: number; interval: number; limit: number },
+	emit: EmitProgress,
 ): Promise<MovedPhaseResult> {
 	const { dryRun, verbose, days, interval, limit } = opts;
 	const rcEnd = new Date(Date.now() - days * 86400000).toISOString();
 
 	console.log(`${PREFIX} 扫描近${days}天未巡查新页面 (namespace=0|10)...`);
+	emit({ type: 'phase', name: '阶段2 新页面打回巡查' });
 
 	// 收集未巡查新页面
 	const newPages: RecentChange[] = [];
@@ -277,6 +287,7 @@ async function patrolMovedPhase(
 	} while (rccontinue);
 
 	console.log(`${PREFIX} 未巡查新页面: ${newPages.length}条`);
+	emit({ type: 'progress', done: newPages.length, message: `阶段2 已收集 ${newPages.length} 条未巡查新页面` });
 
 	if (newPages.length === 0) {
 		return { successCount: 0, skipCount: 0, failures: [], totalScanned: 0, candidateCount: 0, totalHit: 0, totalSkipped: 0, userSubpageHit: 0, draftHit: 0 };
@@ -367,10 +378,12 @@ async function patrolMovedPhase(
 			successCount++;
 			const kindLabel = hitKind === 'draft' ? '草稿' : '用户子页';
 			if (verbose) console.log(`  rcid=${rc.rcid} 页面:${rc.title} [${kindLabel}] → 已巡逻`);
+			emit({ type: 'edit', title: rc.title, status: 'changed', oldRevid: null, newRevid: null, message: `rcid=${rc.rcid} ${kindLabel}` });
 		} catch (err: unknown) {
 			skipCount++;
 			const reason = err instanceof Error ? err.message : String(err);
 			failures.push(`rcid=${rc.rcid} (${reason})`);
+			emit({ type: 'edit', title: rc.title, status: 'failed', oldRevid: null, newRevid: null, message: `rcid=${rc.rcid} ${reason}` });
 			if (verbose) {
 				console.error(`  rcid=${rc.rcid} 页面:${rc.title} → 失败: ${reason}`);
 			}
@@ -379,6 +392,7 @@ async function patrolMovedPhase(
 		await sleep(randomInterval(interval));
 	}
 
+	emit({ type: 'progress', done: newPages.length, total: newPages.length, message: `阶段2 命中 ${totalHit}，成功 ${successCount}，跳过 ${skipCount}` });
 	return { successCount, skipCount, failures, totalScanned: newPages.length, candidateCount: movedPages.size, totalHit, totalSkipped, userSubpageHit, draftHit };
 }
 
@@ -437,12 +451,13 @@ async function runPatrolForWiki(
 	phase2PrivilegedUsers: Set<string>,
 	opts: { dryRun: boolean; verbose: boolean; days: number; interval: number; limit: number },
 	mode: PatrolMode,
+	emit: EmitProgress,
 ): Promise<WikiPatrolResult> {
 	const result: WikiPatrolResult = { label };
 
 	if (mode === 'edit' || mode === 'all') {
 		console.log(`${PREFIX}:${label} === 阶段1: 编辑巡查 ===`);
-		result.editPhase = await patrolEditPhase(api, phase1PrivilegedUsers, opts);
+		result.editPhase = await patrolEditPhase(api, phase1PrivilegedUsers, opts, emit);
 		console.log(`${PREFIX}:${label} 阶段1 扫描完成: ${result.editPhase.totalScanned}条未巡查, ${result.editPhase.totalHit}条命中, ${result.editPhase.totalSkipped}条跳过`);
 		console.log(`${PREFIX}:${label} 阶段1 巡逻: 成功 ${result.editPhase.successCount}, 跳过 ${result.editPhase.skipCount}`);
 		if (result.editPhase.failures.length > 0) {
@@ -453,7 +468,7 @@ async function runPatrolForWiki(
 
 	if ((mode === 'moved' || mode === 'all') && label === 'zh') {
 		console.log(`${PREFIX}:${label} === 阶段2: 新页面打回巡查 ===`);
-		result.movedPhase = await patrolMovedPhase(api, phase2PrivilegedUsers, opts);
+		result.movedPhase = await patrolMovedPhase(api, phase2PrivilegedUsers, opts, emit);
 		console.log(`${PREFIX}:${label} 阶段2 扫描完成: ${result.movedPhase.totalScanned}条未巡查新页面, ${result.movedPhase.candidateCount}条候选, 命中${result.movedPhase.totalHit} (用户子页${result.movedPhase.userSubpageHit}/草稿${result.movedPhase.draftHit}), ${result.movedPhase.totalSkipped}条跳过`);
 		console.log(`${PREFIX}:${label} 阶段2 巡逻: 成功 ${result.movedPhase.successCount}, 跳过 ${result.movedPhase.skipCount}`);
 		if (result.movedPhase.failures.length > 0) {
@@ -468,7 +483,10 @@ async function runPatrolForWiki(
 }
 
 (async () => {
-	const { dryRun, verbose, days, interval, limit, mode, wiki } = parseArgs();
+	const { dryRun, verbose, days, interval, limit, mode, wiki, progressJson } = parseArgs();
+
+	const emit: EmitProgress = createEmitter(progressJson);
+	emit({ type: 'start', task: 'auto-patrol' });
 
 	// ── 确定站点列表 ──
 	const wikiLabels: ('zh' | 'cm')[] = wiki === 'both' ? ['zh', 'cm'] : [wiki];
@@ -554,12 +572,21 @@ async function runPatrolForWiki(
 			);
 		}
 
-		const result = await runPatrolForWiki(label, api, phase1PrivilegedUsers, phase2PrivilegedUsers, opts, mode);
+		const result = await runPatrolForWiki(label, api, phase1PrivilegedUsers, phase2PrivilegedUsers, opts, mode, emit);
 		allResults.push(result);
 	}
 
 	// ── 汇总 ──
 	console.log(`${PREFIX} === 汇总 ===`);
+	emit({
+		type: 'done',
+		summary: Object.fromEntries(
+			allResults.flatMap((r) => [
+				[`${r.label}_阶段1成功`, r.editPhase?.successCount ?? 0],
+				[`${r.label}_阶段2成功`, r.movedPhase?.successCount ?? 0],
+			]),
+		),
+	});
 	for (const r of allResults) {
 		const editOk = r.editPhase ? `成功 ${r.editPhase.successCount}/跳过 ${r.editPhase.skipCount}` : '未执行';
 		const movedOk = r.movedPhase
