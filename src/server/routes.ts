@@ -212,8 +212,8 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 function serveStatic(pathname: string, res: ServerResponse): void {
 	const name = pathname === '/' ? 'index.html' : pathname.slice(1);
-	// 绝对形式请求（如 `GET //etc/passwd`）会让 name 以 `/` 开头；
-	// resolve 会把它当绝对路径从而逃出 public 目录，必须直接拒绝。
+	// 绝对形式请求（如 `GET http://主机//etc/passwd`）会让 pathname 成为 `//etc/passwd`，
+	// slice 后 name 以 `/` 开头；resolve 会把它当绝对路径从而逃出 public 目录，必须直接拒绝。
 	if (name.startsWith('/')) {
 		res.writeHead(403, { 'content-type': 'text/plain; charset=utf-8' });
 		res.end('禁止访问');
