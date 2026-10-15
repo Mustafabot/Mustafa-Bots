@@ -144,7 +144,7 @@ async function patrolEditPhase(
 			action: 'query',
 			list: 'recentchanges',
 			rcshow: 'unpatrolled',
-			rcprop: 'tags|user|ids',
+			rcprop: 'tags|user|ids|title',
 			rclimit: 500,
 			rcend: rcEnd,
 		};
@@ -175,6 +175,10 @@ async function patrolEditPhase(
 			if (dryRun) {
 				const reason = tagMatch ? getTagReason(tags) : `用户组:${user}`;
 				console.log(`  [DRY-RUN] rcid=${rcid} 用户:${user} (${reason}) → 将巡逻`);
+				// 空跑与正式跑的事件语义保持一致：照发事件、照计成功数，
+				// 区别只在 message 带 [DRY-RUN] 前缀、且没有真正提交（newRevid 恒为 null）
+				successCount++;
+				emit({ type: 'edit', title: rc.title, status: 'changed', oldRevid: null, newRevid: null, message: `[DRY-RUN] rcid=${rcid} 用户:${user}（${reason}）` });
 				continue;
 			}
 
@@ -211,12 +215,12 @@ async function patrolEditPhase(
 				);
 				successCount++;
 				if (verbose) console.log(`  rcid=${rcid} 用户:${user} → 已巡逻`);
-				emit({ type: 'edit', title: user, status: 'changed', oldRevid: null, newRevid: null, message: `rcid=${rcid}` });
+				emit({ type: 'edit', title: rc.title, status: 'changed', oldRevid: null, newRevid: null, message: `rcid=${rcid} 用户:${user}` });
 			} catch (err: unknown) {
 				skipCount++;
 				const reason = err instanceof Error ? err.message : String(err);
 				failures.push(`rcid=${rcid} (${reason})`);
-				emit({ type: 'edit', title: user, status: 'failed', oldRevid: null, newRevid: null, message: `rcid=${rcid} ${reason}` });
+				emit({ type: 'edit', title: rc.title, status: 'failed', oldRevid: null, newRevid: null, message: `rcid=${rcid} 用户:${user} ${reason}` });
 				if (verbose) {
 					console.error(`  rcid=${rcid} 用户:${user} → 失败: ${reason}`);
 				}
@@ -343,6 +347,9 @@ async function patrolMovedPhase(
 		if (dryRun) {
 			const kindLabel = hitKind === 'draft' ? '草稿' : '用户子页';
 			console.log(`  [DRY-RUN] rcid=${rc.rcid} 页面:${rc.title} [${kindLabel}] (打回者:${moveInfo.operator} → ${moveInfo.targetTitle}) → 将巡逻`);
+			// 与阶段1 一致：空跑照发事件、照计成功数
+			successCount++;
+			emit({ type: 'edit', title: rc.title, status: 'changed', oldRevid: null, newRevid: null, message: `[DRY-RUN] rcid=${rc.rcid} ${kindLabel}` });
 			continue;
 		}
 
