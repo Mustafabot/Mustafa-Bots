@@ -46,6 +46,8 @@ interface CliArgs {
 	addNamespaces: number[];
 	/** 跳过镜像同步，直接用现有镜像搜索 */
 	noSync: boolean;
+	/** 提交模式：从文件读选中页面清单，逐页重取最新内容后替换编辑 */
+	submit?: string;
 	syncOnly: boolean;
 	reset: boolean;
 	resync: boolean;
@@ -93,10 +95,12 @@ const USAGE = [
 	'  npx tsx src/replace/TextReplace.ts <from> <to> [--summary <文本>] [--regex] [--ignore-case]',
 	'  npx tsx src/replace/TextReplace.ts --config <JSON配置页标题>',
 	'  npx tsx src/replace/TextReplace.ts --config-file <本地JSON路径>',
+	'  npx tsx src/replace/TextReplace.ts --config-file <本地JSON路径> --submit <选中页面清单>',
 	'通用参数:',
 	'  [--wiki zh|cm]          目标站点，默认 zh（决定 API、镜像库与默认命名空间：zh=0，cm=6）',
 	'  [--namespace <ns,ns>]   替换时筛选的命名空间，须为镜像已覆盖范围',
 	'  [--scan-only]           只扫描不编辑，命中结果写入 data/gui/scans/ 供预览',
+	'  [--submit <文件>]       提交模式：读选中页面清单（每行一个标题），逐页重取最新内容后替换编辑',
 	'  [--add-namespaces <ns,ns>] 把命名空间加进镜像覆盖范围并抓取（"未同步"命名空间的入口）',
 	'  [--no-sync]             跳过镜像同步，直接用现有镜像搜索',
 	'  [--sync-only]           仅同步本地镜像，不执行替换',
@@ -191,6 +195,9 @@ function parseArgs(argv: string[]): CliArgs | null {
 			case '--ignore-case':
 				result.ignoreCase = true;
 				break;
+			case '--submit':
+				result.submit = readValue() ?? '';
+				break;
 			case '--scan-only':
 				result.scanOnly = true;
 				break;
@@ -261,6 +268,18 @@ function parseArgs(argv: string[]): CliArgs | null {
 	}
 	if (result.noSync && result.addNamespaces.length > 0) {
 		console.error('--no-sync 与 --add-namespaces 不能同时使用（抓取命名空间本身就要同步）');
+		return null;
+	}
+	if (result.scanOnly && result.submit !== undefined) {
+		console.error('--scan-only 与 --submit 不能同时使用');
+		return null;
+	}
+	if (result.submit !== undefined && result.submit === '') {
+		console.error('--submit 需要选中页面清单文件路径');
+		return null;
+	}
+	if (result.submit !== undefined && result.syncOnly) {
+		console.error('--submit 不同步镜像，不能与 --sync-only 同时使用');
 		return null;
 	}
 	if (result.configFile !== undefined && result.configFile === '') {
@@ -381,6 +400,25 @@ function defaultSummary(rules: ReplaceRule[]): string {
 		return `机器人：文本替换 "${trunc(rules[0].from)}" → "${trunc(rules[0].to)}"`;
 	}
 	return `机器人：批量文本替换（${rules.length} 条规则）`;
+}
+
+/**
+ * 读取选中页面清单：UTF-8 文本，每行一个页面标题。
+ * 页面标题不含换行，因此按行读取没有歧义；空行忽略、首尾空白去掉、重复项去掉。
+ */
+function readSubmitList(file: string): string[] {
+	let raw: string;
+	try {
+		raw = readFileSync(file, 'utf-8');
+	} catch (error) {
+		throw new Error(`选中页面清单 "${file}" 读取失败: ${(error as Error).message}`, { cause: error });
+	}
+	const titles = raw
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line !== '');
+	if (titles.length === 0) throw new Error('选中页面清单为空');
+	return [...new Set(titles)];
 }
 
 /** 组装替换任务：CLI 单条规则或 JSON 配置页多条规则，统一做校验与指纹计算 */
@@ -511,22 +549,24 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		const siteConfig = config[cliArgs.wiki];
 		await clientlogin(api, siteConfig.bot.clientUsername!, siteConfig.bot.clientPassword!, siteConfig.api);
 
-		// 镜像覆盖范围记在镜像库 meta 表里；从未设置过时用默认值（zh=条目、cm=文件）
-		mirror = new SiteMirror(resolve(MIRROR_DIR, `${cliArgs.wiki}.db`));
-		let coveredNamespaces = mirror.getNamespaces() ?? DEFAULT_MIRROR_NAMESPACES[cliArgs.wiki];
-		if (cliArgs.addNamespaces.length > 0) {
-			coveredNamespaces = [...new Set([...coveredNamespaces, ...cliArgs.addNamespaces])].sort((a, b) => a - b);
-			mirror.setNamespaces(coveredNamespaces);
-			log(`镜像覆盖范围更新为 ${coveredNamespaces.join('|')}`);
+		// 提交模式逐页重取最新内容，既不读镜像也不写镜像，因此整段镜像逻辑都跳过
+		const usesMirror = cliArgs.submit === undefined;
+		let coveredNamespaces = DEFAULT_MIRROR_NAMESPACES[cliArgs.wiki];
+		if (usesMirror) {
+			mirror = new SiteMirror(resolve(MIRROR_DIR, `${cliArgs.wiki}.db`));
+			coveredNamespaces = mirror.getNamespaces() ?? DEFAULT_MIRROR_NAMESPACES[cliArgs.wiki];
+			if (cliArgs.addNamespaces.length > 0) {
+				coveredNamespaces = [...new Set([...coveredNamespaces, ...cliArgs.addNamespaces])].sort((a, b) => a - b);
+				mirror.setNamespaces(coveredNamespaces);
+				log(`镜像覆盖范围更新为 ${coveredNamespaces.join('|')}`);
+			}
 		}
 
 		// 任务构建在同步之前：配置页拉取或参数错误应尽快失败，不浪费时间等待同步
-		// 默认替换范围恒为常量（zh=0、cm=6），不随镜像覆盖范围漂移，
-		// 否则用 --add-namespaces 抓过模板后会静默把模板页纳入替换范围
 		const task = cliArgs.syncOnly ? null : await buildTask(api, cliArgs, DEFAULT_MIRROR_NAMESPACES[cliArgs.wiki], log);
 		if (task) log(`站点 ${cliArgs.wiki}，命名空间 ${task.namespaces.join('|')}，规则 ${task.rules.length} 条`);
 
-		if (task) {
+		if (usesMirror && mirror && task) {
 			// 搜索范围必须落在镜像覆盖范围内，否则会静默地一页也搜不到
 			const invalid = task.namespaces.filter((ns) => !coveredNamespaces.includes(ns));
 			if (invalid.length > 0) {
@@ -534,18 +574,20 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 			}
 		}
 
-		if (cliArgs.noSync) {
-			log('按 --no-sync 跳过镜像同步，直接使用现有镜像');
-			emit({ type: 'phase', name: '跳过同步' });
-		} else {
-			emit({ type: 'phase', name: '同步镜像' });
-			const syncResult = await syncMirror({ api, mirror, namespaces: coveredNamespaces, requestInterval: SYNC_REQUEST_INTERVAL, log, purgeDeleted: cliArgs.purgeDeleted });
-			const deletedNote = syncResult.markedDeleted > 0 ? `，${cliArgs.purgeDeleted ? '删除' : '标记删除'} ${syncResult.markedDeleted} 页` : '';
-			const deletedTotal = mirror.getDeletedPageCount();
-			console.log(
-				`镜像同步完成（${SYNC_MODE_LABEL[syncResult.mode]}）：写入 ${syncResult.upserted} 页${deletedNote}，镜像共 ${mirror.getPageCount()} 页` +
-					(deletedTotal > 0 ? `（另有 ${deletedTotal} 页已标记删除）` : ''),
-			);
+		if (usesMirror && mirror) {
+			if (cliArgs.noSync) {
+				log('按 --no-sync 跳过镜像同步，直接使用现有镜像');
+				emit({ type: 'phase', name: '跳过同步' });
+			} else {
+				emit({ type: 'phase', name: '同步镜像' });
+				const syncResult = await syncMirror({ api, mirror, namespaces: coveredNamespaces, requestInterval: SYNC_REQUEST_INTERVAL, log, purgeDeleted: cliArgs.purgeDeleted });
+				const deletedNote = syncResult.markedDeleted > 0 ? `，${cliArgs.purgeDeleted ? '删除' : '标记删除'} ${syncResult.markedDeleted} 页` : '';
+				const deletedTotal = mirror.getDeletedPageCount();
+				console.log(
+					`镜像同步完成（${SYNC_MODE_LABEL[syncResult.mode]}）：写入 ${syncResult.upserted} 页${deletedNote}，镜像共 ${mirror.getPageCount()} 页` +
+						(deletedTotal > 0 ? `（另有 ${deletedTotal} 页已标记删除）` : ''),
+				);
+			}
 		}
 
 		if (cliArgs.syncOnly || !task) {
@@ -554,69 +596,85 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 			return;
 		}
 
-		// #region 本地搜索命中页
-		log(`开始本地搜索（镜像 ${mirror.getPageCount()} 页）…`);
-		emit({ type: 'phase', name: '本地搜索' });
-		const nsFilter = new Set(task.namespaces);
+		// #region 待处理页面清单
 		const candidates = new Map<string, number[]>();
 		const scanHits: ScanPageHit[] = [];
-		const rulePageHits = new Array<number>(task.rules.length).fill(0);
 		let scanned = 0;
-		for await (const page of mirror.iteratePages()) {
-			scanned++;
-			if (scanned % LOG_INTERVAL === 0) {
-				log(`已扫描 ${scanned} 页…`);
-				emit({ type: 'progress', done: scanned, total: mirror.getPageCount(), message: '扫描镜像' });
+		let titles: string[];
+		if (cliArgs.submit !== undefined) {
+			titles = readSubmitList(cliArgs.submit);
+			console.log(`提交模式：共 ${titles.length} 页，逐页重取最新内容后替换${cliArgs.dryRun ? '（dry-run）' : ''}`);
+			emit({ type: 'phase', name: '提交编辑' });
+		} else {
+			log(`开始本地搜索（镜像 ${mirror!.getPageCount()} 页）…`);
+			emit({ type: 'phase', name: '本地搜索' });
+			const nsFilter = new Set(task.namespaces);
+			const rulePageHits = new Array<number>(task.rules.length).fill(0);
+			for await (const page of mirror!.iteratePages()) {
+				scanned++;
+				if (scanned % LOG_INTERVAL === 0) {
+					log(`已扫描 ${scanned} 页…`);
+					emit({ type: 'progress', done: scanned, total: mirror!.getPageCount(), message: '扫描镜像' });
+				}
+				if (!nsFilter.has(page.ns)) continue;
+				let hits: number[] | null = null;
+				for (const [i, prepared] of task.rules.entries()) {
+					if (prepared.countMatches(page.text) > 0) (hits ??= []).push(i);
+				}
+				if (!hits) continue;
+				candidates.set(page.title, hits);
+				for (const i of hits) rulePageHits[i]++;
+				if (cliArgs.scanOnly) {
+					// 明细必须在这一刻提取：翻页流不回头，正文只在此刻在手边
+					const detail = collectMatchLines(page.text, task.rules);
+					scanHits.push({ title: page.title, hits: detail.hits, matches: detail.matches });
+					emit({ type: 'hit', title: page.title });
+				}
 			}
-			if (!nsFilter.has(page.ns)) continue;
-			let hits: number[] | null = null;
+			log(`搜索完毕，共扫描 ${scanned} 页`);
+			emit({ type: 'progress', done: scanned, total: scanned, message: `命中 ${candidates.size} 页` });
 			for (const [i, prepared] of task.rules.entries()) {
-				if (prepared.countMatches(page.text) > 0) (hits ??= []).push(i);
+				console.log(`规则 ${describeRule(prepared.rule)}：命中 ${rulePageHits[i]} 页`);
 			}
-			if (!hits) continue;
-			candidates.set(page.title, hits);
-			for (const i of hits) rulePageHits[i]++;
 			if (cliArgs.scanOnly) {
-				// 明细必须在这一刻提取：翻页流不回头，正文只在此刻在手边
-				const detail = collectMatchLines(page.text, task.rules);
-				scanHits.push({ title: page.title, hits: detail.hits, matches: detail.matches });
-				emit({ type: 'hit', title: page.title });
+				// 没有命中也要落一份结果，界面才知道"扫过了是 0 命中"而不是"还没扫"
+				const fileName = writeScanResult(SCAN_DIR, {
+					version: 1,
+					wiki: cliArgs.wiki,
+					fingerprint: task.fingerprint,
+					namespaces: task.namespaces,
+					rules: task.rules.map((prepared) => prepared.rule),
+					scanned,
+					createdAt: Date.now(),
+					hits: scanHits,
+				});
+				console.log(`扫描完成：命中 ${scanHits.length} 页，结果写入 data/gui/scans/${fileName}`);
+				emit({ type: 'done', summary: { hits: scanHits.length, scanned }, resultFile: fileName });
+				return;
 			}
+			if (candidates.size === 0) {
+				console.log('没有命中页面，结束');
+				emit({ type: 'done', summary: { changed: 0, staleSkipped: 0, failed: 0 } });
+				return;
+			}
+			titles = [...candidates.keys()].sort();
+			console.log(`命中页面共 ${titles.length} 个，开始逐页处理${cliArgs.dryRun ? '（dry-run）' : ''}`);
+			emit({ type: 'phase', name: '提交编辑' });
 		}
-		log(`搜索完毕，共扫描 ${scanned} 页`);
-		emit({ type: 'progress', done: scanned, total: scanned, message: `命中 ${candidates.size} 页` });
-		for (const [i, prepared] of task.rules.entries()) {
-			console.log(`规则 ${describeRule(prepared.rule)}：命中 ${rulePageHits[i]} 页`);
-		}
-		if (cliArgs.scanOnly) {
-			// 没有命中也要落一份结果，界面才知道"扫过了是 0 命中"而不是"还没扫"
-			const fileName = writeScanResult(SCAN_DIR, {
-				version: 1,
-				wiki: cliArgs.wiki,
-				fingerprint: task.fingerprint,
-				namespaces: task.namespaces,
-				rules: task.rules.map((prepared) => prepared.rule),
-				scanned,
-				createdAt: Date.now(),
-				hits: scanHits,
-			});
-			console.log(`扫描完成：命中 ${scanHits.length} 页，结果写入 data/gui/scans/${fileName}`);
-			emit({ type: 'done', summary: { hits: scanHits.length, scanned }, resultFile: fileName });
-			return;
-		}
-		if (candidates.size === 0) {
-			console.log('没有命中页面，结束');
-			emit({ type: 'done', summary: { changed: 0, staleSkipped: 0, failed: 0 } });
-			return;
-		}
-		const titles = [...candidates.keys()].sort();
-		console.log(`命中页面共 ${titles.length} 个，开始逐页处理${cliArgs.dryRun ? '（dry-run）' : ''}`);
-		emit({ type: 'phase', name: '提交编辑' });
 		// #endregion
 
 		// #region 逐页重拉最新内容并替换编辑
-		const checkpoint = loadCheckpoint(cliArgs, task);
-		const checkpointPath = checkpointFile(task.checkpointLabel);
+		const submitMode = cliArgs.submit !== undefined;
+		// 提交模式不挑规则：选中的页面把规则集里的每条都试一遍；扫描结果只记命中过的规则
+		const ruleIndexesFor = (title: string): number[] => (submitMode ? task.rules.map((_, i) => i) : candidates.get(title) ?? []);
+		// 提交模式的断点把选中清单一并算进指纹：换一批页面提交不会踩到上一批的断点，
+		// 同一批页面重复提交则续跑或跳过，避免 to 仍含 from 的规则被叠加替换
+		const fingerprint = submitMode
+			? computeFingerprint({ wiki: cliArgs.wiki, namespaces: task.namespaces, rules: task.rules.map((prepared) => prepared.rule), titles: [...titles].sort() })
+			: task.fingerprint;
+		const checkpointLabel = submitMode ? `${task.checkpointLabel}:submit:${fingerprint.slice(0, 12)}` : task.checkpointLabel;
+		const checkpoint = loadCheckpoint(cliArgs, { ...task, fingerprint, checkpointLabel });
+		const checkpointPath = checkpointFile(checkpointLabel);
 		emit({ type: 'progress', done: 0, total: titles.length, message: '准备编辑' });
 		for (const [index, title] of titles.entries()) {
 			if (checkpoint.completedSet.has(title)) {
@@ -629,7 +687,7 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 				if (content === null || revid === null) throw new Error('页面不存在或无法获取内容');
 				let text = content;
 				const applied: string[] = [];
-				for (const i of candidates.get(title)!) {
+				for (const i of ruleIndexesFor(title)) {
 					const result = task.rules[i].apply(text);
 					if (result.count > 0) {
 						text = result.text;
