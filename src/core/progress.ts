@@ -21,7 +21,7 @@ export type ProgressEvent =
 			message?: string;
 			at: number;
 	  }
-	| { type: 'done'; summary: Record<string, number>; at: number }
+	| { type: 'done'; summary: Record<string, number>; resultFile?: string; at: number }
 	| { type: 'log'; level: 'info' | 'warn' | 'error'; message: string; at: number };
 
 /** Omit 作用在联合类型上会塌缩，必须逐分支分发 */

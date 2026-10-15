@@ -7,9 +7,10 @@ import type { ApiEditResponse, ApiQueryResponse } from 'types-mediawiki-response
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { createCmApi, createZhApi } from '../utils/createApi.js';
-import { SiteMirror, syncMirror, type MirrorSyncResult } from '../utils/siteMirror.js';
+import { SiteMirror, syncMirror, DEFAULT_MIRROR_NAMESPACES, type MirrorSyncResult } from '../utils/siteMirror.js';
 import { checkModerationQueued, checkModerationQueuedError, extractApiError, isPermissionDeniedError } from '../utils/retry.js';
 import { createEmitter, type EmitProgress } from '../core/progress.js';
+import { collectMatchLines, writeScanResult, type ScanPageHit } from './scanResult.js';
 import { computeFingerprint, describeRule, prepareRule, trunc, validateRule, type PreparedRule, type ReplaceRule } from './replaceRules.js';
 
 /** JSON 配置页结构 */
@@ -39,6 +40,12 @@ interface CliArgs {
 	namespaces?: number[];
 	regex?: boolean;
 	ignoreCase?: boolean;
+	/** 只扫描不编辑，命中结果写入 data/gui/scans/ */
+	scanOnly: boolean;
+	/** 抓进镜像覆盖范围并同步的命名空间（界面上"未同步"命名空间的抓取入口） */
+	addNamespaces: number[];
+	/** 跳过镜像同步，直接用现有镜像搜索 */
+	noSync: boolean;
 	syncOnly: boolean;
 	reset: boolean;
 	resync: boolean;
@@ -69,13 +76,6 @@ interface LoadedCheckpoint extends Checkpoint {
 	completedSet: Set<string>;
 }
 
-/**
- * 各站镜像默认覆盖的命名空间（zh=条目、cm=文件），
- * 与 ReplaceText 界面被管理员全站 JS 覆盖后的默认选择一致；
- * 扩充范围后需 --resync 重新全量同步（增量同步也会自动吸收新增命名空间）。
- */
-const MIRROR_NAMESPACES: Record<WikiName, number[]> = { zh: [0], cm: [6] };
-
 const DEFAULT_INTERVAL = 1500;
 /** 镜像同步请求间隔（只读查询，可比编辑激进） */
 const SYNC_REQUEST_INTERVAL = 300;
@@ -96,6 +96,9 @@ const USAGE = [
 	'通用参数:',
 	'  [--wiki zh|cm]          目标站点，默认 zh（决定 API、镜像库与默认命名空间：zh=0，cm=6）',
 	'  [--namespace <ns,ns>]   替换时筛选的命名空间，须为镜像已覆盖范围',
+	'  [--scan-only]           只扫描不编辑，命中结果写入 data/gui/scans/ 供预览',
+	'  [--add-namespaces <ns,ns>] 把命名空间加进镜像覆盖范围并抓取（"未同步"命名空间的入口）',
+	'  [--no-sync]             跳过镜像同步，直接用现有镜像搜索',
 	'  [--sync-only]           仅同步本地镜像，不执行替换',
 	'  [--reset]               丢弃编辑阶段 checkpoint 重跑（镜像保留）',
 	'  [--resync]              清空本地镜像，重新全量同步',
@@ -113,6 +116,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const MIRROR_DIR = resolve(__dirname, '../../data/mirror');
 const CHECKPOINT_DIR = resolve(__dirname, '../../data/checkpoint');
+const SCAN_DIR = resolve(__dirname, '../../data/gui/scans');
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -123,6 +127,9 @@ function parseArgs(argv: string[]): CliArgs | null {
 	const result: CliArgs & { namespaces: number[] } = {
 		wiki: 'zh',
 		namespaces: [],
+		scanOnly: false,
+		addNamespaces: [],
+		noSync: false,
 		syncOnly: false,
 		reset: false,
 		resync: false,
@@ -151,6 +158,14 @@ function parseArgs(argv: string[]): CliArgs | null {
 			}
 			return undefined;
 		};
+		const parseNsList = (raw: string | undefined): number[] => {
+			const result: number[] = [];
+			for (const piece of (raw ?? '').split(',')) {
+				const ns = Number.parseInt(piece.trim(), 10);
+				if (Number.isInteger(ns)) result.push(ns);
+			}
+			return result;
+		};
 		switch (name) {
 			case '--config':
 				result.configPage = readValue() ?? '';
@@ -164,16 +179,9 @@ function parseArgs(argv: string[]): CliArgs | null {
 			case '--summary':
 				result.summary = readValue();
 				break;
-			case '--namespace': {
-				const raw = readValue();
-				if (raw !== undefined) {
-					for (const piece of raw.split(',')) {
-						const ns = Number.parseInt(piece.trim(), 10);
-						if (Number.isInteger(ns)) result.namespaces.push(ns);
-					}
-				}
+			case '--namespace':
+				result.namespaces.push(...parseNsList(readValue()));
 				break;
-			}
 			case '--interval':
 				result.interval = Number.parseInt(readValue() ?? '', 10);
 				break;
@@ -182,6 +190,15 @@ function parseArgs(argv: string[]): CliArgs | null {
 				break;
 			case '--ignore-case':
 				result.ignoreCase = true;
+				break;
+			case '--scan-only':
+				result.scanOnly = true;
+				break;
+			case '--add-namespaces':
+				result.addNamespaces.push(...parseNsList(readValue()));
+				break;
+			case '--no-sync':
+				result.noSync = true;
 				break;
 			case '--sync-only':
 				result.syncOnly = true;
@@ -228,6 +245,22 @@ function parseArgs(argv: string[]): CliArgs | null {
 	}
 	if (result.configFile !== undefined && result.configPage !== undefined) {
 		console.error('--config 与 --config-file 不能同时使用');
+		return null;
+	}
+	if (result.scanOnly && result.syncOnly) {
+		console.error('--scan-only 与 --sync-only 不能同时使用');
+		return null;
+	}
+	if (result.noSync && result.syncOnly) {
+		console.error('--no-sync 与 --sync-only 不能同时使用');
+		return null;
+	}
+	if (result.noSync && result.resync) {
+		console.error('--no-sync 与 --resync 不能同时使用（清空镜像后没有内容可搜）');
+		return null;
+	}
+	if (result.noSync && result.addNamespaces.length > 0) {
+		console.error('--no-sync 与 --add-namespaces 不能同时使用（抓取命名空间本身就要同步）');
 		return null;
 	}
 	if (result.configFile !== undefined && result.configFile === '') {
@@ -351,7 +384,7 @@ function defaultSummary(rules: ReplaceRule[]): string {
 }
 
 /** 组装替换任务：CLI 单条规则或 JSON 配置页多条规则，统一做校验与指纹计算 */
-async function buildTask(api: MediaWikiApi, cliArgs: CliArgs, mirrorNamespaces: number[], log: (msg: string) => void): Promise<ReplaceTask> {
+async function buildTask(api: MediaWikiApi, cliArgs: CliArgs, defaultNamespaces: number[], log: (msg: string) => void): Promise<ReplaceTask> {
 	let rules: ReplaceRule[];
 	let namespaces: number[] | undefined;
 	let summary: string | undefined;
@@ -399,11 +432,8 @@ async function buildTask(api: MediaWikiApi, cliArgs: CliArgs, mirrorNamespaces: 
 		checkpointLabel = `${cliArgs.wiki}:${rule.from}→${rule.to}`;
 	}
 
-	const effectiveNamespaces = cliArgs.namespaces && cliArgs.namespaces.length > 0 ? cliArgs.namespaces : namespaces ?? mirrorNamespaces;
-	const invalid = effectiveNamespaces.filter((ns) => !mirrorNamespaces.includes(ns));
-	if (invalid.length > 0) {
-		throw new Error(`命名空间 ${invalid.join(',')} 不在镜像范围内（${mirrorNamespaces.join(',')}）；如需扩充请调整 MIRROR_NAMESPACES 后用 --resync 重新全量同步`);
-	}
+	// 命名空间是否已进镜像，由调用方在搜索前校验：提交模式不搜镜像，这条规则与它无关
+	const effectiveNamespaces = cliArgs.namespaces && cliArgs.namespaces.length > 0 ? cliArgs.namespaces : namespaces ?? defaultNamespaces;
 
 	return {
 		summary: summary ?? defaultSummary(rules),
@@ -481,21 +511,40 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		const siteConfig = config[cliArgs.wiki];
 		await clientlogin(api, siteConfig.bot.clientUsername!, siteConfig.bot.clientPassword!, siteConfig.api);
 
-		const mirrorNamespaces = MIRROR_NAMESPACES[cliArgs.wiki];
+		// 镜像覆盖范围记在镜像库 meta 表里；从未设置过时用默认值（zh=条目、cm=文件）
 		mirror = new SiteMirror(resolve(MIRROR_DIR, `${cliArgs.wiki}.db`));
+		let coveredNamespaces = mirror.getNamespaces() ?? DEFAULT_MIRROR_NAMESPACES[cliArgs.wiki];
+		if (cliArgs.addNamespaces.length > 0) {
+			coveredNamespaces = [...new Set([...coveredNamespaces, ...cliArgs.addNamespaces])].sort((a, b) => a - b);
+			mirror.setNamespaces(coveredNamespaces);
+			log(`镜像覆盖范围更新为 ${coveredNamespaces.join('|')}`);
+		}
 
 		// 任务构建在同步之前：配置页拉取或参数错误应尽快失败，不浪费时间等待同步
-		const task = cliArgs.syncOnly ? null : await buildTask(api, cliArgs, mirrorNamespaces, log);
+		const task = cliArgs.syncOnly ? null : await buildTask(api, cliArgs, coveredNamespaces, log);
 		if (task) log(`站点 ${cliArgs.wiki}，命名空间 ${task.namespaces.join('|')}，规则 ${task.rules.length} 条`);
 
-		emit({ type: 'phase', name: '同步镜像' });
-		const syncResult = await syncMirror({ api, mirror, namespaces: mirrorNamespaces, requestInterval: SYNC_REQUEST_INTERVAL, log, purgeDeleted: cliArgs.purgeDeleted });
-		const deletedNote = syncResult.markedDeleted > 0 ? `，${cliArgs.purgeDeleted ? '删除' : '标记删除'} ${syncResult.markedDeleted} 页` : '';
-		const deletedTotal = mirror.getDeletedPageCount();
-		console.log(
-			`镜像同步完成（${SYNC_MODE_LABEL[syncResult.mode]}）：写入 ${syncResult.upserted} 页${deletedNote}，镜像共 ${mirror.getPageCount()} 页` +
-				(deletedTotal > 0 ? `（另有 ${deletedTotal} 页已标记删除）` : ''),
-		);
+		if (task) {
+			// 搜索范围必须落在镜像覆盖范围内，否则会静默地一页也搜不到
+			const invalid = task.namespaces.filter((ns) => !coveredNamespaces.includes(ns));
+			if (invalid.length > 0) {
+				throw new Error(`命名空间 ${invalid.join(',')} 未同步进本地镜像（当前覆盖 ${coveredNamespaces.join(',')}）；请先用 --add-namespaces ${invalid.join(',')} 抓取后重试`);
+			}
+		}
+
+		if (cliArgs.noSync) {
+			log('按 --no-sync 跳过镜像同步，直接使用现有镜像');
+			emit({ type: 'phase', name: '跳过同步' });
+		} else {
+			emit({ type: 'phase', name: '同步镜像' });
+			const syncResult = await syncMirror({ api, mirror, namespaces: coveredNamespaces, requestInterval: SYNC_REQUEST_INTERVAL, log, purgeDeleted: cliArgs.purgeDeleted });
+			const deletedNote = syncResult.markedDeleted > 0 ? `，${cliArgs.purgeDeleted ? '删除' : '标记删除'} ${syncResult.markedDeleted} 页` : '';
+			const deletedTotal = mirror.getDeletedPageCount();
+			console.log(
+				`镜像同步完成（${SYNC_MODE_LABEL[syncResult.mode]}）：写入 ${syncResult.upserted} 页${deletedNote}，镜像共 ${mirror.getPageCount()} 页` +
+					(deletedTotal > 0 ? `（另有 ${deletedTotal} 页已标记删除）` : ''),
+			);
+		}
 
 		if (cliArgs.syncOnly || !task) {
 			console.log('--sync-only 完成，未执行替换');
@@ -508,20 +557,28 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		emit({ type: 'phase', name: '本地搜索' });
 		const nsFilter = new Set(task.namespaces);
 		const candidates = new Map<string, number[]>();
+		const scanHits: ScanPageHit[] = [];
 		const rulePageHits = new Array<number>(task.rules.length).fill(0);
 		let scanned = 0;
 		for await (const page of mirror.iteratePages()) {
 			scanned++;
-			if (scanned % LOG_INTERVAL === 0) log(`已扫描 ${scanned} 页…`);
-			if (scanned % LOG_INTERVAL === 0) emit({ type: 'progress', done: scanned, total: mirror.getPageCount(), message: '扫描镜像' });
+			if (scanned % LOG_INTERVAL === 0) {
+				log(`已扫描 ${scanned} 页…`);
+				emit({ type: 'progress', done: scanned, total: mirror.getPageCount(), message: '扫描镜像' });
+			}
 			if (!nsFilter.has(page.ns)) continue;
 			let hits: number[] | null = null;
 			for (const [i, prepared] of task.rules.entries()) {
 				if (prepared.countMatches(page.text) > 0) (hits ??= []).push(i);
 			}
-			if (hits) {
-				candidates.set(page.title, hits);
-				for (const i of hits) rulePageHits[i]++;
+			if (!hits) continue;
+			candidates.set(page.title, hits);
+			for (const i of hits) rulePageHits[i]++;
+			if (cliArgs.scanOnly) {
+				// 明细必须在这一刻提取：翻页流不回头，正文只在此刻在手边
+				const detail = collectMatchLines(page.text, task.rules);
+				scanHits.push({ title: page.title, hits: detail.hits, matches: detail.matches });
+				emit({ type: 'hit', title: page.title });
 			}
 		}
 		log(`搜索完毕，共扫描 ${scanned} 页`);
@@ -529,23 +586,40 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		for (const [i, prepared] of task.rules.entries()) {
 			console.log(`规则 ${describeRule(prepared.rule)}：命中 ${rulePageHits[i]} 页`);
 		}
+		if (cliArgs.scanOnly) {
+			// 没有命中也要落一份结果，界面才知道"扫过了是 0 命中"而不是"还没扫"
+			const fileName = writeScanResult(SCAN_DIR, {
+				version: 1,
+				wiki: cliArgs.wiki,
+				fingerprint: task.fingerprint,
+				namespaces: task.namespaces,
+				rules: task.rules.map((prepared) => prepared.rule),
+				scanned,
+				createdAt: Date.now(),
+				hits: scanHits,
+			});
+			console.log(`扫描完成：命中 ${scanHits.length} 页，结果写入 data/gui/scans/${fileName}`);
+			emit({ type: 'done', summary: { hits: scanHits.length, scanned }, resultFile: fileName });
+			return;
+		}
 		if (candidates.size === 0) {
 			console.log('没有命中页面，结束');
 			emit({ type: 'done', summary: { changed: 0, staleSkipped: 0, failed: 0 } });
 			return;
 		}
-		console.log(`命中页面共 ${candidates.size} 个，开始逐页处理${cliArgs.dryRun ? '（dry-run）' : ''}`);
+		const titles = [...candidates.keys()].sort();
+		console.log(`命中页面共 ${titles.length} 个，开始逐页处理${cliArgs.dryRun ? '（dry-run）' : ''}`);
 		emit({ type: 'phase', name: '提交编辑' });
 		// #endregion
 
 		// #region 逐页重拉最新内容并替换编辑
 		const checkpoint = loadCheckpoint(cliArgs, task);
 		const checkpointPath = checkpointFile(task.checkpointLabel);
-		const titles = [...candidates.keys()].sort();
 		emit({ type: 'progress', done: 0, total: titles.length, message: '准备编辑' });
 		for (const [index, title] of titles.entries()) {
 			if (checkpoint.completedSet.has(title)) {
 				log(`跳过（checkpoint 已完成）: ${title}`);
+				emit({ type: 'edit', title, status: 'skipped', oldRevid: null, newRevid: null, message: '本批此前已完成，跳过' });
 				continue;
 			}
 			try {

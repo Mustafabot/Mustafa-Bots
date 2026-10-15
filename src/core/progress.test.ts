@@ -39,3 +39,9 @@ test('关闭时发射器不写任何输出', () => {
 	}
 	assert.equal(written.length, 0);
 });
+
+test('done 事件能带上扫描结果文件名', () => {
+	const event = { type: 'done' as const, summary: { hits: 2, scanned: 100 }, resultFile: 'scan_zh_abcdef012345.json', at: 1700000000000 };
+	const parsed = parseChildLine(`${EVENT_PREFIX}${JSON.stringify(event)}`);
+	assert.deepEqual(parsed, event);
+});
