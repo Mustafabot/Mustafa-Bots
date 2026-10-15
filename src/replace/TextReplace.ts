@@ -521,7 +521,9 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		}
 
 		// 任务构建在同步之前：配置页拉取或参数错误应尽快失败，不浪费时间等待同步
-		const task = cliArgs.syncOnly ? null : await buildTask(api, cliArgs, coveredNamespaces, log);
+		// 默认替换范围恒为常量（zh=0、cm=6），不随镜像覆盖范围漂移，
+		// 否则用 --add-namespaces 抓过模板后会静默把模板页纳入替换范围
+		const task = cliArgs.syncOnly ? null : await buildTask(api, cliArgs, DEFAULT_MIRROR_NAMESPACES[cliArgs.wiki], log);
 		if (task) log(`站点 ${cliArgs.wiki}，命名空间 ${task.namespaces.join('|')}，规则 ${task.rules.length} 条`);
 
 		if (task) {
