@@ -27,6 +27,8 @@ export const DESCRIPTORS: TaskDescriptor[] = [
 			},
 			{ kind: 'stringList', flag: '--namespace', label: '命名空间', separator: ',', description: '留空则用规则集内声明的范围' },
 			{ kind: 'string', flag: '--summary', label: '编辑摘要', placeholder: '留空则自动生成' },
+			{ kind: 'boolean', flag: '--scan-only', label: '只扫描不修改，命中结果落盘供预览' },
+			{ kind: 'stringList', flag: '--add-namespaces', separator: ',', label: '加入镜像并同步的命名空间', description: '把未同步的命名空间抓进本地镜像，抓完即可搜索' },
 			{ kind: 'number', flag: '--interval', label: '编辑间隔（毫秒）', default: 1500, min: 0 },
 			{ kind: 'boolean', flag: '--sync-only', label: '仅同步镜像，不做替换' },
 			{ kind: 'boolean', flag: '--dry-run', label: '空跑，不提交任何编辑' },

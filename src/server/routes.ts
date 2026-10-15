@@ -7,6 +7,7 @@ import type { ProgressEvent } from '../core/progress.js';
 import { DESCRIPTORS, findDescriptor } from '../core/registry.js';
 import { isLocalHeaderHost, isLocalOriginUrl, issueToken, verifyPassword, type ServerConfig } from './auth.js';
 import { HistoryStore } from './history.js';
+import { NamespaceService } from './namespaces.js';
 import { RulesetPublisher, RulesetStore } from './rulesets.js';
 import { ScanStore } from './scans.js';
 import { TaskRunner, type TaskRecord } from './taskRunner.js';
@@ -19,6 +20,7 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 	const history = new HistoryStore('data/gui/history.db');
 	const rulesets = new RulesetStore('data/gui/rulesets');
 	const scans = new ScanStore('data/gui/scans');
+	const namespaces = new NamespaceService();
 	const publisher = new RulesetPublisher(rulesets);
 	const pendingParams = new Map<string, Record<string, unknown>>();
 	// 会话集合必须活在 createRouter 作用域：若放进请求回调，每次请求都会得到空集，
@@ -89,10 +91,11 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 			if (url.pathname === '/api/task' && req.method === 'POST') {
 				readBody(req).then((body) => {
 					try {
-						const { descriptorId, values, rulesetName } = JSON.parse(body || '{}') as {
+						const { descriptorId, values, rulesetName, submitTitles } = JSON.parse(body || '{}') as {
 							descriptorId: string;
 							values: Record<string, string | number | boolean | string[]>;
 							rulesetName?: string;
+							submitTitles?: string[];
 						};
 						const descriptor = findDescriptor(descriptorId);
 						if (!descriptor) throw new Error(`未知任务 ${descriptorId}`);
@@ -112,6 +115,16 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 							mkdirSync(dirname(tempFile), { recursive: true });
 							writeFileSync(tempFile, draft.content, 'utf-8');
 							injected.push(descriptor.rulesetFlag, tempFile);
+						}
+						// 界面勾选的页面清单：脚本要读文件，所以由服务端落一个临时清单
+						if (submitTitles !== undefined) {
+							if (!Array.isArray(submitTitles) || submitTitles.length === 0) throw new Error('submitTitles 必须是非空数组');
+							const titles = submitTitles.map((title) => (typeof title === 'string' ? title.trim() : '')).filter((title) => title !== '');
+							if (titles.length === 0) throw new Error('submitTitles 里没有有效的页面标题');
+							const selectionFile = resolve('data/gui/runtime', `selection-${Date.now()}.txt`);
+							mkdirSync(dirname(selectionFile), { recursive: true });
+							writeFileSync(selectionFile, `${[...new Set(titles)].join('\n')}\n`, 'utf-8');
+							injected.push('--submit', selectionFile);
 						}
 						// GUI 拉起的任务一律静默：逐页人类可读日志既刷屏，
 						// 又会挤占事件缓冲的名额，结构化事件里已带全部信息
@@ -167,6 +180,15 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 					clearInterval(keepAlive);
 					unsubscribe();
 				});
+				return;
+			}
+
+			if (url.pathname === '/api/namespaces' && req.method === 'GET') {
+				const wiki = url.searchParams.get('wiki') === 'cm' ? 'cm' : 'zh';
+				namespaces
+					.list(wiki)
+					.then((result) => sendJson(res, 200, result))
+					.catch((error: Error) => sendJson(res, 500, { error: error.message }));
 				return;
 			}
 
