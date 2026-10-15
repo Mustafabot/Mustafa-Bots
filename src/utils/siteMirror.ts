@@ -48,6 +48,13 @@ export interface MirrorSyncResult {
 	markedDeleted: number;
 }
 
+/**
+ * 各站镜像默认覆盖的命名空间（zh=条目、cm=文件），
+ * 与 ReplaceText 界面被管理员全站 JS 覆盖后的默认选择一致。
+ * 实际覆盖范围记在镜像库 meta 表的 `namespaces` 键里，运行时可扩充。
+ */
+export const DEFAULT_MIRROR_NAMESPACES: Record<'zh' | 'cm', number[]> = { zh: [0], cm: [6] };
+
 /** 单次镜像查询请求的超时毫秒数 */
 const REQUEST_TIMEOUT = 90_000;
 /** 镜像查询失败的最大尝试次数 */
@@ -203,6 +210,28 @@ export class SiteMirror {
 			lastRowid = rows[rows.length - 1].rowid;
 			await new Promise((resolve) => setImmediate(resolve));
 		}
+	}
+
+	/**
+	 * 镜像覆盖的命名空间；从未设置过时返回 null，
+	 * 由调用方决定默认值（通常是 DEFAULT_MIRROR_NAMESPACES）。
+	 */
+	getNamespaces(): number[] | null {
+		const raw = this.getMeta('namespaces');
+		if (raw === null) return null;
+		try {
+			const parsed = JSON.parse(raw) as unknown;
+			if (!Array.isArray(parsed)) return null;
+			const namespaces = parsed.filter((value): value is number => Number.isInteger(value));
+			return namespaces.length > 0 ? namespaces : null;
+		} catch {
+			return null;
+		}
+	}
+
+	/** 覆盖范围改动后写回 meta 表；排序保证同一套取值序列化结果一致 */
+	setNamespaces(namespaces: number[]): void {
+		this.setMeta('namespaces', JSON.stringify([...new Set(namespaces)].sort((a, b) => a - b)));
 	}
 
 	/** 读取 meta 表的键值 */
