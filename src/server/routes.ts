@@ -8,6 +8,7 @@ import { DESCRIPTORS, findDescriptor } from '../core/registry.js';
 import { isLocalHeaderHost, isLocalOriginUrl, issueToken, verifyPassword, type ServerConfig } from './auth.js';
 import { HistoryStore } from './history.js';
 import { RulesetPublisher, RulesetStore } from './rulesets.js';
+import { ScanStore } from './scans.js';
 import { TaskRunner, type TaskRecord } from './taskRunner.js';
 
 // fileURLToPath 对以 / 结尾的 URL 会保留尾部路径分隔符，必须先 resolve 归一化，
@@ -17,6 +18,7 @@ const PUBLIC_DIR = resolve(fileURLToPath(new URL('./public/', import.meta.url)))
 export function createRouter(config: ServerConfig, runner: TaskRunner = new TaskRunner()) {
 	const history = new HistoryStore('data/gui/history.db');
 	const rulesets = new RulesetStore('data/gui/rulesets');
+	const scans = new ScanStore('data/gui/scans');
 	const publisher = new RulesetPublisher(rulesets);
 	const pendingParams = new Map<string, Record<string, unknown>>();
 	// 会话集合必须活在 createRouter 作用域：若放进请求回调，每次请求都会得到空集，
@@ -165,6 +167,27 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 					clearInterval(keepAlive);
 					unsubscribe();
 				});
+				return;
+			}
+
+			if (url.pathname === '/api/scans' && req.method === 'GET') {
+				sendJson(res, 200, { scans: scans.list() });
+				return;
+			}
+
+			const scanMatch = /^\/api\/scans\/([^/]+)$/.exec(url.pathname);
+			if (scanMatch && req.method === 'GET') {
+				const rawOffset = Number.parseInt(url.searchParams.get('offset') ?? '0', 10);
+				const rawLimit = Number.parseInt(url.searchParams.get('limit') ?? '200', 10);
+				const offset = Number.isFinite(rawOffset) && rawOffset > 0 ? rawOffset : 0;
+				// 上限 1000：一次拖走上万条命中会把响应体撑到几十 MB
+				const limit = Number.isFinite(rawLimit) && rawLimit > 0 ? Math.min(rawLimit, 1000) : 200;
+				const slice = scans.page(decodeURIComponent(scanMatch[1]), offset, limit);
+				if (!slice) {
+					sendJson(res, 404, { error: '扫描结果不存在' });
+					return;
+				}
+				sendJson(res, 200, slice);
 				return;
 			}
 
