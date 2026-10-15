@@ -10,18 +10,7 @@ import { createCmApi, createZhApi } from '../utils/createApi.js';
 import { SiteMirror, syncMirror, type MirrorSyncResult } from '../utils/siteMirror.js';
 import { checkModerationQueued, checkModerationQueuedError, extractApiError, isPermissionDeniedError } from '../utils/retry.js';
 import { createEmitter, type EmitProgress } from '../core/progress.js';
-
-/** 单条替换规则（CLI 参数或 JSON 配置页的 rules 元素） */
-interface ReplaceRule {
-	/** 查找文本；regex 为 true 时按 JavaScript 正则解析 */
-	from: string;
-	/** 替换文本；regex 为 true 时支持 $1 等替换引用，可为空串（即删除） */
-	to: string;
-	/** 是否按正则解析 from */
-	regex?: boolean;
-	/** 是否忽略大小写 */
-	ignoreCase?: boolean;
-}
+import { computeFingerprint, describeRule, prepareRule, trunc, validateRule, type PreparedRule, type ReplaceRule } from './replaceRules.js';
 
 /** JSON 配置页结构 */
 interface TaskConfig {
@@ -57,15 +46,6 @@ interface CliArgs {
 	dryRun: boolean;
 	quiet: boolean;
 	interval: number;
-}
-
-/** 预编译后的规则：命中计数与替换执行各有闭包，避免逐页重新编译正则 */
-interface PreparedRule {
-	rule: ReplaceRule;
-	/** 返回 from 在文本中的出现次数（0 表示未命中） */
-	countMatches: (text: string) => number;
-	/** 在文本上执行替换，返回新文本与替换次数 */
-	apply: (text: string) => { text: string; count: number };
 }
 
 /** 一次替换任务的完整参数 */
@@ -136,75 +116,6 @@ const CHECKPOINT_DIR = resolve(__dirname, '../../data/checkpoint');
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-/** 截断过长文本用于日志与摘要 */
-function trunc(text: string, max = 50): string {
-	return text.length > max ? `${text.slice(0, max)}…` : text;
-}
-
-/** 正则元字符转义（纯文本 + 忽略大小写时把字面量转为等价正则） */
-function escapeRegExp(text: string): string {
-	return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-}
-
-/** 校验单条规则，返回错误信息或 null */
-function validateRule(rule: ReplaceRule, label: string): string | null {
-	if (typeof rule.from !== 'string' || rule.from === '') return `${label} 缺少 from`;
-	if (typeof rule.to !== 'string') return `${label} 缺少 to（可为空串）`;
-	if (rule.regex !== undefined && typeof rule.regex !== 'boolean') return `${label} regex 必须是布尔值`;
-	if (rule.ignoreCase !== undefined && typeof rule.ignoreCase !== 'boolean') return `${label} ignoreCase 必须是布尔值`;
-	if (rule.regex) {
-		try {
-			new RegExp(rule.from, `g${rule.ignoreCase ? 'i' : ''}`);
-		} catch (error) {
-			return `${label} from 不是合法正则: ${(error as Error).message}`;
-		}
-	} else if (rule.from === rule.to) {
-		return `${label} from 与 to 相同`;
-	}
-	return null;
-}
-
-/** 预编译规则：纯文本（区分大小写）用字符串操作；纯文本忽略大小写用转义正则；regex 用原正则 */
-function prepareRule(rule: ReplaceRule): PreparedRule {
-	if (rule.regex || rule.ignoreCase) {
-		const source = rule.regex ? rule.from : escapeRegExp(rule.from);
-		const flags = `g${rule.ignoreCase ? 'i' : ''}`;
-		// 两个独立实例，避免 g 标志的 lastIndex 在测试与替换间互相影响
-		const countRe = new RegExp(source, flags);
-		const replaceRe = new RegExp(source, flags);
-		return {
-			rule,
-			countMatches: (text) => {
-				const matches = text.match(countRe);
-				return matches ? matches.length : 0;
-			},
-			apply: (text) => {
-				const matches = text.match(countRe);
-				const count = matches ? matches.length : 0;
-				return { text: count > 0 ? text.replace(replaceRe, rule.to) : text, count };
-			},
-		};
-	}
-	return {
-		rule,
-		countMatches: (text) => {
-			if (!text.includes(rule.from)) return 0;
-			return text.split(rule.from).length - 1;
-		},
-		apply: (text) => {
-			const count = text.split(rule.from).length - 1;
-			// split/join 保证 to 按字面处理（$ 等字符不被解释）
-			return { text: count > 0 ? text.split(rule.from).join(rule.to) : text, count };
-		},
-	};
-}
-
-/** 规则的展示标签：正则用 /…/ 包裹，纯文本用引号 */
-function describeRule(rule: ReplaceRule): string {
-	const from = rule.regex ? `/${trunc(rule.from, 40)}/` : `"${trunc(rule.from, 40)}"`;
-	return `${from} → "${trunc(rule.to, 40)}"`;
 }
 
 /** 解析 CLI 参数（支持 --key value 与 --key=value 两种写法） */
@@ -499,7 +410,7 @@ async function buildTask(api: MediaWikiApi, cliArgs: CliArgs, mirrorNamespaces: 
 		namespaces: effectiveNamespaces,
 		rules: rules.map(prepareRule),
 		checkpointLabel,
-		fingerprint: createHash('sha256').update(JSON.stringify({ wiki: cliArgs.wiki, namespaces: effectiveNamespaces, rules })).digest('hex'),
+		fingerprint: computeFingerprint({ wiki: cliArgs.wiki, namespaces: effectiveNamespaces, rules }),
 	};
 }
 
