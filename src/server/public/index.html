@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="zh-CN">
+	<head>
+		<meta charset="utf-8" />
+		<title>机器人 GUI · API 验证页</title>
+		<style>
+			body { font-family: system-ui, sans-serif; margin: 2rem; max-width: 60rem; line-height: 1.6; }
+			section { border: 1px solid #ccc; border-radius: 6px; padding: 1rem; margin-bottom: 1.5rem; }
+			pre { background: #f5f5f5; padding: 0.75rem; overflow: auto; max-height: 20rem; }
+			button { padding: 0.3rem 0.8rem; margin-right: 0.5rem; }
+		</style>
+	</head>
+	<body>
+		<h1>机器人 GUI · API 验证页</h1>
+		<p>本页只用于确认后端接口连通，正式界面见前端计划。</p>
+
+		<section>
+			<h2>描述符</h2>
+			<button id="load-descriptors">加载</button>
+			<pre id="descriptors">（未加载）</pre>
+		</section>
+
+		<section>
+			<h2>任务事件流</h2>
+			<button id="load-task">查看当前任务</button>
+			<pre id="events">（未连接）</pre>
+		</section>
+
+		<section>
+			<h2>历史</h2>
+			<button id="load-history">加载</button>
+			<pre id="history">（未加载）</pre>
+		</section>
+
+		<script>
+			const getJson = async (url) => (await fetch(url)).json();
+
+			document.getElementById('load-descriptors').onclick = async () => {
+				document.getElementById('descriptors').textContent = JSON.stringify(await getJson('/api/descriptors'), null, 2);
+			};
+
+			document.getElementById('load-task').onclick = async () => {
+				document.getElementById('events').textContent = JSON.stringify(await getJson('/api/task'), null, 2);
+			};
+
+			document.getElementById('load-history').onclick = async () => {
+				document.getElementById('history').textContent = JSON.stringify(await getJson('/api/history'), null, 2);
+			};
+
+			const source = new EventSource('/api/task/events');
+			source.onmessage = (message) => {
+				const target = document.getElementById('events');
+				target.textContent = `${target.textContent}\n${message.data}`;
+			};
+		</script>
+	</body>
+</html>
