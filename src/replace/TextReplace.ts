@@ -282,6 +282,10 @@ function parseArgs(argv: string[]): CliArgs | null {
 		console.error('--submit 不同步镜像，不能与 --sync-only 同时使用');
 		return null;
 	}
+	if (result.submit !== undefined && result.resync) {
+		console.error('--submit 与 --resync 不能同时使用（提交模式不碰镜像，清空镜像也无从重建）');
+		return null;
+	}
 	if (result.configFile !== undefined && result.configFile === '') {
 		console.error('--config-file 需要本地文件路径');
 		return null;
