@@ -64,6 +64,11 @@ body {
 .hint.danger {
 	color: #b91c1c;
 }
+.scan-recall {
+	margin-left: 6px;
+	padding: 2px 8px;
+	font-size: 13px;
+}
 .error {
 	color: #b91c1c;
 	background: #fef2f2;

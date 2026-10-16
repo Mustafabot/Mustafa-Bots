@@ -161,8 +161,11 @@ function describeRules(paramsJson: string): { rules: RuleView[]; recorded: boole
 	return { rules: decodeRuleset(content).rules, recorded: true };
 }
 
-/** 没有改后修订的行（空跑/跳过/失败）不提供 [看 diff]，改给一句说明 */
+/** 没有改后修订的行（空跑/跳过/失败/无修订号）不提供 [看 diff]，改给一句说明 */
 function noDiffNote(row: HistoryPageRow): string {
+	// 改前也是空：巡逻等操作不记修订号（事件本就 newRevid=null），两者皆空时无从对比，
+	// 不能按「空跑」说——否则每条真实的巡逻记录都会被说成空跑
+	if (row.oldRevid === null) return '这次任务没有记录修订号，无从对比';
 	if (row.action === 'skipped') return '未修改，无改动可看';
 	if (row.action === 'failed') return '未成功修改，无改动可看';
 	return '空跑记录，无改动可看';
@@ -241,6 +244,9 @@ export function HistoryPage(): React.JSX.Element {
 	/** 展开/收起某页的 diff；首次展开才现取 */
 	const toggleDiff = (title: string): void => {
 		if (selectedId === null) return;
+		// 把发起请求时的任务号闭包住：响应回来时若已切到别的任务，一律丢弃，
+		// 否则在途响应会把上一个任务的 diff 写进新任务的表（且此后不再重取，显示错误内容）
+		const taskId = selectedId;
 		const next = new Set(open);
 		if (next.has(title)) {
 			next.delete(title);
@@ -252,9 +258,13 @@ export function HistoryPage(): React.JSX.Element {
 		if (diffs[title] !== undefined) return;
 		setDiffs((prev) => ({ ...prev, [title]: { status: 'loading' } }));
 		api.history
-			.diff(selectedId, title)
-			.then((result) => setDiffs((prev) => ({ ...prev, [title]: { status: 'lines', lines: result.lines } })))
+			.diff(taskId, title)
+			.then((result) => {
+				if (selectedRef.current !== taskId) return;
+				setDiffs((prev) => ({ ...prev, [title]: { status: 'lines', lines: result.lines } }));
+			})
 			.catch((reason: unknown) => {
+				if (selectedRef.current !== taskId) return;
 				// unchanged / missing 是业务状态而非错误，转成友好文案；其余才标红
 				const reasonCode = reason instanceof ApiError ? reason.body?.reason : undefined;
 				if (reasonCode === 'unchanged') setDiffs((prev) => ({ ...prev, [title]: { status: 'note', text: '两个版本内容相同，看不出差异' } }));

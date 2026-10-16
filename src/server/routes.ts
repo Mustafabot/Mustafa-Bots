@@ -265,8 +265,13 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 					sendJson(res, 404, { error: `任务里没有页面 "${page}"` });
 					return;
 				}
-				// 历史库只存参数 JSON，站点取自 --wiki；异常取值一律退回 zh
-				const params = JSON.parse(detail.task.paramsJson || '{}') as Record<string, unknown>;
+				// 历史库只存参数 JSON，站点取自 --wiki；参数串坏掉或取值异常一律退回 zh，不阻断 diff
+				let params: Record<string, unknown> = {};
+				try {
+					params = JSON.parse(detail.task.paramsJson || '{}') as Record<string, unknown>;
+				} catch {
+					params = {};
+				}
 				const wiki = params['--wiki'] === 'cm' ? 'cm' : 'zh';
 				pageText
 					.diffByRevid(wiki, page, row.oldRevid ?? 0, row.newRevid ?? 0)
@@ -338,6 +343,13 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 					});
 					return;
 				}
+			}
+
+			// 未匹配到任何接口的 /api/* 一律回 JSON 404：否则会落到 serveStatic 的 SPA 回退，
+			// 以 200 返回 index.html，调用方见 200 当成功、拿到 undefined 才在别处炸开，极难定位
+			if (url.pathname.startsWith('/api/')) {
+				sendJson(res, 404, { error: '未知接口' });
+				return;
 			}
 
 			serveStatic(url.pathname, res);

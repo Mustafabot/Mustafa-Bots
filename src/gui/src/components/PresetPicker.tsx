@@ -57,6 +57,7 @@ export function PresetPicker({ presets, name, onNameChange, onLoad, onSave, onPu
 					发布到配置页
 				</button>
 			</div>
+			<p className="hint">「保存」只写本地草稿；要写回 wiki 配置页请用「发布到配置页」。</p>
 			{exists && <p className="hint">预设「{trimmed}」已存在，「保存」将覆盖它的草稿。</p>}
 		</div>
 	);

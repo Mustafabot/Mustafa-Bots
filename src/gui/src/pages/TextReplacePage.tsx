@@ -18,7 +18,7 @@ import { ProgressPanel } from '../components/ProgressPanel';
 import { RuleEditor } from '../components/RuleEditor';
 import { useTaskRun, type TaskDoneInfo } from '../hooks/useTaskRun';
 import { decodeRuleset, encodeRuleset, type RuleFormState } from '../rulesetCodec';
-import type { NamespaceList, ParamValue, ProgressEvent, RulesetSummary, ScanPageHit, StartTaskBody, TaskDescriptor } from '../types';
+import type { NamespaceList, ParamValue, ProgressEvent, RulesetSummary, ScanPageHit, ScanResultMeta, StartTaskBody, TaskDescriptor } from '../types';
 
 /** 命中结果每页取多少条（服务端单次上限 1000，这里取个小批量便于增量加载） */
 const PAGE_SIZE = 200;
@@ -73,6 +73,11 @@ function publishConflictText(reason: 'conflict' | 'missing'): string {
 	return '线上配置页已被他人改动，草稿基于旧版本，无法直接覆盖。请先比对下方线上内容，确认后再发布。';
 }
 
+/** 由扫描结果元信息拼出结果文件名（与服务端 scanFileName 规则一致：站名 + 指纹前 12 位） */
+function scanFileNameOf(meta: ScanResultMeta): string {
+	return `scan_${meta.wiki}_${meta.fingerprint.slice(0, 12)}.json`;
+}
+
 /** 全站文本替换页 */
 export function TextReplacePage(): React.JSX.Element {
 	const [descriptor, setDescriptor] = useState<TaskDescriptor | null>(null);
@@ -85,6 +90,9 @@ export function TextReplacePage(): React.JSX.Element {
 	const [notice, setNotice] = useState<Notice | null>(null);
 	const [conflictRemote, setConflictRemote] = useState<string | null>(null);
 	const [scanName, setScanName] = useState<string | null>(null);
+	// 当前站点最近一次落盘的扫描结果（列表里按 createdAt 取最新），以及刷新后才收到 done 回放时的结果文件名
+	const [latestScan, setLatestScan] = useState<ScanResultMeta | null>(null);
+	const [recoveredScan, setRecoveredScan] = useState<string | null>(null);
 	const [hits, setHits] = useState<ScanPageHit[]>([]);
 	const [hitTotal, setHitTotal] = useState(0);
 	const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -142,6 +150,24 @@ export function TextReplacePage(): React.JSX.Element {
 		};
 	}, [wiki]);
 
+	// 载入最近一次扫描结果用：当前站点按 createdAt 取最新的那条（刷新页面后靠它取回，不必重扫）
+	useEffect(() => {
+		let alive = true;
+		api.scans
+			.list()
+			.then((result) => {
+				if (!alive) return;
+				const latest = result.scans.filter((scan) => scan.wiki === wiki).sort((a, b) => b.createdAt - a.createdAt)[0] ?? null;
+				setLatestScan(latest);
+			})
+			.catch(() => {
+				// 结果列表拿不到不影响手动扫描
+			});
+		return () => {
+			alive = false;
+		};
+	}, [wiki]);
+
 	const refreshNamespaces = useCallback((): void => {
 		api.namespaces(wiki)
 			.then(setNsList)
@@ -184,6 +210,10 @@ export function TextReplacePage(): React.JSX.Element {
 			setFetchingNs(false);
 			setNotice({ text: '命名空间同步完成，现在可以扫描了。', kind: 'info' });
 			refreshNamespaces();
+		} else if (info.resultFile !== undefined) {
+			// 刷新页面后才收到 done 回放：pendingRef 已清空，判不出本次动作，
+			// 但结果确实落了盘，给一个可载入的入口（不自动载入，免得打断用户当前操作）
+			setRecoveredScan(info.resultFile);
 		}
 	};
 
@@ -299,6 +329,8 @@ export function TextReplacePage(): React.JSX.Element {
 	const running = task?.status === 'running';
 	const shownError = error ?? loadError;
 	const unsyncedSelected = (nsList?.namespaces ?? []).filter((ns) => form.namespaces.includes(ns.id) && !ns.mirrored);
+	// 可载入的扫描结果：刷新后才收到 done 回放的优先，否则用列表里当前站点最新那份
+	const loadableScan = recoveredScan ?? (latestScan !== null ? scanFileNameOf(latestScan) : null);
 
 	return (
 		<section className="text-replace-page">
@@ -363,6 +395,17 @@ export function TextReplacePage(): React.JSX.Element {
 							</button>
 							{unsyncedSelected.length > 0 && <span className="hint danger">勾选中有 {unsyncedSelected.length} 个命名空间未同步</span>}
 						</div>
+
+						{scanName === null && loadableScan !== null && (
+							// 扫描结果已落盘，刷新页面也能取回：不必重扫
+							<p className="hint">
+								{recoveredScan !== null ? '上一次扫描的结果已落盘：' : '最近一次扫描结果：'}
+								<button type="button" className="scan-recall" disabled={running || busy} onClick={() => void loadScanResult(loadableScan)}>
+									载入 {loadableScan}
+								</button>
+								{recoveredScan === null && latestScan !== null && `（命中 ${latestScan.hitCount} 页）`}
+							</p>
+						)}
 					</div>
 
 					{scanName !== null && (
