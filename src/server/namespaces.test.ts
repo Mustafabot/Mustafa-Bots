@@ -18,9 +18,9 @@ const siteinfo = {
 };
 
 // 接口的 post 是泛型方法，桩实现无法逐字满足它，按仓库既有做法整体断言一次
-const fakeApi = async () => ({
+const fakeApi = (async () => ({
 	post: async () => ({ data: siteinfo }),
-}) as unknown as SiteinfoApiFactory;
+})) as unknown as SiteinfoApiFactory;
 
 test('站点命名空间映射成界面条目，主命名空间有中文名', async () => {
 	const dir = mkdtempSync(join(tmpdir(), 'gui-ns-'));
@@ -41,13 +41,14 @@ test('镜像覆盖范围从 meta 表读取，未同步的命名空间被标出�
 	const dir = mkdtempSync(join(tmpdir(), 'gui-ns-'));
 	try {
 		const mirror = new SiteMirror(join(dir, 'zh.db'));
-		mirror.setNamespaces([0]);
+		mirror.setNamespaces([0, 10]);
 		mirror.close();
 
 		const service = new NamespaceService(fakeApi, dir);
 		const list = await service.list('zh');
-		assert.deepEqual(list.mirrorNamespaces, [0]);
+		assert.deepEqual(list.mirrorNamespaces, [0, 10]);
 		assert.equal(list.namespaces.find((item) => item.id === 0)?.mirrored, true);
+		assert.equal(list.namespaces.find((item) => item.id === 10)?.mirrored, true);
 		assert.equal(list.namespaces.find((item) => item.id === 6)?.mirrored, false);
 	} finally {
 		rmSync(dir, { recursive: true, force: true });
@@ -67,9 +68,9 @@ test('镜像库还不存在时用默认覆盖范围', async () => {
 test('siteinfo 用 * 表示本地名时也能取到', async () => {
 	const dir = mkdtempSync(join(tmpdir(), 'gui-ns-'));
 	try {
-		const legacy = async () => ({
+		const legacy = (async () => ({
 			post: async () => ({ data: { query: { namespaces: { '2': { id: 2, case: 'first-letter', canonical: 'User', '*': '用户' } } } } }),
-		}) as unknown as SiteinfoApiFactory;
+		})) as unknown as SiteinfoApiFactory;
 		const service = new NamespaceService(legacy, dir);
 		assert.equal((await service.list('zh')).namespaces[0].label, '用户');
 	} finally {
