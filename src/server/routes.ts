@@ -361,6 +361,18 @@ function readBody(req: IncomingMessage): Promise<string> {
 	});
 }
 
+const MIME_TYPES: Record<string, string> = {
+	'.html': 'text/html; charset=utf-8',
+	'.js': 'text/javascript; charset=utf-8',
+	'.mjs': 'text/javascript; charset=utf-8',
+	'.css': 'text/css; charset=utf-8',
+	'.json': 'application/json; charset=utf-8',
+	'.svg': 'image/svg+xml',
+	'.png': 'image/png',
+	'.ico': 'image/x-icon',
+	'.woff2': 'font/woff2',
+};
+
 function serveStatic(pathname: string, res: ServerResponse): void {
 	const name = pathname === '/' ? 'index.html' : pathname.slice(1);
 	// 绝对形式请求（如 `GET http://主机//etc/passwd`）会让 pathname 成为 `//etc/passwd`，
@@ -379,10 +391,21 @@ function serveStatic(pathname: string, res: ServerResponse): void {
 	}
 	try {
 		const body = readFileSync(target);
-		const type = extname(name) === '.html' ? 'text/html; charset=utf-8' : 'application/octet-stream';
+		const type = MIME_TYPES[extname(name)] ?? 'application/octet-stream';
 		res.writeHead(200, { 'content-type': type });
 		res.end(body);
 	} catch {
+		// 单页应用用 hash 路由，但深链接仍可能落到服务端；不含扩展名的路径一律回首页
+		if (extname(name) === '') {
+			try {
+				const fallback = readFileSync(resolve(PUBLIC_DIR, 'index.html'));
+				res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' });
+				res.end(fallback);
+				return;
+			} catch {
+				// 连首页都没有：走下面的 404
+			}
+		}
 		res.writeHead(404, { 'content-type': 'text/plain; charset=utf-8' });
 		res.end('未找到');
 	}

@@ -32,6 +32,15 @@ export default tseslint.config(
 		},
 	},
 	{
-		ignores: ["node_modules/", "dist/", "package-lock.json"],
+		files: ["src/gui/**/*.{ts,tsx}"],
+		languageOptions: {
+			globals: {
+				...globals.browser,
+			},
+		},
+	},
+	{
+		// 构建产物由 Vite 直接落到 src/server/public，压缩后的 bundle 不该被 lint
+		ignores: ["node_modules/", "dist/", "package-lock.json", "src/gui/dist/", "src/server/public/"],
 	},
 );

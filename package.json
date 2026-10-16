@@ -8,10 +8,12 @@
     "build": "tsc",
     "dev": "tsx",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json && tsc --noEmit -p src/gui/tsconfig.json",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:unit": "node --import tsx --test \"src/**/*.test.ts\"",
-    "gui": "tsx src/server/index.ts"
+    "gui": "tsx src/server/index.ts",
+    "build:gui": "npm --prefix src/gui run build",
+    "dev:gui": "concurrently -n server,vite -c blue,green \"npm run gui\" \"npm --prefix src/gui run dev\""
   },
   "author": "",
   "license": "ISC",
@@ -24,6 +26,7 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^25.6.0",
+    "concurrently": "^9.2.0",
     "eslint": "^10.2.1",
     "eslint-plugin-jsdoc": "^62.9.0",
     "globals": "^17.5.0",
