@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { scanFileName, writeScanResult, type ScanResult } from '../replace/scanResult.js';
+import { writeScanResult, type ScanResult } from '../replace/scanResult.js';
 import { ScanStore } from './scans.js';
 
 function seed(dir: string): string {
