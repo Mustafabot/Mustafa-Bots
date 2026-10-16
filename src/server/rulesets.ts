@@ -100,10 +100,10 @@ export interface RulesetApi {
 
 export type RulesetApiFactory = () => Promise<RulesetApi>;
 
-/** 默认工厂：真实登录 */
+/** 默认工厂：真实登录；exitOnFailure=false 时登录失败抛错而非退出进程，由路由层 .catch 降级成 500，不打挂 GUI 服务 */
 async function defaultRulesetApi(): Promise<RulesetApi> {
 	const api = createZhApi();
-	await clientlogin(api, config.zh.bot.clientUsername!, config.zh.bot.clientPassword!, config.zh.api);
+	await clientlogin(api, config.zh.bot.clientUsername!, config.zh.bot.clientPassword!, config.zh.api, false);
 	return api;
 }
 

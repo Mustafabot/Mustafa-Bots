@@ -16,6 +16,7 @@ async function clientLogin(
 	username: string,
 	password: string = config.password!,
 	loginreturnurl: string = config.zh.api,
+	exitOnFailure: boolean = true,
 ): Promise<ClientLoginData> {
 	return api
 		.postWithToken<ClientLoginData>(
@@ -45,7 +46,8 @@ async function clientLogin(
 		})
 		.catch((err) => {
 			console.error('登录异常', err);
-			process.exit(1);
+			if (exitOnFailure) process.exit(1);
+			throw err;
 		});
 }
 

@@ -8,6 +8,7 @@ import { DESCRIPTORS, findDescriptor } from '../core/registry.js';
 import { isLocalHeaderHost, isLocalOriginUrl, issueToken, verifyPassword, type ServerConfig } from './auth.js';
 import { HistoryStore } from './history.js';
 import { NamespaceService } from './namespaces.js';
+import { PageTextService } from './pageText.js';
 import { RulesetPublisher, RulesetStore } from './rulesets.js';
 import { ScanStore } from './scans.js';
 import { TaskRunner, type TaskRecord } from './taskRunner.js';
@@ -21,6 +22,7 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 	const rulesets = new RulesetStore('data/gui/rulesets');
 	const scans = new ScanStore('data/gui/scans');
 	const namespaces = new NamespaceService();
+	const pageText = new PageTextService();
 	const publisher = new RulesetPublisher(rulesets);
 	const pendingParams = new Map<string, Record<string, unknown>>();
 	// 会话集合必须活在 createRouter 作用域：若放进请求回调，每次请求都会得到空集，
@@ -192,6 +194,30 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 				return;
 			}
 
+			const scanDiff = /^\/api\/scans\/([^/]+)\/diff$/.exec(url.pathname);
+			if (scanDiff && req.method === 'GET') {
+				const scan = scans.page(decodeURIComponent(scanDiff[1]), 0, 0);
+				if (!scan) {
+					sendJson(res, 404, { error: '扫描结果不存在' });
+					return;
+				}
+				const page = url.searchParams.get('page') ?? '';
+				// 不先查"这页在不在扫描结果里"：diffByRules 本身就是权威判定——
+				// 按最新内容与规则算下来没改动就返回 unchanged，多查一次命中表是多余的
+				const wiki = scan.meta.wiki as 'zh' | 'cm';
+				pageText
+					.diffByRules(wiki, page, scan.meta.rules)
+					.then((outcome) => {
+						if (!outcome.ok) {
+							sendJson(res, outcome.reason === 'error' ? 500 : 409, { error: outcome.message, reason: outcome.reason });
+							return;
+						}
+						sendJson(res, 200, { page, lines: outcome.lines, stats: outcome.stats });
+					})
+					.catch((error: Error) => sendJson(res, 500, { error: error.message }));
+				return;
+			}
+
 			if (url.pathname === '/api/scans' && req.method === 'GET') {
 				sendJson(res, 200, { scans: scans.list() });
 				return;
@@ -210,6 +236,36 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 					return;
 				}
 				sendJson(res, 200, slice);
+				return;
+			}
+
+			const historyDiff = /^\/api\/history\/(.+)\/diff$/.exec(url.pathname);
+			if (historyDiff && req.method === 'GET') {
+				const taskId = decodeURIComponent(historyDiff[1]);
+				const page = url.searchParams.get('page') ?? '';
+				const detail = history.getTask(taskId);
+				if (!detail) {
+					sendJson(res, 404, { error: '任务不存在' });
+					return;
+				}
+				const row = detail.pages.find((item) => item.title === page);
+				if (!row) {
+					sendJson(res, 404, { error: `任务里没有页面 "${page}"` });
+					return;
+				}
+				// 历史库只存参数 JSON，站点取自 --wiki；异常取值一律退回 zh
+				const params = JSON.parse(detail.task.paramsJson || '{}') as Record<string, unknown>;
+				const wiki = params['--wiki'] === 'cm' ? 'cm' : 'zh';
+				pageText
+					.diffByRevid(wiki, page, row.oldRevid ?? 0, row.newRevid ?? 0)
+					.then((outcome) => {
+						if (!outcome.ok) {
+							sendJson(res, outcome.reason === 'error' ? 500 : 409, { error: outcome.message, reason: outcome.reason });
+							return;
+						}
+						sendJson(res, 200, { page, oldRevid: outcome.oldRevid, newRevid: outcome.newRevid, lines: outcome.lines, stats: outcome.stats });
+					})
+					.catch((error: Error) => sendJson(res, 500, { error: error.message }));
 				return;
 			}
 
