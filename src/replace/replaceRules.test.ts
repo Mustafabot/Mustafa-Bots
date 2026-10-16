@@ -21,6 +21,11 @@ test('纯文本规则按字面替换，$ 不被解释', () => {
 	assert.deepEqual(prepared.apply('a-a'), { text: '$1x-$1x', count: 2 });
 });
 
+test('忽略大小写的纯文本规则，to 里的 $ 按字面替换', () => {
+	const prepared = prepareRule({ from: '苹果', to: '$&/$1/$', ignoreCase: true });
+	assert.deepEqual(prepared.apply('苹果'), { text: '$&/$1/$', count: 1 });
+});
+
 test('正则规则支持 $1 引用', () => {
 	const prepared = prepareRule({ from: '(\\w+)→(\\w+)', to: '$2→$1', regex: true });
 	assert.deepEqual(prepared.apply('a→b c→d'), { text: 'b→a d→c', count: 2 });
@@ -44,6 +49,10 @@ test('零宽匹配不会让 findMatches 陷入死循环', () => {
 	const prepared = prepareRule({ from: 'a*', to: '', regex: true });
 	// /a*/ 在 'bbb' 的 4 个空位各匹配一次，必须能返回而不是卡死
 	assert.equal(prepared.findMatches('bbb').length, 4);
+});
+
+test('空 from 的纯文本规则 findMatches 返回空数组而非死循环', () => {
+	assert.deepEqual(prepareRule({ from: '', to: 'x' }).findMatches('abc'), []);
 });
 
 test('指纹随规则与站点变化，同参数稳定不变', () => {

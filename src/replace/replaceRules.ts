@@ -89,7 +89,11 @@ export function prepareRule(rule: ReplaceRule): PreparedRule {
 			findMatches: (text) => execAll(detailRe, text),
 			apply: (text) => {
 				const count = text.match(countRe)?.length ?? 0;
-				return { text: count > 0 ? text.replace(replaceRe, rule.to) : text, count };
+				if (count === 0) return { text, count: 0 };
+				// 纯文本（只是忽略大小写）时 to 必须按字面插入：
+				// 用函数替换器绕开 String.replace 对 $&、$$ 等的模式解释
+				const text2 = rule.regex ? text.replace(replaceRe, rule.to) : text.replace(replaceRe, () => rule.to);
+				return { text: text2, count };
 			},
 		};
 	}
@@ -97,6 +101,8 @@ export function prepareRule(rule: ReplaceRule): PreparedRule {
 		rule,
 		countMatches: (text) => (text.includes(rule.from) ? text.split(rule.from).length - 1 : 0),
 		findMatches: (text) => {
+			// 空 from 时 indexOf('', from) 恒返回 from 且步长为 0，会原地踏步到 OOM
+			if (rule.from === '') return [];
 			const spans: MatchSpan[] = [];
 			let from = 0;
 			for (;;) {
