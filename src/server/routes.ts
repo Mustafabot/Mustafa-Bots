@@ -109,6 +109,9 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 							return;
 						}
 						const injected: string[] = [];
+						// 跑这次任务所用规则集的快照：历史库只存参数与页面 revid，事后回溯要知道"当时跑的是哪套规则"，
+						// 故把草稿原文随参数一并落库（几百字节的元数据，与"不存 diff 正文"不冲突）
+						let rulesetSnapshot: { name: string; content: string } | null = null;
 						if (descriptor.rulesetFlag) {
 							// 仅同步镜像（--sync-only）的任务不读规则集：CLI 在 sync 下不构建、不校验规则，
 							// 因此允许不带 rulesetName（抓取命名空间发生在用户配规则之前）。
@@ -117,6 +120,7 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 							if (rulesetName) {
 								const draft = rulesets.read(rulesetName);
 								if (!draft) throw new Error(`规则集 "${rulesetName}" 没有本地草稿`);
+								rulesetSnapshot = { name: rulesetName, content: draft.content };
 								const tempFile = resolve('data/gui/runtime', `${rulesetName}-${Date.now()}.json`);
 								mkdirSync(dirname(tempFile), { recursive: true });
 								writeFileSync(tempFile, draft.content, 'utf-8');
@@ -139,7 +143,8 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 						// 又会挤占事件缓冲的名额，结构化事件里已带全部信息
 						injected.push(descriptor.quietFlag);
 						const record = runner.start(descriptor, values, injected);
-						pendingParams.set(record.id, values ?? {});
+						// 落库的参数额外带上规则集快照（有才带）：历史页据此还原"当时跑的是什么规则"
+						pendingParams.set(record.id, rulesetSnapshot ? { ...(values ?? {}), __ruleset: rulesetSnapshot } : (values ?? {}));
 						runner.once('finish', () => {
 							// 落库失败（例如双开实例时的 SQLITE_BUSY）不能让异常冒到
 							// EventEmitter 之外终结进程

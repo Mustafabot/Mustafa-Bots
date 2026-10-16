@@ -243,6 +243,17 @@ export interface HistoryTaskDetail {
 	pages: HistoryPageRow[];
 }
 
+/**
+ * 历史任务落库的参数对象（`HistoryTaskRow.paramsJson` 解析后的形状）。
+ * 除描述符的 values（`--wiki`、`--namespace`、各开关）外，服务端在有规则集时会附带 `__ruleset`
+ * ——跑这次任务时草稿正文的快照，历史页据此还原"当时跑的是哪套规则"。
+ */
+export interface HistoryTaskParams {
+	/** 所用规则集的名称与当时草稿的 JSON 原文；无规则集的任务没有这个键 */
+	__ruleset?: { name: string; content: string };
+	[key: string]: unknown;
+}
+
 // ── 规则集（镜像 src/server/rulesets.ts）──
 
 /** 规则集草稿 */

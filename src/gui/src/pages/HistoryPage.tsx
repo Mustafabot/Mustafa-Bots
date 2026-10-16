@@ -11,7 +11,8 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../api';
 import { DiffView } from '../components/DiffView';
 import { formatDuration } from '../components/progressText';
-import type { DiffLine, HistoryPageRow, HistoryTaskDetail, HistoryTaskRow } from '../types';
+import { decodeRuleset } from '../rulesetCodec';
+import type { DiffLine, HistoryPageRow, HistoryTaskDetail, HistoryTaskParams, HistoryTaskRow } from '../types';
 
 /** 任务状态中文标签；未知状态原样显示 */
 const STATUS_LABEL: Record<string, string> = {
@@ -85,6 +86,11 @@ function parseJsonObject(text: string | null): Record<string, unknown> {
 	}
 }
 
+/** 解析落库的参数对象；非对象或坏 JSON 退回空对象 */
+function parseParams(paramsJson: string): HistoryTaskParams {
+	return parseJsonObject(paramsJson) as HistoryTaskParams;
+}
+
 /** 命名空间编号转显示名：主命名空间单独标出，其余按编号 */
 function namespaceLabel(id: string): string {
 	return id === '0' ? '主命名空间' : `命名空间 ${id}`;
@@ -112,7 +118,7 @@ interface ParamEntry {
 
 /** 把 paramsJson（POS /api/task 的 values）转成可读的参数行 */
 function describeParams(paramsJson: string): ParamEntry[] {
-	const params = parseJsonObject(paramsJson);
+	const params = parseParams(paramsJson);
 	const entries: ParamEntry[] = [];
 
 	const wiki = params['--wiki'];
@@ -124,9 +130,9 @@ function describeParams(paramsJson: string): ParamEntry[] {
 	const addNs = params['--add-namespaces'];
 	if (Array.isArray(addNs)) entries.push({ label: '抓取的命名空间', value: addNs.map((id) => namespaceLabel(String(id))).join('、') });
 
-	// 其余开关：只列有实际取值的（true 与空串/未设区分开，避免堆一堆「否」）
+	// 其余开关：只列有实际取值的（true 与空串/未设区分开，避免堆一堆「否」）；__ruleset 是规则快照，另处渲染
 	for (const [key, value] of Object.entries(params)) {
-		if (key === '--wiki' || key === '--namespace' || key === '--add-namespaces') continue;
+		if (key === '--wiki' || key === '--namespace' || key === '--add-namespaces' || key === '__ruleset') continue;
 		const label = FLAG_LABEL[key] ?? key;
 		if (value === true) entries.push({ label, value: '是' });
 		else if (value === false || value === '') continue;
@@ -134,6 +140,32 @@ function describeParams(paramsJson: string): ParamEntry[] {
 		else if (Array.isArray(value)) entries.push({ label, value: value.map((item) => String(item)).join('、') });
 	}
 	return entries;
+}
+
+/** 详情里的一条规则（从 → 到） */
+interface RuleView {
+	from: string;
+	to: string;
+	regex: boolean;
+}
+
+/**
+ * 从落库参数里取当时规则集的快照。
+ * 服务端在有规则集时才落 `__ruleset`；旧记录（本改造之前跑的）没有这个键，`recorded` 为 false。
+ */
+function describeRules(paramsJson: string): { rules: RuleView[]; recorded: boolean } {
+	const snapshot = parseParams(paramsJson).__ruleset;
+	if (snapshot === undefined || snapshot === null || typeof snapshot !== 'object') return { rules: [], recorded: false };
+	const content = (snapshot as { content?: unknown }).content;
+	if (typeof content !== 'string') return { rules: [], recorded: true };
+	return { rules: decodeRuleset(content).rules, recorded: true };
+}
+
+/** 没有改后修订的行（空跑/跳过/失败）不提供 [看 diff]，改给一句说明 */
+function noDiffNote(row: HistoryPageRow): string {
+	if (row.action === 'skipped') return '未修改，无改动可看';
+	if (row.action === 'failed') return '未成功修改，无改动可看';
+	return '空跑记录，无改动可看';
 }
 
 /** 一行页面记录里「改前改后」的文字；取不到的版本以「—」占位 */
@@ -241,6 +273,7 @@ export function HistoryPage(): React.JSX.Element {
 	};
 
 	const paramEntries = detail === null ? [] : describeParams(detail.task.paramsJson);
+	const ruleInfo = detail === null ? { rules: [] as RuleView[], recorded: false } : describeRules(detail.task.paramsJson);
 
 	return (
 		<section className="history-page">
@@ -309,6 +342,18 @@ export function HistoryPage(): React.JSX.Element {
 								详情：{detail.task.label} · {formatTime(detail.task.startedAt)} · {STATUS_LABEL[detail.task.status] ?? detail.task.status}
 							</h3>
 
+							<div className="history-rules">
+								{!ruleInfo.recorded && <p className="hint">（未记录规则）</p>}
+								{ruleInfo.recorded && ruleInfo.rules.length === 0 && <p className="hint">这次任务没有记录规则。</p>}
+								{ruleInfo.rules.map((rule, index) => (
+									<p className="history-rule" key={index}>
+										规则：<code>{rule.regex ? `/${rule.from}/` : rule.from}</code>
+										<span className="rule-arrow">→</span>
+										<code>{rule.to === '' ? '（置空）' : rule.to}</code>
+									</p>
+								))}
+							</div>
+
 							<dl className="history-params">
 								{paramEntries.map((entry, index) => (
 									<div className="history-param" key={`${entry.label}-${index}`}>
@@ -316,7 +361,13 @@ export function HistoryPage(): React.JSX.Element {
 										<dd>{entry.value}</dd>
 									</div>
 								))}
-								{paramEntries.length === 0 && (
+								{ruleInfo.recorded && (
+									<div className="history-param">
+										<dt>规则数</dt>
+										<dd>{ruleInfo.rules.length} 条</dd>
+									</div>
+								)}
+								{paramEntries.length === 0 && !ruleInfo.recorded && (
 									<div className="history-param">
 										<dt>参数</dt>
 										<dd>（无）</dd>
@@ -343,9 +394,14 @@ export function HistoryPage(): React.JSX.Element {
 											<span className="history-page-title">{row.title}</span>
 											<span className={`history-action history-action-${row.action}`}>{ACTION_LABEL[row.action] ?? row.action}</span>
 											<span className="history-revids">{revidText(row)}</span>
-											<button type="button" className="history-diff-btn" onClick={() => toggleDiff(row.title)}>
-												{open.has(row.title) ? '收起 diff' : '看 diff'}
-											</button>
+											{row.newRevid === null ? (
+												// 没有改后修订（空跑/跳过/失败）：无可比版本，给说明而非点了必然落 missing 的 [看 diff]
+												<span className="hint history-no-diff">{noDiffNote(row)}</span>
+											) : (
+												<button type="button" className="history-diff-btn" onClick={() => toggleDiff(row.title)}>
+													{open.has(row.title) ? '收起 diff' : '看 diff'}
+												</button>
+											)}
 										</div>
 										{row.message !== null && row.message !== '' && <p className="hint history-page-msg">{row.message}</p>}
 										{open.has(row.title) && <div className="history-diff">{renderDiff(row.title)}</div>}
