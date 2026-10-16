@@ -187,42 +187,45 @@ export function TextReplacePage(): React.JSX.Element {
 		}
 	};
 
-	/** 启动一个动作：先存草稿，再拼 values，最后交给 hook */
+	/** 启动一个动作：按动作拼 values，交给 hook */
 	const startAction = async (action: Action, addNamespace?: number): Promise<void> => {
 		if (descriptor === null) return;
-		const name = presetName.trim();
-		if (name === '') {
-			setNotice({ text: '请先给这套规则起个名字（预设名），扫描/提交需要引用它。', kind: 'error' });
-			return;
-		}
-		// 脚本读的是规则集草稿，每次启动前先落盘，确保读到最新规则；空规则行没意义，先滤掉
-		const cleanedRules = form.rules.filter((rule) => rule.from !== '');
-		if (action !== 'sync' && cleanedRules.length === 0) {
-			setNotice({ text: '请至少填一条规则（「从」不能为空）。', kind: 'error' });
-			return;
-		}
-		try {
-			await api.rulesets.save(name, encodeRuleset({ ...form, rules: cleanedRules }));
-		} catch (reason) {
-			setNotice({ text: reason instanceof ApiError ? reason.message : '保存规则集草稿失败', kind: 'error' });
-			return;
-		}
-
 		const values: Record<string, ParamValue> = { '--wiki': wiki };
+		const body: StartTaskBody = { descriptorId: descriptor.id, values };
+
 		if (action === 'sync') {
+			// 抓取命名空间不读规则集（--sync-only 下脚本不构建也不校验规则），
+			// 因此不要求预设名、不落草稿，body 也不带 rulesetName——否则用户自上而下点这个按钮
+			// 会先撞上"请先起名字"，还会凭空留下一个空规则草稿
 			values['--sync-only'] = true;
 			if (addNamespace !== undefined) values['--add-namespaces'] = [String(addNamespace)];
 		} else {
+			const name = presetName.trim();
+			if (name === '') {
+				setNotice({ text: '请先给这套规则起个名字（预设名），扫描与提交需要引用它。', kind: 'error' });
+				return;
+			}
+			// 脚本读的是规则集草稿，启动前先落盘确保读到最新规则；空规则行没意义，先滤掉
+			const cleanedRules = form.rules.filter((rule) => rule.from !== '');
+			if (cleanedRules.length === 0) {
+				setNotice({ text: '请至少填一条规则（「从」不能为空）。', kind: 'error' });
+				return;
+			}
+			try {
+				await api.rulesets.save(name, encodeRuleset({ ...form, rules: cleanedRules }));
+			} catch (reason) {
+				setNotice({ text: reason instanceof ApiError ? reason.message : '保存规则集草稿失败', kind: 'error' });
+				return;
+			}
 			values['--no-sync'] = true;
 			values['--namespace'] = form.namespaces.map((ns) => String(ns));
 			if (action === 'scan') values['--scan-only'] = true;
 			if (action === 'dryrun') values['--dry-run'] = true;
+			body.rulesetName = name;
+			// 提交与空跑都按勾选的页面走；没勾选时空跑退化为全命名空间试跑
+			const titles = [...selected];
+			if ((action === 'submit' || action === 'dryrun') && titles.length > 0) body.submitTitles = titles;
 		}
-
-		const body: StartTaskBody = { descriptorId: descriptor.id, values, rulesetName: name };
-		// 提交与空跑都按勾选的页面走；没勾选时空跑退化为全命名空间试跑
-		const titles = [...selected];
-		if ((action === 'submit' || action === 'dryrun') && titles.length > 0) body.submitTitles = titles;
 
 		pendingRef.current = action;
 		setNotice(null);
@@ -365,6 +368,7 @@ export function TextReplacePage(): React.JSX.Element {
 					{scanName !== null && (
 						<>
 							<HitList
+								key={scanName}
 								scanName={scanName}
 								hits={hits}
 								total={hitTotal}

@@ -110,13 +110,20 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 						}
 						const injected: string[] = [];
 						if (descriptor.rulesetFlag) {
-							if (!rulesetName) throw new Error('该任务必须先选择规则集');
-							const draft = rulesets.read(rulesetName);
-							if (!draft) throw new Error(`规则集 "${rulesetName}" 没有本地草稿`);
-							const tempFile = resolve('data/gui/runtime', `${rulesetName}-${Date.now()}.json`);
-							mkdirSync(dirname(tempFile), { recursive: true });
-							writeFileSync(tempFile, draft.content, 'utf-8');
-							injected.push(descriptor.rulesetFlag, tempFile);
+							// 仅同步镜像（--sync-only）的任务不读规则集：CLI 在 sync 下不构建、不校验规则，
+							// 因此允许不带 rulesetName（抓取命名空间发生在用户配规则之前）。
+							// 其余情况仍强制要求规则集，避免无规则的任务把整个镜像跑一遍。
+							const syncOnly = values?.['--sync-only'] === true;
+							if (rulesetName) {
+								const draft = rulesets.read(rulesetName);
+								if (!draft) throw new Error(`规则集 "${rulesetName}" 没有本地草稿`);
+								const tempFile = resolve('data/gui/runtime', `${rulesetName}-${Date.now()}.json`);
+								mkdirSync(dirname(tempFile), { recursive: true });
+								writeFileSync(tempFile, draft.content, 'utf-8');
+								injected.push(descriptor.rulesetFlag, tempFile);
+							} else if (!syncOnly) {
+								throw new Error('该任务必须先选择规则集');
+							}
 						}
 						// 界面勾选的页面清单：脚本要读文件，所以由服务端落一个临时清单
 						if (submitTitles !== undefined) {
