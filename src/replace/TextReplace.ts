@@ -113,7 +113,7 @@ const USAGE = [
 	'说明:',
 	'  - 首次运行先全量同步镜像（耗时较长、可断点续传），之后每次运行增量同步后本地搜索，只编辑命中页',
 	'  - 替换在原始 wikitext 上进行，语义与 ReplaceText 一致（不感知语法、不做繁简转换）',
-	'  - regex 模式按 JavaScript 正则解析，to 支持 $1 等替换引用',
+	'  - regex 模式时 from 必须写成 /模式/flags 正则字面量（如 /苹果/gi），to 支持 $1 等替换引用',
 ].join('\n');
 
 const __filename = fileURLToPath(import.meta.url);

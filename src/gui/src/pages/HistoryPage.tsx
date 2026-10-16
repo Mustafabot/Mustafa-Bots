@@ -357,7 +357,7 @@ export function HistoryPage(): React.JSX.Element {
 								{ruleInfo.recorded && ruleInfo.rules.length === 0 && <p className="hint">这次任务没有记录规则。</p>}
 								{ruleInfo.rules.map((rule, index) => (
 									<p className="history-rule" key={index}>
-										规则：<code>{rule.regex ? `/${rule.from}/` : rule.from}</code>
+										规则：<code>{rule.from}</code>
 										<span className="rule-arrow">→</span>
 										<code>{rule.to === '' ? '（置空）' : rule.to}</code>
 									</p>

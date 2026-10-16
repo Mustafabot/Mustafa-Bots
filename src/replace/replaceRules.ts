@@ -6,13 +6,16 @@ import { createHash } from 'crypto';
 
 /** 单条替换规则（CLI 参数或 JSON 配置的 rules 元素） */
 export interface ReplaceRule {
-	/** 查找文本；regex 为 true 时按 JavaScript 正则解析 */
+	/**
+	 * 查找内容。regex 为 true 时必须是 `/pattern/flags` 形式的正则字面量
+	 * （如 `/苹果/gi`），大小写等由字面量里的 flags 决定；regex 为 false 时按字面文本处理。
+	 */
 	from: string;
 	/** 替换文本；regex 为 true 时支持 $1 等替换引用，可为空串（即删除） */
 	to: string;
-	/** 是否按正则解析 from */
+	/** 是否把 from 按正则字面量解析 */
 	regex?: boolean;
-	/** 是否忽略大小写 */
+	/** 纯文本规则是否忽略大小写；regex 为 true 时并入字面量 flags（多一个 i，无害） */
 	ignoreCase?: boolean;
 }
 
@@ -45,6 +48,28 @@ function escapeRegExp(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+/**
+ * 解析 `/pattern/flags` 形式的正则字面量。
+ * 贪婪匹配到最后一个 `/`、其后的字母串即 flags——这样 pattern 里的 `\/` 能原样保留，
+ * 不像"找第一个斜杠"那样把 `\/` 误当作结束符。
+ * 不是该形式返回 null，调用方据此报"不是正则字面量"。
+ */
+function parseRegexLiteral(from: string): { pattern: string; flags: string } | null {
+	const match = /^\/(.*)\/([a-z]*)$/s.exec(from);
+	if (!match) return null;
+	return { pattern: match[1], flags: match[2] };
+}
+
+/**
+ * 由字面量 flags 与 ignoreCase 拼出最终 flags：
+ * 必补 `g`（没有 g 时 countMatches/findMatches 只看首个命中），ignoreCase 再补 `i`（已有则不再叠加）。
+ */
+function buildFlags(flags: string, ignoreCase: boolean | undefined): string {
+	let out = flags.includes('g') ? flags : `g${flags}`;
+	if (ignoreCase && !out.includes('i')) out += 'i';
+	return out;
+}
+
 /** 校验单条规则，返回错误信息或 null */
 export function validateRule(rule: ReplaceRule, label: string): string | null {
 	if (typeof rule.from !== 'string' || rule.from === '') return `${label} 缺少 from`;
@@ -52,8 +77,10 @@ export function validateRule(rule: ReplaceRule, label: string): string | null {
 	if (rule.regex !== undefined && typeof rule.regex !== 'boolean') return `${label} regex 必须是布尔值`;
 	if (rule.ignoreCase !== undefined && typeof rule.ignoreCase !== 'boolean') return `${label} ignoreCase 必须是布尔值`;
 	if (rule.regex) {
+		const literal = parseRegexLiteral(rule.from);
+		if (literal === null) return `${label} from 不是 /pattern/flags 形式的正则字面量`;
 		try {
-			new RegExp(rule.from, `g${rule.ignoreCase ? 'i' : ''}`);
+			new RegExp(literal.pattern, buildFlags(literal.flags, rule.ignoreCase));
 		} catch (error) {
 			return `${label} from 不是合法正则: ${(error as Error).message}`;
 		}
@@ -74,28 +101,37 @@ function execAll(re: RegExp, text: string): MatchSpan[] {
 	return spans;
 }
 
-/** 预编译规则：纯文本（区分大小写）用字符串操作；其余情况用带 g 的正则 */
+/** 用给定 source/flags 建一套正则；useReplacementRefs 决定 to 是按 $1 引用还是按字面插入 */
+function preparedFromRegex(rule: ReplaceRule, source: string, flags: string, useReplacementRefs: boolean): PreparedRule {
+	// 三个独立实例，避免 g 标志的 lastIndex 在计数、明细与替换之间互相影响
+	const countRe = new RegExp(source, flags);
+	const detailRe = new RegExp(source, flags);
+	const replaceRe = new RegExp(source, flags);
+	return {
+		rule,
+		countMatches: (text) => text.match(countRe)?.length ?? 0,
+		findMatches: (text) => execAll(detailRe, text),
+		apply: (text) => {
+			const count = text.match(countRe)?.length ?? 0;
+			if (count === 0) return { text, count: 0 };
+			// 纯文本（只是忽略大小写）时 to 必须按字面插入：
+			// 用函数替换器绕开 String.replace 对 $&、$$ 等的模式解释；regex 模式则保留 $1 引用语义
+			const text2 = useReplacementRefs ? text.replace(replaceRe, rule.to) : text.replace(replaceRe, () => rule.to);
+			return { text: text2, count };
+		},
+	};
+}
+
+/** 预编译规则：正则字面量/忽略大小写走带 g 的正则；纯文本（区分大小写）用字符串操作 */
 export function prepareRule(rule: ReplaceRule): PreparedRule {
-	if (rule.regex || rule.ignoreCase) {
-		const source = rule.regex ? rule.from : escapeRegExp(rule.from);
-		const flags = `g${rule.ignoreCase ? 'i' : ''}`;
-		// 三个独立实例，避免 g 标志的 lastIndex 在计数、明细与替换之间互相影响
-		const countRe = new RegExp(source, flags);
-		const detailRe = new RegExp(source, flags);
-		const replaceRe = new RegExp(source, flags);
-		return {
-			rule,
-			countMatches: (text) => text.match(countRe)?.length ?? 0,
-			findMatches: (text) => execAll(detailRe, text),
-			apply: (text) => {
-				const count = text.match(countRe)?.length ?? 0;
-				if (count === 0) return { text, count: 0 };
-				// 纯文本（只是忽略大小写）时 to 必须按字面插入：
-				// 用函数替换器绕开 String.replace 对 $&、$$ 等的模式解释
-				const text2 = rule.regex ? text.replace(replaceRe, rule.to) : text.replace(replaceRe, () => rule.to);
-				return { text: text2, count };
-			},
-		};
+	if (rule.regex) {
+		const literal = parseRegexLiteral(rule.from);
+		// 校验阶段应已拦下非法字面量；此处兜底抛错，避免静默匹配不到任何东西
+		if (literal === null) throw new Error(`from 不是 /pattern/flags 形式的正则字面量: ${rule.from}`);
+		return preparedFromRegex(rule, literal.pattern, buildFlags(literal.flags, rule.ignoreCase), true);
+	}
+	if (rule.ignoreCase) {
+		return preparedFromRegex(rule, escapeRegExp(rule.from), 'gi', false);
 	}
 	return {
 		rule,
@@ -121,9 +157,9 @@ export function prepareRule(rule: ReplaceRule): PreparedRule {
 	};
 }
 
-/** 规则的展示标签：正则用 /…/ 包裹，纯文本用引号 */
+/** 规则的展示标签：正则模式下 from 本身就是字面量，直接展示；纯文本用引号 */
 export function describeRule(rule: ReplaceRule): string {
-	const from = rule.regex ? `/${trunc(rule.from, 40)}/` : `"${trunc(rule.from, 40)}"`;
+	const from = rule.regex ? trunc(rule.from, 40) : `"${trunc(rule.from, 40)}"`;
 	return `${from} → "${trunc(rule.to, 40)}"`;
 }
 

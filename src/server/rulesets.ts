@@ -1,10 +1,8 @@
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import type { MwApiParams } from 'wiki-saikou';
-import { createZhApi } from '../utils/createApi.js';
 import { checkModerationQueued, checkModerationQueuedError, extractApiError } from '../utils/retry.js';
-import clientlogin from '../clientlogin.js';
-import config from '../config.js';
+import { getSession } from './session.js';
 
 const PAGE_PREFIX = 'User:没有羽翼的格雷塔/BotConfig/';
 
@@ -100,11 +98,9 @@ export interface RulesetApi {
 
 export type RulesetApiFactory = () => Promise<RulesetApi>;
 
-/** 默认工厂：真实登录；exitOnFailure=false 时登录失败抛错而非退出进程，由路由层 .catch 降级成 500，不打挂 GUI 服务 */
+/** 默认工厂：复用共享登录会话；登录失败抛错而非退出进程，由路由层 .catch 降级成 500，不打挂 GUI 服务 */
 async function defaultRulesetApi(): Promise<RulesetApi> {
-	const api = createZhApi();
-	await clientlogin(api, config.zh.bot.clientUsername!, config.zh.bot.clientPassword!, config.zh.api, false);
-	return api;
+	return getSession('zh');
 }
 
 /**

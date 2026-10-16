@@ -5,9 +5,7 @@
  * 这样数据库不会膨胀，而"看 diff"永远反映的是线上真实内容。
  */
 import type { MwApiParams } from 'wiki-saikou';
-import clientlogin from '../clientlogin.js';
-import config from '../config.js';
-import { createCmApi, createZhApi } from '../utils/createApi.js';
+import { getSession } from './session.js';
 import { diffLines, summarizeDiff, type DiffLine, type DiffStats } from '../core/pageDiff.js';
 import { prepareRule, type ReplaceRule } from '../replace/replaceRules.js';
 
@@ -37,12 +35,9 @@ interface ApiPage {
 }
 
 async function defaultPageTextApi(wiki: WikiName): Promise<PageTextApi> {
-	const api = wiki === 'zh' ? createZhApi() : createCmApi();
-	// 萌百对 prop=revisions 这类正文读取要求登录（匿名会返回 action-notallowed）。
-	// exitOnFailure=false：登录失败要抛错而不是 process.exit——一个只读 GET 不该打挂 GUI 服务，
-	// 由调用方的 try/catch 把它降级成 error 结果。
-	await clientlogin(api, config[wiki].bot.clientUsername!, config[wiki].bot.clientPassword!, config[wiki].api, false);
-	return api;
+	// 复用共享登录会话：多个 diff 请求共享同一份已登录 api，不再每次取正文都登录一遍。
+	// 登录失败会抛错（exitOnFailure=false），由调用的 try/catch 降级成 error 结果，不打挂 GUI 服务。
+	return getSession(wiki);
 }
 
 export class PageTextService {

@@ -7,7 +7,6 @@ node_modules/
 
 /report/*.txt
 dist/
-src/server/public/
 AGENTS.md
 data/
 CLAUDE.md

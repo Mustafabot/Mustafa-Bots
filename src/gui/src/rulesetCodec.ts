@@ -3,7 +3,7 @@
 // 规则集 JSON 的形状（与 TextReplace 的 `--config-file` 一致）：
 // `{ summary?, namespaces?, rules: [{ from, to, regex?, ignoreCase? }] }`。
 // 界面上只暴露"从/到/正则"三样，`ignoreCase` 保留但不给勾选框——
-// 要用不区分大小写就勾上正则自己在 `from` 里写内联修饰符（`(?i:…)`）；`(?i)` 与 `/i` 在 JS 里都不是合法写法。
+// regex 为 true 时 `from` 已是 /模式/flags 正则字面量，要不区分大小写就在字面量里写 i（如 /苹果/gi）。
 
 /** 界面上的表单状态 */
 export interface RuleFormState {

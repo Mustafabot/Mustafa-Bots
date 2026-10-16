@@ -11,7 +11,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.typecheck.json && tsc --noEmit -p src/gui/tsconfig.json && tsc --noEmit -p src/gui/tsconfig.test.json",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:unit": "node --import tsx --test \"src/**/*.test.ts\"",
-    "gui": "npm run build:gui && tsx src/server/index.ts",
+    "gui": "tsx src/server/index.ts",
     "build:gui": "npm --prefix src/gui run build",
     "dev:gui": "concurrently -n server,vite -c blue,green \"tsx src/server/index.ts\" \"npm --prefix src/gui run dev\""
   },

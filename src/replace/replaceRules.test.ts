@@ -12,8 +12,13 @@ test('纯文本规则不允许 from 与 to 相同', () => {
 });
 
 test('非法正则被拒绝，错误里带原因', () => {
-	const message = validateRule({ from: 'a(', to: 'b', regex: true }, '规则');
+	const message = validateRule({ from: '/a(/g', to: 'b', regex: true }, '规则');
 	assert.ok(message?.includes('from 不是合法正则'));
+});
+
+test('regex 为 true 时 from 必须是 /pattern/flags 形式的正则字面量', () => {
+	const message = validateRule({ from: 'abc', to: 'x', regex: true }, '规则');
+	assert.equal(message, '规则 from 不是 /pattern/flags 形式的正则字面量');
 });
 
 test('纯文本规则按字面替换，$ 不被解释', () => {
@@ -27,8 +32,14 @@ test('忽略大小写的纯文本规则，to 里的 $ 按字面替换', () => {
 });
 
 test('正则规则支持 $1 引用', () => {
-	const prepared = prepareRule({ from: '(\\w+)→(\\w+)', to: '$2→$1', regex: true });
+	const prepared = prepareRule({ from: '/(\\w+)→(\\w+)/g', to: '$2→$1', regex: true });
 	assert.deepEqual(prepared.apply('a→b c→d'), { text: 'b→a d→c', count: 2 });
+});
+
+test('正则字面量里的 i 标志让匹配忽略大小写', () => {
+	const prepared = prepareRule({ from: '/apple/gi', to: '果', regex: true });
+	assert.equal(prepared.countMatches('apple 苹果 APPLE'), 2);
+	assert.deepEqual(prepared.apply('Apple apple'), { text: '果 果', count: 2 });
 });
 
 test('忽略大小写把纯文本当成不区分大小写的正则', () => {
@@ -46,7 +57,7 @@ test('findMatches 给出全文下标与实际匹配串', () => {
 });
 
 test('零宽匹配不会让 findMatches 陷入死循环', () => {
-	const prepared = prepareRule({ from: 'a*', to: '', regex: true });
+	const prepared = prepareRule({ from: '/a*/g', to: '', regex: true });
 	// /a*/ 在 'bbb' 的 4 个空位各匹配一次，必须能返回而不是卡死
 	assert.equal(prepared.findMatches('bbb').length, 4);
 });
