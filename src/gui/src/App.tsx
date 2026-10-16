@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react';
 import { ApiError, api } from './api';
 import { LoginForm } from './components/LoginForm';
+import { RunPage } from './pages/RunPage';
+import { TaskList } from './pages/TaskList';
 
 type Route = { name: 'list' } | { name: 'task'; id: string } | { name: 'history' };
 
@@ -44,9 +46,16 @@ export function App(): React.JSX.Element {
 
 	return (
 		<main className="app">
-			<h1>机器人控制台</h1>
-			<p>页面骨架（任务列表 / 任务页 / 历史页）将在后续任务填入。</p>
-			<p>当前路由：{JSON.stringify(route)}</p>
+			<header className="topbar">
+				<h1>机器人控制台</h1>
+				<nav>
+					<a href="#/">任务</a>
+					<a href="#/history">历史</a>
+				</nav>
+			</header>
+			{route.name === 'list' && <TaskList />}
+			{route.name === 'task' && <RunPage id={route.id} />}
+			{route.name === 'history' && <p className="hint">历史页将在后续任务填入。</p>}
 		</main>
 	);
 }
