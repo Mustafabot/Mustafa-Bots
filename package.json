@@ -8,7 +8,7 @@
     "build": "tsc",
     "dev": "tsx",
     "lint": "eslint .",
-    "typecheck": "tsc --noEmit",
+    "typecheck": "tsc --noEmit -p tsconfig.typecheck.json",
     "test": "echo \"Error: no test specified\" && exit 1",
     "test:unit": "node --import tsx --test \"src/**/*.test.ts\"",
     "gui": "tsx src/server/index.ts"
