@@ -3,8 +3,9 @@ import { ApiError, api } from './api';
 import { LoginForm } from './components/LoginForm';
 import { RunPage } from './pages/RunPage';
 import { TaskList } from './pages/TaskList';
+import { TextReplacePage } from './pages/TextReplacePage';
 
-type Route = { name: 'list' } | { name: 'task'; id: string } | { name: 'history' };
+type Route = { name: 'list' } | { name: 'task'; id: string } | { name: 'text-replace' } | { name: 'history' };
 
 /** 登录门状态：探测中 / 已认证 / 需登录 / 连不上服务 */
 type Gate = 'checking' | 'authed' | 'login' | 'offline';
@@ -12,6 +13,7 @@ type Gate = 'checking' | 'authed' | 'login' | 'offline';
 function parseHash(): Route {
 	const hash = window.location.hash.replace(/^#/, '');
 	if (hash.startsWith('/task/')) return { name: 'task', id: decodeURIComponent(hash.slice('/task/'.length)) };
+	if (hash.startsWith('/text-replace')) return { name: 'text-replace' };
 	if (hash.startsWith('/history')) return { name: 'history' };
 	return { name: 'list' };
 }
@@ -50,11 +52,13 @@ export function App(): React.JSX.Element {
 				<h1>机器人控制台</h1>
 				<nav>
 					<a href="#/">任务</a>
+					<a href="#/text-replace">文本替换</a>
 					<a href="#/history">历史</a>
 				</nav>
 			</header>
 			{route.name === 'list' && <TaskList />}
 			{route.name === 'task' && <RunPage id={route.id} />}
+			{route.name === 'text-replace' && <TextReplacePage />}
 			{route.name === 'history' && <p className="hint">历史页将在后续任务填入。</p>}
 		</main>
 	);
