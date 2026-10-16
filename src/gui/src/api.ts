@@ -1,29 +1,101 @@
-// 前端接口封装骨架：本任务只建基底（错误类型 + 请求助手），
-// 具体接口方法与类型由后续任务补齐。所有请求同源（开发时经 Vite 代理），无需配置基地址。
+// 前端接口封装：把一期冻结的 HTTP 接口包成带类型的函数。
+// 统一同源带 cookie、统一把非 2xx 转成 ApiError——调用方只管拿数据、认状态码。
+// Vite/Bundler 解析，import 不带 .js 后缀。
+import type {
+	HistoryDiffResult,
+	HistoryTaskDetail,
+	HistoryTaskRow,
+	NamespaceList,
+	PublishResult,
+	RulesetDraft,
+	RulesetRemote,
+	RulesetSummary,
+	ScanDiffResult,
+	ScanPageSlice,
+	ScanResultMeta,
+	StartTaskBody,
+	TaskDescriptor,
+	TaskRecord,
+} from './types';
 
-/** 接口错误：携带 HTTP 状态码与服务端返回的错误信息。 */
+/**
+ * 接口错误：携带 HTTP 状态码、服务端错误信息与解析后的响应体。
+ * 调用方按 `status` 判定（如 401 触发登录门）；`body` 供取服务端附带的业务信息——
+ * 两个 diff 接口的 `reason`（区分"内容相同"与真错误）、发布接口的冲突版本号。
+ */
 export class ApiError extends Error {
-	constructor(
-		readonly status: number,
-		message: string,
-	) {
+	readonly status: number;
+	readonly body: unknown;
+	constructor(status: number, message: string, body: unknown = null) {
 		super(message);
 		this.name = 'ApiError';
+		this.status = status;
+		this.body = body;
 	}
 }
 
-/** 统一的请求助手：解析 JSON 响应，非 2xx 时抛 ApiError。 */
-export async function request<T>(path: string, init?: RequestInit): Promise<T> {
-	const res = await fetch(path, init);
-	if (!res.ok) {
-		let message = `请求失败（${res.status}）`;
-		try {
-			const body = (await res.json()) as { error?: string };
-			if (body.error) message = body.error;
-		} catch {
-			// 响应体不是 JSON 时沿用默认信息
-		}
-		throw new ApiError(res.status, message);
+/** 解析响应文本为 JSON；空体或非 JSON 时返回 null（204、静态回退页等会走到这里） */
+function parseBody(text: string): unknown {
+	if (text === '') return null;
+	try {
+		return JSON.parse(text);
+	} catch {
+		return null;
 	}
-	return (await res.json()) as T;
 }
+
+/**
+ * 统一请求助手：同源带 gui_session cookie，解析 JSON 响应，非 2xx 抛 ApiError。
+ * 先读 text 再手动 parse，而非直接 res.json()——响应体可能为空或不是 JSON。
+ */
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
+	const res = await fetch(path, { credentials: 'same-origin', ...init });
+	const body = parseBody(await res.text());
+	if (!res.ok) {
+		const message = (body as { error?: string } | null)?.error ?? `请求失败（${res.status}）`;
+		throw new ApiError(res.status, message, body);
+	}
+	return body as T;
+}
+
+/** JSON 请求体的 init，POST 与 PUT 共用 */
+function jsonInit(method: 'POST' | 'PUT', data?: unknown): RequestInit {
+	return {
+		method,
+		headers: { 'content-type': 'application/json' },
+		...(data === undefined ? {} : { body: JSON.stringify(data) }),
+	};
+}
+
+/** 把字符串编码进 URL 段或查询值，避免标题里的斜杠、空格、中文破坏路径 */
+function seg(value: string): string {
+	return encodeURIComponent(value);
+}
+
+/** 全部接口方法；失败一律抛 ApiError */
+export const api = {
+	login: (password: string) => request<{ ok: boolean }>('/api/auth/login', jsonInit('POST', { password })),
+	descriptors: () => request<{ descriptors: TaskDescriptor[] }>('/api/descriptors'),
+	task: {
+		get: () => request<{ task: TaskRecord | null }>('/api/task'),
+		start: (body: StartTaskBody) => request<{ task: TaskRecord }>('/api/task', jsonInit('POST', body)),
+		abort: () => request<{ ok: boolean }>('/api/task/abort', jsonInit('POST')),
+	},
+	namespaces: (wiki: 'zh' | 'cm') => request<NamespaceList>(`/api/namespaces?wiki=${seg(wiki)}`),
+	scans: {
+		list: () => request<{ scans: ScanResultMeta[] }>('/api/scans'),
+		page: (name: string, offset: number, limit: number) => request<ScanPageSlice>(`/api/scans/${seg(name)}?offset=${offset}&limit=${limit}`),
+		diff: (name: string, page: string) => request<ScanDiffResult>(`/api/scans/${seg(name)}/diff?page=${seg(page)}`),
+	},
+	history: {
+		list: () => request<{ tasks: HistoryTaskRow[] }>('/api/history'),
+		detail: (id: string) => request<HistoryTaskDetail>(`/api/history/${seg(id)}`),
+		diff: (id: string, page: string) => request<HistoryDiffResult>(`/api/history/${seg(id)}/diff?page=${seg(page)}`),
+	},
+	rulesets: {
+		list: () => request<{ rulesets: RulesetSummary[] }>('/api/rulesets'),
+		read: (name: string) => request<{ draft: RulesetDraft | null; remote: RulesetRemote }>(`/api/rulesets/${seg(name)}`),
+		save: (name: string, content: string) => request<{ draft: RulesetDraft }>(`/api/rulesets/${seg(name)}`, jsonInit('PUT', { content })),
+		publish: (name: string) => request<PublishResult>(`/api/rulesets/${seg(name)}/publish`, jsonInit('POST')),
+	},
+};
