@@ -1,0 +1,10 @@
+{
+	// GUI 测试文件的类型检查：浏览器工程（tsconfig.json）看不到 Node 类型，
+	// 故单独一份配置只为测试文件补上 node（以及被测试间接引入的 react）类型。
+	"extends": "./tsconfig.json",
+	"compilerOptions": {
+		"types": ["node", "react", "react-dom"]
+	},
+	"include": ["src/**/*.test.ts"],
+	"exclude": ["node_modules"]
+}
