@@ -4,6 +4,9 @@ import { LoginForm } from './components/LoginForm';
 
 type Route = { name: 'list' } | { name: 'task'; id: string } | { name: 'history' };
 
+/** 登录门状态：探测中 / 已认证 / 需登录 / 连不上服务 */
+type Gate = 'checking' | 'authed' | 'login' | 'offline';
+
 function parseHash(): Route {
 	const hash = window.location.hash.replace(/^#/, '');
 	if (hash.startsWith('/task/')) return { name: 'task', id: decodeURIComponent(hash.slice('/task/'.length)) };
@@ -13,7 +16,7 @@ function parseHash(): Route {
 
 export function App(): React.JSX.Element {
 	const [route, setRoute] = useState<Route>(parseHash);
-	const [authed, setAuthed] = useState<boolean | null>(null);
+	const [gate, setGate] = useState<Gate>('checking');
 
 	useEffect(() => {
 		const onHash = () => setRoute(parseHash());
@@ -22,16 +25,22 @@ export function App(): React.JSX.Element {
 	}, []);
 
 	useEffect(() => {
-		// 探测登录态：口令模式下未登录会 401，据此显示登录框；
-		// 无口令模式下该请求不会 401，自然直达主界面。
+		// 探测登录态，分三种结果：
+		// - 401：口令模式未登录，出登录框
+		// - 其它 ApiError：无口令模式或已登录，直达主界面
+		// - 非 ApiError（fetch 本身失败）：服务没起或断网，显示无法连接，而不是让页面看着能用却处处报错
 		api.task
 			.get()
-			.then(() => setAuthed(true))
-			.catch((error: unknown) => setAuthed(error instanceof ApiError && error.status === 401 ? false : true));
+			.then(() => setGate('authed'))
+			.catch((error: unknown) => {
+				if (!(error instanceof ApiError)) setGate('offline');
+				else setGate(error.status === 401 ? 'login' : 'authed');
+			});
 	}, []);
 
-	if (authed === null) return <main className="app">正在连接…</main>;
-	if (!authed) return <LoginForm onDone={() => setAuthed(true)} />;
+	if (gate === 'checking') return <main className="app">正在连接…</main>;
+	if (gate === 'offline') return <main className="app">无法连接 GUI 服务，请确认 npm run gui 已启动。</main>;
+	if (gate === 'login') return <LoginForm onDone={() => setGate('authed')} />;
 
 	return (
 		<main className="app">

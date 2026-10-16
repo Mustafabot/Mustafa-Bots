@@ -266,7 +266,12 @@ export interface RulesetRemote {
 	revid: number | null;
 }
 
-/** 发布结果（服务端 RulesetPublisher.publish 的返回；200 只回 ok:true 分支） */
-export type PublishResult =
-	| { ok: true; revid: number | null }
-	| { ok: false; reason: 'conflict' | 'missing'; remote: string | null; remoteRevid: number | null };
+/**
+ * 发布成功的结果（服务端 RulesetPublisher.publish 的 ok:true 分支）。
+ * 冲突 / 线上不存在时服务端回 409，由 `api.rulesets.publish` 抛 ApiError——
+ * 失败信息在 `ApiError.body`（reason 为 conflict/missing，另附 remote/remoteRevid），不在此类型里。
+ */
+export interface PublishSuccess {
+	ok: true;
+	revid: number | null;
+}

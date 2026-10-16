@@ -6,7 +6,7 @@ import type {
 	HistoryTaskDetail,
 	HistoryTaskRow,
 	NamespaceList,
-	PublishResult,
+	PublishSuccess,
 	RulesetDraft,
 	RulesetRemote,
 	RulesetSummary,
@@ -19,14 +19,25 @@ import type {
 } from './types';
 
 /**
+ * 失败响应体里可能带的字段：diff 接口的 `reason`、发布冲突的远端信息（remote / remoteRevid）等。
+ * `reason` 是 diff 接口的 `'missing' | 'unchanged' | 'error'` 与发布的 `'conflict' | 'missing'` 的并集，
+ * 消费方据它区分"内容相同"与真错误。其余字段经索引签名兜底。
+ */
+export interface ApiErrorBody {
+	error?: string;
+	reason?: 'missing' | 'unchanged' | 'error' | 'conflict';
+	[key: string]: unknown;
+}
+
+/**
  * 接口错误：携带 HTTP 状态码、服务端错误信息与解析后的响应体。
- * 调用方按 `status` 判定（如 401 触发登录门）；`body` 供取服务端附带的业务信息——
+ * 调用方按 `status` 判定（如 401 触发登录门）；`body` 取服务端附带的业务信息——
  * 两个 diff 接口的 `reason`（区分"内容相同"与真错误）、发布接口的冲突版本号。
  */
 export class ApiError extends Error {
 	readonly status: number;
-	readonly body: unknown;
-	constructor(status: number, message: string, body: unknown = null) {
+	readonly body: ApiErrorBody | null;
+	constructor(status: number, message: string, body: ApiErrorBody | null = null) {
 		super(message);
 		this.name = 'ApiError';
 		this.status = status;
@@ -52,8 +63,8 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
 	const res = await fetch(path, { credentials: 'same-origin', ...init });
 	const body = parseBody(await res.text());
 	if (!res.ok) {
-		const message = (body as { error?: string } | null)?.error ?? `请求失败（${res.status}）`;
-		throw new ApiError(res.status, message, body);
+		const message = (body as ApiErrorBody | null)?.error ?? `请求失败（${res.status}）`;
+		throw new ApiError(res.status, message, body as ApiErrorBody | null);
 	}
 	return body as T;
 }
@@ -96,6 +107,6 @@ export const api = {
 		list: () => request<{ rulesets: RulesetSummary[] }>('/api/rulesets'),
 		read: (name: string) => request<{ draft: RulesetDraft | null; remote: RulesetRemote }>(`/api/rulesets/${seg(name)}`),
 		save: (name: string, content: string) => request<{ draft: RulesetDraft }>(`/api/rulesets/${seg(name)}`, jsonInit('PUT', { content })),
-		publish: (name: string) => request<PublishResult>(`/api/rulesets/${seg(name)}/publish`, jsonInit('POST')),
+		publish: (name: string) => request<PublishSuccess>(`/api/rulesets/${seg(name)}/publish`, jsonInit('POST')),
 	},
 };
