@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { ApiError, api } from './api';
 import { LoginForm } from './components/LoginForm';
+import { HistoryPage } from './pages/HistoryPage';
 import { RunPage } from './pages/RunPage';
 import { TaskList } from './pages/TaskList';
 import { TextReplacePage } from './pages/TextReplacePage';
@@ -59,7 +60,7 @@ export function App(): React.JSX.Element {
 			{route.name === 'list' && <TaskList />}
 			{route.name === 'task' && <RunPage id={route.id} />}
 			{route.name === 'text-replace' && <TextReplacePage />}
-			{route.name === 'history' && <p className="hint">历史页将在后续任务填入。</p>}
+			{route.name === 'history' && <HistoryPage />}
 		</main>
 	);
 }

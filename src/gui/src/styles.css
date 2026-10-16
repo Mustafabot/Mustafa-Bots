@@ -644,3 +644,161 @@ button.danger:hover:not(:disabled) {
 	padding: 4px 0;
 	font-size: 12px;
 }
+
+/* ── 历史页 ── */
+.history-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 16px;
+	margin: 16px 0;
+}
+.history-search,
+.history-filter {
+	display: inline-flex;
+	align-items: center;
+	gap: 8px;
+	font-size: 13px;
+	font-weight: 600;
+	color: #334155;
+}
+.history-search input {
+	width: 260px;
+	padding: 6px 10px;
+	border: 1px solid #cbd5e1;
+	border-radius: 6px;
+	font-size: 14px;
+	font-weight: 400;
+}
+.history-filter select {
+	padding: 6px 10px;
+	border: 1px solid #cbd5e1;
+	border-radius: 6px;
+	font-size: 14px;
+	font-weight: 400;
+}
+.history-table {
+	width: 100%;
+	border-collapse: collapse;
+	background: #fff;
+	border: 1px solid #e2e6ea;
+	border-radius: 10px;
+	overflow: hidden;
+	font-size: 14px;
+}
+.history-table th,
+.history-table td {
+	text-align: left;
+	padding: 9px 14px;
+	border-bottom: 1px solid #f1f5f9;
+}
+.history-table th {
+	font-size: 13px;
+	color: #64748b;
+	background: #f8fafc;
+}
+.history-row {
+	cursor: pointer;
+}
+.history-row:hover {
+	background: #f1f5f9;
+}
+.history-row.selected {
+	background: #eef6ff;
+}
+.history-time,
+.history-duration {
+	white-space: nowrap;
+	color: #475569;
+}
+.history-detail {
+	background: #fff;
+	border: 1px solid #e2e6ea;
+	border-radius: 10px;
+	padding: 16px;
+	margin: 16px 0;
+}
+.history-detail h3 {
+	margin: 0 0 12px;
+	font-size: 15px;
+}
+.history-detail h4 {
+	margin: 20px 0 8px;
+	font-size: 14px;
+}
+.history-params {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 6px 28px;
+	margin: 0;
+}
+.history-param {
+	display: flex;
+	gap: 8px;
+	font-size: 13px;
+}
+.history-param dt {
+	color: #64748b;
+}
+.history-param dd {
+	margin: 0;
+	color: #1c1e21;
+}
+.history-pages {
+	list-style: none;
+	margin: 8px 0 0;
+	padding: 0;
+	display: grid;
+	gap: 4px;
+}
+.history-page-row {
+	border-top: 1px solid #f1f5f9;
+	padding: 8px 0;
+}
+.history-page-line {
+	display: flex;
+	align-items: center;
+	gap: 10px;
+}
+.history-page-line input[type="checkbox"] {
+	width: 16px;
+	height: 16px;
+}
+.history-page-title {
+	font-weight: 600;
+}
+.history-action {
+	font-size: 12px;
+	color: #475569;
+	background: #eef1f5;
+	border-radius: 4px;
+	padding: 0 6px;
+}
+.history-action-changed {
+	color: #15803d;
+	background: #dcfce7;
+}
+.history-action-failed {
+	color: #b91c1c;
+	background: #fee2e2;
+}
+.history-revids {
+	color: #64748b;
+	font-size: 13px;
+}
+.history-diff-btn {
+	margin-left: auto;
+}
+.history-page-msg {
+	padding-left: 34px;
+}
+.history-diff {
+	margin: 8px 0 4px 34px;
+}
+.history-revert {
+	display: flex;
+	align-items: center;
+	justify-content: flex-end;
+	gap: 10px;
+	margin-top: 20px;
+}
