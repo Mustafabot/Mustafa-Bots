@@ -172,6 +172,12 @@ async function patrolEditPhase(
 
 			totalHit++;
 
+			// 检查限制（空跑同样受限，否则 --limit 被静默忽略、事件刷满缓冲）
+			if (limit > 0 && (successCount + skipCount) >= limit) {
+				console.log(`${PREFIX} 已达限制 ${limit}，停止`);
+				break outer;
+			}
+
 			if (dryRun) {
 				const reason = tagMatch ? getTagReason(tags) : `用户组:${user}`;
 				console.log(`  [DRY-RUN] rcid=${rcid} 用户:${user} (${reason}) → 将巡逻`);
@@ -180,12 +186,6 @@ async function patrolEditPhase(
 				successCount++;
 				emit({ type: 'edit', title: rc.title, status: 'changed', oldRevid: null, newRevid: null, message: `[DRY-RUN] rcid=${rcid} 用户:${user}（${reason}）` });
 				continue;
-			}
-
-			// 检查限制
-			if (limit > 0 && (successCount + skipCount) >= limit) {
-				console.log(`${PREFIX} 已达限制 ${limit}，停止`);
-				break outer;
 			}
 
 			// 执行巡逻
@@ -344,6 +344,12 @@ async function patrolMovedPhase(
 		if (hitKind === 'usersubpage') userSubpageHit++;
 		else draftHit++;
 
+		// 检查限制（空跑同样受限，否则 --limit 被静默忽略、事件刷满缓冲）
+		if (limit > 0 && (successCount + skipCount) >= limit) {
+			console.log(`${PREFIX} 已达限制 ${limit}，停止`);
+			break;
+		}
+
 		if (dryRun) {
 			const kindLabel = hitKind === 'draft' ? '草稿' : '用户子页';
 			console.log(`  [DRY-RUN] rcid=${rc.rcid} 页面:${rc.title} [${kindLabel}] (打回者:${moveInfo.operator} → ${moveInfo.targetTitle}) → 将巡逻`);
@@ -351,11 +357,6 @@ async function patrolMovedPhase(
 			successCount++;
 			emit({ type: 'edit', title: rc.title, status: 'changed', oldRevid: null, newRevid: null, message: `[DRY-RUN] rcid=${rc.rcid} ${kindLabel}` });
 			continue;
-		}
-
-		if (limit > 0 && (successCount + skipCount) >= limit) {
-			console.log(`${PREFIX} 已达限制 ${limit}，停止`);
-			break;
 		}
 
 		try {
