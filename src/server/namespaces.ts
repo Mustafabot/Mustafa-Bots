@@ -9,8 +9,6 @@ import { existsSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 import type { MwApiParams } from 'wiki-saikou';
-import config from '../config.js';
-import clientlogin from '../clientlogin.js';
 import { createCmApi, createZhApi } from '../utils/createApi.js';
 import { DEFAULT_MIRROR_NAMESPACES } from '../utils/siteMirror.js';
 
@@ -40,12 +38,9 @@ export interface SiteinfoApi {
 
 export type SiteinfoApiFactory = (wiki: 'zh' | 'cm') => Promise<SiteinfoApi>;
 
-/** 默认工厂：按站点登录 */
+/** 默认工厂：meta=siteinfo 是公开查询，无需登录；createZhApi/createCmApi 已注入 User-Agent */
 async function defaultSiteinfoApi(wiki: 'zh' | 'cm'): Promise<SiteinfoApi> {
-	const api = wiki === 'zh' ? createZhApi() : createCmApi();
-	const siteConfig = config[wiki];
-	await clientlogin(api, siteConfig.bot.clientUsername!, siteConfig.bot.clientPassword!, siteConfig.api);
-	return api;
+	return wiki === 'zh' ? createZhApi() : createCmApi();
 }
 
 /** siteinfo 返回的命名空间条目：formatversion=2 用 name，老写法用 * */
