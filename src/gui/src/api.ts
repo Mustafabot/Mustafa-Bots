@@ -6,6 +6,7 @@ import type {
 	HistoryTaskDetail,
 	HistoryTaskRow,
 	NamespaceList,
+	PublishOptions,
 	PublishSuccess,
 	RulesetDraft,
 	RulesetRemote,
@@ -105,8 +106,12 @@ export const api = {
 	},
 	rulesets: {
 		list: () => request<{ rulesets: RulesetSummary[] }>('/api/rulesets'),
-		read: (name: string) => request<{ draft: RulesetDraft | null; remote: RulesetRemote }>(`/api/rulesets/${seg(name)}`),
-		save: (name: string, content: string) => request<{ draft: RulesetDraft }>(`/api/rulesets/${seg(name)}`, jsonInit('PUT', { content })),
-		publish: (name: string) => request<PublishSuccess>(`/api/rulesets/${seg(name)}/publish`, jsonInit('POST')),
+		/** `page` 指定要看哪一页的线上内容，缺省看草稿记的目标页 */
+		read: (name: string, page?: string) =>
+			request<{ draft: RulesetDraft | null; remote: RulesetRemote }>(`/api/rulesets/${seg(name)}${page === undefined || page.trim() === '' ? '' : `?page=${seg(page.trim())}`}`),
+		/** `page` 指定目标配置页；缺省沿用草稿记的页 */
+		save: (name: string, content: string, page?: string) =>
+			request<{ draft: RulesetDraft }>(`/api/rulesets/${seg(name)}`, jsonInit('PUT', { content, ...(page === undefined ? {} : { page }) })),
+		publish: (name: string, options: PublishOptions = {}) => request<PublishSuccess>(`/api/rulesets/${seg(name)}/publish`, jsonInit('POST', options)),
 	},
 };

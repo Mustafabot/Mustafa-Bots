@@ -9,7 +9,7 @@ import { isLocalHeaderHost, isLocalOriginUrl, issueToken, verifyPassword, type S
 import { HistoryStore } from './history.js';
 import { NamespaceService } from './namespaces.js';
 import { PageTextService } from './pageText.js';
-import { RulesetPublisher, RulesetStore } from './rulesets.js';
+import { RulesetPublisher, RulesetStore, draftBaseline, pageTitleFor, resolveRunRuleset, type RunRuleset } from './rulesets.js';
 import { ScanStore } from './scans.js';
 import { TaskRunner, type TaskRecord } from './taskRunner.js';
 
@@ -93,10 +93,11 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 			if (url.pathname === '/api/task' && req.method === 'POST') {
 				readBody(req).then((body) => {
 					try {
-						const { descriptorId, values, rulesetName, submitTitles } = JSON.parse(body || '{}') as {
+						const { descriptorId, values, rulesetName, rulesetContent, submitTitles } = JSON.parse(body || '{}') as {
 							descriptorId: string;
 							values: Record<string, string | number | boolean | string[]>;
 							rulesetName?: string;
+							rulesetContent?: string;
 							submitTitles?: string[];
 						};
 						const descriptor = findDescriptor(descriptorId);
@@ -110,23 +111,20 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 						}
 						const injected: string[] = [];
 						// 跑这次任务所用规则集的快照：历史库只存参数与页面 revid，事后回溯要知道"当时跑的是哪套规则"，
-						// 故把草稿原文随参数一并落库（几百字节的元数据，与"不存 diff 正文"不冲突）
-						let rulesetSnapshot: { name: string; content: string } | null = null;
+						// 故把规则原文随参数一并落库（几百字节的元数据，与"不存 diff 正文"不冲突）
+						let rulesetSnapshot: RunRuleset | null = null;
 						if (descriptor.rulesetFlag) {
 							// 仅同步镜像（--sync-only）的任务不读规则集：CLI 在 sync 下不构建、不校验规则，
-							// 因此允许不带 rulesetName（抓取命名空间发生在用户配规则之前）。
-							// 其余情况仍强制要求规则集，避免无规则的任务把整个镜像跑一遍。
+							// 因此可以两样都不带（抓取命名空间发生在用户配规则之前）。
+							// 其余情况要嘛带规则原文（界面上现填的规则，不必先存预设），要嘛指定本地草稿。
 							const syncOnly = values?.['--sync-only'] === true;
-							if (rulesetName) {
-								const draft = rulesets.read(rulesetName);
-								if (!draft) throw new Error(`规则集 "${rulesetName}" 没有本地草稿`);
-								rulesetSnapshot = { name: rulesetName, content: draft.content };
-								const tempFile = resolve('data/gui/runtime', `${rulesetName}-${Date.now()}.json`);
+							rulesetSnapshot = resolveRunRuleset(rulesets, { rulesetName, rulesetContent, syncOnly });
+							if (rulesetSnapshot) {
+								// 文件名不能用规则集名：名字可能是页面标题，带 / 与 : 会拼出非法路径
+								const tempFile = resolve('data/gui/runtime', `ruleset-${Date.now()}.json`);
 								mkdirSync(dirname(tempFile), { recursive: true });
-								writeFileSync(tempFile, draft.content, 'utf-8');
+								writeFileSync(tempFile, rulesetSnapshot.content, 'utf-8');
 								injected.push(descriptor.rulesetFlag, tempFile);
-							} else if (!syncOnly) {
-								throw new Error('该任务必须先选择规则集');
 							}
 						}
 						// 界面勾选的页面清单：脚本要读文件，所以由服务端落一个临时清单
@@ -311,16 +309,27 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 			if (rulesetMatch) {
 				const name = decodeURIComponent(rulesetMatch[1]);
 				if (rulesetMatch[2] === '/publish' && req.method === 'POST') {
-					publisher
-						.publish(name)
-						.then((result) => sendJson(res, result.ok ? 200 : 409, result))
-						.catch((error: Error) => sendJson(res, 500, { error: error.message }));
+					readBody(req)
+						.then((body) => {
+							try {
+								const { page, force } = JSON.parse(body || '{}') as { page?: string; force?: boolean };
+								publisher
+									.publish(name, { page, force: force === true })
+									.then((result) => sendJson(res, result.ok ? 200 : 409, result))
+									.catch((error: Error) => sendJson(res, 500, { error: error.message }));
+							} catch (error) {
+								sendJson(res, 400, { error: (error as Error).message });
+							}
+						})
+						.catch((error: Error) => sendJson(res, 400, { error: error.message }));
 					return;
 				}
 				if (req.method === 'GET') {
 					const draft = rulesets.read(name);
+					// 线上内容按目标页取：显式传的页 > 草稿记的页 > 默认前缀拼名
+					const page = (url.searchParams.get('page') ?? '').trim() || draft?.page || pageTitleFor(name);
 					publisher
-						.fetchRemote(name)
+						.fetchRemote(page)
 						.then((remote) => sendJson(res, 200, { draft, remote }))
 						.catch((error: Error) => sendJson(res, 500, { error: error.message }));
 					return;
@@ -328,7 +337,7 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 				if (req.method === 'PUT') {
 					readBody(req).then((body) => {
 						try {
-							const { content } = JSON.parse(body || '{}') as { content?: string };
+							const { content, page } = JSON.parse(body || '{}') as { content?: string; page?: string };
 							// content 不是字符串（含空 body、上传中断被 readBody 兜底成 ''）时必须拒绝：
 							// 直接写盘会把已存草稿覆盖成没有正文的残骸，而 200 会让调用方毫无察觉
 							if (typeof content !== 'string') {
@@ -336,7 +345,8 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 								return;
 							}
 							const existing = rulesets.read(name);
-							sendJson(res, 200, { draft: rulesets.write(name, content, existing?.baseRevid ?? null) });
+							const target = typeof page === 'string' && page.trim() !== '' ? page.trim() : undefined;
+							sendJson(res, 200, { draft: rulesets.write(name, content, draftBaseline(existing, target), target) });
 						} catch (error) {
 							sendJson(res, 400, { error: (error as Error).message });
 						}

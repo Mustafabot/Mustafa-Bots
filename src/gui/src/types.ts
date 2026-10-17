@@ -48,7 +48,7 @@ export interface TaskDescriptor {
 	progressFlag: string;
 	/** 静默人类可读日志的开关，由服务端自动附加 */
 	quietFlag: string;
-	/** 规则集参数开关；存在则该任务必须选择一个规则集 */
+	/** 规则集参数开关；存在则该任务要有规则（内容直传或本地草稿），仅同步镜像除外 */
 	rulesetFlag?: string;
 }
 
@@ -59,8 +59,10 @@ export type ParamValue = string | number | boolean | string[];
 export interface StartTaskBody {
 	descriptorId: string;
 	values: Record<string, ParamValue>;
-	/** 该任务声明了 rulesetFlag 时必填 */
+	/** 规则集标签（进历史库）；指定本地草稿时也可当草稿名 */
 	rulesetName?: string;
+	/** 规则集 JSON 原文，随任务直接下发，不必先存预设；与 rulesetName 同给时以它为准 */
+	rulesetContent?: string;
 	/** 提交选中的页面清单（服务端落成临时文件后注入 --submit） */
 	submitTitles?: string[];
 }
@@ -259,6 +261,8 @@ export interface HistoryTaskParams {
 /** 规则集草稿 */
 export interface RulesetDraft {
 	name: string;
+	/** 发布目标页 */
+	page: string;
 	baseRevid: number | null;
 	content: string;
 	updatedAt: number;
@@ -275,6 +279,14 @@ export interface RulesetSummary {
 export interface RulesetRemote {
 	content: string | null;
 	revid: number | null;
+}
+
+/** 发布的可选项（镜像 src/server/rulesets.ts 的 PublishOptions） */
+export interface PublishOptions {
+	/** 目标配置页标题；缺省用草稿记录的页 */
+	page?: string;
+	/** 以线上当前版本为基线强行覆盖（冲突后比对过线上内容再发） */
+	force?: boolean;
 }
 
 /**

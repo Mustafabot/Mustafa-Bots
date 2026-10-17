@@ -445,6 +445,13 @@ button.danger:hover:not(:disabled) {
 }
 
 /* ── 命名空间 ── */
+.ns-toolbar {
+	display: flex;
+	flex-wrap: wrap;
+	align-items: center;
+	gap: 10px;
+	margin-bottom: 10px;
+}
 .ns-grid {
 	display: grid;
 	grid-template-columns: repeat(auto-fill, minmax(180px, 1fr));
@@ -506,6 +513,10 @@ button.danger:hover:not(:disabled) {
 	border: 1px solid #cbd5e1;
 	border-radius: 6px;
 	font-size: 14px;
+}
+.preset-page {
+	flex: 1;
+	min-width: 320px;
 }
 .conflict-remote {
 	margin-top: 10px;

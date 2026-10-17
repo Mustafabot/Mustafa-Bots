@@ -1,12 +1,13 @@
 // 全站文本替换页：填规则 → 扫描看命中 → 勾选提交。
 //
 // 流程（规格）：
-//   站点下拉 → 规则表单（一行一条，只留正则勾选）→ 命名空间复选框 → 预设下拉 + 保存
+//   站点下拉 → 规则表单（一行一条，只留正则勾选）→ 命名空间复选框
 //   → [扫描] [空跑] → 命中结果（内联展开匹配行）→ [提交选中的 N 页]
 //
 // [扫描] 只搜不改（`--scan-only --no-sync`），结果落盘后按 resultFile 取命中；
 // [空跑] 按规则真跑一遍但不提交（`--dry-run`），已勾选的页面只空跑这些；
 // [提交] 走 `submitTitles`，只改勾中的页面。
+// 规则随任务直接下发（rulesetContent），不必先存预设；预设只为复用与发布。
 // 结果刷新只发生在点「扫描」时，规则调整不做自动重扫。
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { ApiError, api } from '../api';
@@ -18,6 +19,7 @@ import { ProgressPanel } from '../components/ProgressPanel';
 import { RuleEditor } from '../components/RuleEditor';
 import { useTaskRun, type TaskDoneInfo } from '../hooks/useTaskRun';
 import { decodeRuleset, encodeRuleset, type RuleFormState } from '../rulesetCodec';
+import { configPageFor } from '../rulesetNaming';
 import type { NamespaceList, ParamValue, ProgressEvent, RulesetSummary, ScanPageHit, ScanResultMeta, StartTaskBody, TaskDescriptor } from '../types';
 
 /** 命中结果每页取多少条（服务端单次上限 1000，这里取个小批量便于增量加载） */
@@ -69,8 +71,8 @@ function appliedFromEvents(events: ProgressEvent[]): Map<string, number> {
 
 /** 发布冲突时给用户看的文案；远端正文另外用 <details> 展开 */
 function publishConflictText(reason: 'conflict' | 'missing'): string {
-	if (reason === 'missing') return '线上配置页当前不存在（可能已被删除），草稿记录的上一个版本已失效，无法直接发布。请重新载入后再发布。';
-	return '线上配置页已被他人改动，草稿基于旧版本，无法直接覆盖。请先比对下方线上内容，确认后再发布。';
+	if (reason === 'missing') return '线上配置页当前不存在（可能已被删除），草稿记的版本已失效。确认后点「以线上当前版本为基线覆盖」会重新建立基线并新建该页。';
+	return '线上配置页已被他人改动，草稿基于旧版本，无法直接覆盖。请先比对下方线上内容，确认后再点「以线上当前版本为基线覆盖」。';
 }
 
 /** 由扫描结果元信息拼出结果文件名（与服务端 scanFileName 规则一致：站名 + 指纹前 12 位） */
@@ -87,6 +89,8 @@ export function TextReplacePage(): React.JSX.Element {
 	const [form, setForm] = useState<RuleFormState>({ rules: [{ from: '', to: '', regex: false, ignoreCase: false }], namespaces: [] });
 	const [presets, setPresets] = useState<RulesetSummary[]>([]);
 	const [presetName, setPresetName] = useState('');
+	// 目标配置页：空串表示"按预设名推出默认页"，输入框里显示的就是推出的结果
+	const [configPage, setConfigPage] = useState('');
 	const [notice, setNotice] = useState<Notice | null>(null);
 	const [conflictRemote, setConflictRemote] = useState<string | null>(null);
 	const [scanName, setScanName] = useState<string | null>(null);
@@ -208,7 +212,7 @@ export function TextReplacePage(): React.JSX.Element {
 			setNotice({ text: '空跑完成，未提交任何编辑（日志中带 [DRY-RUN] 的行即"将会修改"）。', kind: 'info' });
 		} else if (action === 'sync') {
 			setFetchingNs(false);
-			setNotice({ text: '命名空间同步完成，现在可以扫描了。', kind: 'info' });
+			setNotice({ text: '镜像同步完成，现在可以扫描了。', kind: 'info' });
 			refreshNamespaces();
 		} else if (info.resultFile !== undefined) {
 			// 刷新页面后才收到 done 回放：pendingRef 已清空，判不出本次动作，
@@ -224,34 +228,25 @@ export function TextReplacePage(): React.JSX.Element {
 		const body: StartTaskBody = { descriptorId: descriptor.id, values };
 
 		if (action === 'sync') {
-			// 抓取命名空间不读规则集（--sync-only 下脚本不构建也不校验规则），
-			// 因此不要求预设名、不落草稿，body 也不带 rulesetName——否则用户自上而下点这个按钮
-			// 会先撞上"请先起名字"，还会凭空留下一个空规则草稿
+			// 抓取/同步镜像不读规则集（--sync-only 下脚本不构建也不校验规则），
+			// 因此不带规则、不落草稿：用户往往在配规则之前就要先把镜像弄热
 			values['--sync-only'] = true;
 			if (addNamespace !== undefined) values['--add-namespaces'] = [String(addNamespace)];
 		} else {
-			const name = presetName.trim();
-			if (name === '') {
-				setNotice({ text: '请先给这套规则起个名字（预设名），扫描与提交需要引用它。', kind: 'error' });
-				return;
-			}
-			// 脚本读的是规则集草稿，启动前先落盘确保读到最新规则；空规则行没意义，先滤掉
+			// 空规则行没意义，先滤掉
 			const cleanedRules = form.rules.filter((rule) => rule.from !== '');
 			if (cleanedRules.length === 0) {
 				setNotice({ text: '请至少填一条规则（「从」不能为空）。', kind: 'error' });
-				return;
-			}
-			try {
-				await api.rulesets.save(name, encodeRuleset({ ...form, rules: cleanedRules }));
-			} catch (reason) {
-				setNotice({ text: reason instanceof ApiError ? reason.message : '保存规则集草稿失败', kind: 'error' });
 				return;
 			}
 			values['--no-sync'] = true;
 			values['--namespace'] = form.namespaces.map((ns) => String(ns));
 			if (action === 'scan') values['--scan-only'] = true;
 			if (action === 'dryrun') values['--dry-run'] = true;
-			body.rulesetName = name;
+			// 规则随任务直接下发，不逼用户先存预设；名字只当历史标签，没有就不传
+			body.rulesetContent = encodeRuleset({ ...form, rules: cleanedRules });
+			const label = configPage.trim() !== '' ? configPage.trim() : presetName.trim();
+			if (label !== '') body.rulesetName = label;
 			// 提交与空跑都按勾选的页面走；没勾选时空跑退化为全命名空间试跑
 			const titles = [...selected];
 			if ((action === 'submit' || action === 'dryrun') && titles.length > 0) body.submitTitles = titles;
@@ -291,15 +286,21 @@ export function TextReplacePage(): React.JSX.Element {
 				return;
 			}
 			setForm(decodeRuleset(content));
+			// 只在草稿的目标页不是"按名字推的默认页"时才回填：否则改成预设名时页会跟不动
+			const page = draft?.page ?? '';
+			setConfigPage(page !== '' && page !== configPageFor(name) ? page : '');
 			setNotice({ text: `已载入预设「${name}」。`, kind: 'info' });
 		} catch (reason) {
 			setNotice({ text: reason instanceof ApiError ? reason.message : '载入预设失败', kind: 'error' });
 		}
 	};
 
+	/** 目标配置页：填了用自己的，没填按预设名推出默认页 */
+	const targetPage = (): string => (configPage.trim() !== '' ? configPage.trim() : configPageFor(presetName));
+
 	const savePreset = async (name: string): Promise<void> => {
 		try {
-			await api.rulesets.save(name, encodeRuleset({ ...form, rules: form.rules.filter((rule) => rule.from !== '') }));
+			await api.rulesets.save(name, encodeRuleset({ ...form, rules: form.rules.filter((rule) => rule.from !== '') }), targetPage());
 			setNotice({ text: `已保存预设「${name}」（草稿）。`, kind: 'info' });
 			refreshPresets();
 		} catch (reason) {
@@ -307,11 +308,15 @@ export function TextReplacePage(): React.JSX.Element {
 		}
 	};
 
-	const publishPreset = async (name: string): Promise<void> => {
+	/** 发布：先把当前表单落成草稿（发布本来就写在这套草稿名下），再写回配置页 */
+	const publishPreset = async (name: string, force = false): Promise<void> => {
 		setConflictRemote(null);
+		const page = targetPage();
 		try {
-			const result = await api.rulesets.publish(name);
-			setNotice({ text: `已发布到配置页（revid ${result.revid ?? '未知'}）。`, kind: 'info' });
+			await api.rulesets.save(name, encodeRuleset({ ...form, rules: form.rules.filter((rule) => rule.from !== '') }), page);
+			const result = await api.rulesets.publish(name, { page, force });
+			setNotice({ text: `已发布到 ${page}（revid ${result.revid ?? '未知'}）。`, kind: 'info' });
+			refreshPresets();
 		} catch (reason) {
 			// 发布冲突的响应体不含 error 字段，ApiError.message 会退化成「请求失败（409）」，
 			// 必须读 body.reason 与 body.remote 才能给用户看明白
@@ -367,6 +372,7 @@ export function TextReplacePage(): React.JSX.Element {
 							fetching={fetchingNs}
 							onChange={(namespaces) => setForm((prev) => ({ ...prev, namespaces }))}
 							onFetch={(id) => void startAction('sync', id)}
+							onSync={() => void startAction('sync')}
 						/>
 
 						<h3>预设</h3>
@@ -374,16 +380,25 @@ export function TextReplacePage(): React.JSX.Element {
 							presets={presets}
 							name={presetName}
 							onNameChange={setPresetName}
+							page={configPage.trim() !== '' ? configPage.trim() : configPageFor(presetName)}
+							onPageChange={setConfigPage}
 							onLoad={(name) => void loadPreset(name)}
 							onSave={(name) => void savePreset(name)}
 							onPublish={(name) => void publishPreset(name)}
 							busy={busy}
 						/>
 						{conflictRemote !== null && (
-							<details className="conflict-remote">
-								<summary>线上配置页当前内容</summary>
-								<pre>{conflictRemote}</pre>
-							</details>
+							<>
+								<p>
+									<button type="button" disabled={running || busy} onClick={() => void publishPreset(presetName.trim(), true)}>
+										以线上当前版本为基线覆盖
+									</button>
+								</p>
+								<details className="conflict-remote">
+									<summary>线上配置页当前内容</summary>
+									<pre>{conflictRemote}</pre>
+								</details>
+							</>
 						)}
 
 						<div className="tr-actions">

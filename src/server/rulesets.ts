@@ -8,6 +8,8 @@ const PAGE_PREFIX = 'User:没有羽翼的格雷塔/BotConfig/';
 
 export interface RulesetDraft {
 	name: string;
+	/** 发布目标页；草稿记着它，好让发布冲突检测知道基线是哪一页的 */
+	page: string;
 	baseRevid: number | null;
 	content: string;
 	updatedAt: number;
@@ -33,6 +35,17 @@ export function pageTitleFor(name: string): string {
 	return `${PAGE_PREFIX}${safeName(name)}`;
 }
 
+/**
+ * 存草稿时该记的基线：目标页没变才沿用旧基线，换页就作废。
+ *
+ * 基线是"某一页当时的版本号"，照抄到另一页去等于拿旧页的 revid 冒充新页的基线，冲突检测形同虚设。
+ */
+export function draftBaseline(previous: { page: string; baseRevid: number | null } | null, page?: string): number | null {
+	if (previous === null) return null;
+	const target = typeof page === 'string' && page.trim() !== '' ? page.trim() : previous.page;
+	return target === previous.page ? previous.baseRevid : null;
+}
+
 export class RulesetStore {
 	private readonly dir: string;
 
@@ -52,7 +65,7 @@ export class RulesetStore {
 				const name = file.slice(0, -'.json'.length);
 				try {
 					const draft = this.read(name);
-					return draft ? { name, pageTitle: pageTitleFor(name), draftUpdatedAt: draft.updatedAt } : null;
+					return draft ? { name, pageTitle: draft.page, draftUpdatedAt: draft.updatedAt } : null;
 				} catch {
 					// 名字非法或文件损坏：跳过这一条，不要让一个野文件搞崩整个列表
 					return null;
@@ -66,15 +79,22 @@ export class RulesetStore {
 		const file = this.fileFor(name);
 		if (!existsSync(file)) return null;
 		try {
-			return JSON.parse(readFileSync(file, 'utf-8')) as RulesetDraft;
+			const draft = JSON.parse(readFileSync(file, 'utf-8')) as RulesetDraft;
+			// 早期草稿没有 page 字段，补上默认目标页，免得调用方到处判缺
+			return { ...draft, name, page: draft.page ?? pageTitleFor(name) };
 		} catch {
 			return null;
 		}
 	}
 
-	write(name: string, content: string, baseRevid: number | null): RulesetDraft {
+	/**
+	 * 写草稿。`baseRevid` 须是 `page` 这一页的版本号（换页时别照抄旧基线，用 `draftBaseline`）。
+	 */
+	write(name: string, content: string, baseRevid: number | null, page?: string): RulesetDraft {
 		const safe = safeName(name);
-		const draft: RulesetDraft = { name: safe, baseRevid, content, updatedAt: Date.now() };
+		const previous = this.read(safe);
+		const target = typeof page === 'string' && page.trim() !== '' ? page.trim() : (previous?.page ?? pageTitleFor(safe));
+		const draft: RulesetDraft = { name: safe, page: target, baseRevid, content, updatedAt: Date.now() };
 		writeFileSync(this.fileFor(safe), JSON.stringify(draft, null, 2), 'utf-8');
 		return draft;
 	}
@@ -96,7 +116,48 @@ export interface RulesetApi {
 	postWithEditToken<T>(params: MwApiParams): Promise<{ data: T }>;
 }
 
+/** 发布的可选项 */
+export interface PublishOptions {
+	/** 目标配置页标题；缺省用草稿记录的页 */
+	page?: string;
+	/** 以线上当前版本为基线强行覆盖（冲突后比对过线上内容再发） */
+	force?: boolean;
+}
+
 export type RulesetApiFactory = () => Promise<RulesetApi>;
+
+/** 跑任务用的规则集来源：内容直传优先，其次才是本地草稿 */
+export interface RunRuleset {
+	/** 标签：进历史库，只用于人看 */
+	name: string;
+	/** 规则集 JSON 原文 */
+	content: string;
+}
+
+/**
+ * 决定一次任务用哪份规则。
+ *
+ * 服务端拿到内容后写临时文件喂 `--config-file`，所以跑任务并不需要预设名——
+ * 界面上改完规则直接扫描/提交即可，起名存草稿只为复用与发布。故内容直传优先于草稿，
+ * 仅同步镜像（--sync-only）则两者都可以没有。名字在这里只当历史标签，缺省记「未命名规则」。
+ */
+export function resolveRunRuleset(
+	store: Pick<RulesetStore, 'read'>,
+	input: { rulesetName?: string; rulesetContent?: string; syncOnly?: boolean },
+): RunRuleset | null {
+	const name = typeof input.rulesetName === 'string' ? input.rulesetName.trim() : '';
+	const content = typeof input.rulesetContent === 'string' ? input.rulesetContent.trim() : '';
+	if (content !== '') {
+		return { name: name === '' ? '未命名规则' : name, content };
+	}
+	if (name !== '') {
+		const draft = store.read(name);
+		if (!draft) throw new Error(`规则集 "${name}" 没有本地草稿`);
+		return { name, content: draft.content };
+	}
+	if (input.syncOnly === true) return null;
+	throw new Error('该任务必须先提供规则内容（或先保存规则集）');
+}
 
 /** 默认工厂：复用共享登录会话；登录失败抛错而非退出进程，由路由层 .catch 降级成 500，不打挂 GUI 服务 */
 async function defaultRulesetApi(): Promise<RulesetApi> {
@@ -117,7 +178,8 @@ export class RulesetPublisher {
 		this.createApi = createApi;
 	}
 
-	async fetchRemote(name: string): Promise<{ content: string | null; revid: number | null }> {
+	/** 取线上某一页的当前内容与 revid；页面不存在时两者都是 null */
+	async fetchRemote(pageTitle: string): Promise<{ content: string | null; revid: number | null }> {
 		const api = await this.createApi();
 		const { data } = await api.post<any>({
 			action: 'query',
@@ -126,7 +188,7 @@ export class RulesetPublisher {
 			prop: 'revisions',
 			rvprop: ['content', 'ids'],
 			rvslots: 'main',
-			titles: pageTitleFor(name),
+			titles: pageTitle,
 		});
 		const page = data?.query?.pages?.[0];
 		if (!page || page.missing) return { content: null, revid: null };
@@ -138,16 +200,21 @@ export class RulesetPublisher {
 		};
 	}
 
-	async publish(name: string): Promise<
+	async publish(name: string, options: PublishOptions = {}): Promise<
 		{ ok: true; revid: number | null } | { ok: false; reason: 'conflict' | 'missing'; remote: string | null; remoteRevid: number | null }
 	> {
 		const draft = this.store.read(name);
 		if (!draft) throw new Error(`规则集 "${name}" 没有本地草稿`);
-		const remote = await this.fetchRemote(name);
-		// 首次发布（线上还不存在）时 baseRevid 必须是 null；此后每次发布都要求 revid 与草稿记录的一致
-		if (remote.revid !== draft.baseRevid) {
+		const page = typeof options.page === 'string' && options.page.trim() !== '' ? options.page.trim() : draft.page;
+		const remote = await this.fetchRemote(page);
+		// 基线从属于草稿记录的那个页面：临时发到别的页时，旧页的 revid 不能拿来当基线
+		const baseline = page === draft.page ? draft.baseRevid : null;
+		// 首次发布（线上还不存在）时基线必须是 null；此后每次发布都要求 revid 与草稿记录的一致
+		if (options.force !== true && remote.revid !== baseline) {
 			return { ok: false, reason: remote.revid === null ? 'missing' : 'conflict', remote: remote.content, remoteRevid: remote.revid };
 		}
+		// 指定 force 即"已比对过线上内容，仍要覆盖"：以线上当前版本为基线发出去
+		const baseRevid = options.force === true ? remote.revid : baseline;
 		const api = await this.createApi();
 		let data: unknown = null;
 		let thrown: Error | null = null;
@@ -156,18 +223,24 @@ export class RulesetPublisher {
 				action: 'edit',
 				format: 'json',
 				formatversion: '2',
-				title: pageTitleFor(name),
+				title: page,
 				text: draft.content,
 				summary: `机器人：更新规则集 ${name}`,
 				watchlist: 'nochange',
-				...(remote.revid === null ? { createonly: 1 } : { baserevid: remote.revid }),
+				...(baseRevid === null ? { createonly: 1 } : { baserevid: baseRevid }),
 			}));
 		} catch (error) {
 			thrown = error as Error;
 		}
 		// moderation-*-queued 计为成功（项目全局约定）：已入队，但没有新 revid 可记录
-		if (thrown && checkModerationQueuedError(thrown)) return { ok: true, revid: null };
-		if (checkModerationQueued(data)) return { ok: true, revid: null };
+		if (thrown && checkModerationQueuedError(thrown)) {
+			this.store.write(name, draft.content, draftBaseline(draft, page), page);
+			return { ok: true, revid: null };
+		}
+		if (checkModerationQueued(data)) {
+			this.store.write(name, draft.content, draftBaseline(draft, page), page);
+			return { ok: true, revid: null };
+		}
 		if (thrown) throw thrown;
 		// createZhApi() 没有设 throwOnApiError，wiki-saikou 默认也不抛，
 		// 因此 API 层错误会出现在响应体里而不是异常里——必须显式判定。
@@ -185,7 +258,7 @@ export class RulesetPublisher {
 			throw new Error(`编辑响应异常: ${JSON.stringify(data)}`);
 		}
 		const newRevid = typeof edit.newrevid === 'number' ? edit.newrevid : null;
-		this.store.write(name, draft.content, newRevid);
+		this.store.write(name, draft.content, newRevid, page);
 		return { ok: true, revid: newRevid };
 	}
 }
