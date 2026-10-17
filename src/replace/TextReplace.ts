@@ -83,6 +83,8 @@ const DEFAULT_INTERVAL = 1500;
 const SYNC_REQUEST_INTERVAL = 300;
 /** 搜索进度日志间隔（页数） */
 const LOG_INTERVAL = 20000;
+/** 搜索进度事件间隔（页数）：文本日志可以稀疏，界面进度条要跟上，取 iteratePages 的批大小 */
+const PROGRESS_INTERVAL = 2000;
 
 const SYNC_MODE_LABEL: Record<MirrorSyncResult['mode'], string> = {
 	full: '首次全量',
@@ -584,7 +586,22 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 				emit({ type: 'phase', name: '跳过同步' });
 			} else {
 				emit({ type: 'phase', name: '同步镜像' });
-				const syncResult = await syncMirror({ api, mirror, namespaces: coveredNamespaces, requestInterval: SYNC_REQUEST_INTERVAL, log, purgeDeleted: cliArgs.purgeDeleted });
+				const syncResult = await syncMirror({
+					api,
+					mirror,
+					namespaces: coveredNamespaces,
+					requestInterval: SYNC_REQUEST_INTERVAL,
+					log,
+					purgeDeleted: cliArgs.purgeDeleted,
+					// 同步可能跑几十分钟：把进度转成结构化事件，界面进度条才不会空转
+					onProgress: (progress) =>
+						emit({
+							type: 'progress',
+							done: progress.done,
+							...(progress.total === undefined ? {} : { total: progress.total }),
+							...(progress.message === undefined ? {} : { message: progress.message }),
+						}),
+				});
 				const deletedNote = syncResult.markedDeleted > 0 ? `，${cliArgs.purgeDeleted ? '删除' : '标记删除'} ${syncResult.markedDeleted} 页` : '';
 				const deletedTotal = mirror.getDeletedPageCount();
 				console.log(
@@ -618,6 +635,9 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 				scanned++;
 				if (scanned % LOG_INTERVAL === 0) {
 					log(`已扫描 ${scanned} 页…`);
+				}
+				// 事件比日志更密：进度条只认 progress 事件，按日志间隔发会让大批量扫描看上去卡住
+				if (scanned % PROGRESS_INTERVAL === 0) {
 					emit({ type: 'progress', done: scanned, total: mirror!.getPageCount(), message: '扫描镜像' });
 				}
 				if (!nsFilter.has(page.ns)) continue;
@@ -684,6 +704,8 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 			if (checkpoint.completedSet.has(title)) {
 				log(`跳过（checkpoint 已完成）: ${title}`);
 				emit({ type: 'edit', title, status: 'skipped', oldRevid: null, newRevid: null, message: '本批此前已完成，跳过' });
+				// 跳过的页也要推进计数：否则中途跳过会让进度条停住，最后由 done 一次性补到底
+				emit({ type: 'progress', done: index + 1, total: titles.length, message: '提交编辑' });
 				continue;
 			}
 			try {
@@ -729,9 +751,9 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 				emit({ type: 'edit', title, status: 'failed', oldRevid: null, newRevid: null, message: err.message });
 			}
 			if (!cliArgs.dryRun) saveCheckpoint(checkpointPath, checkpoint);
-			if (index % 50 === 0 || index === titles.length - 1) {
-				emit({ type: 'progress', done: index + 1, total: titles.length, message: '提交编辑' });
-			}
+			// 逐页发进度：界面进度条只认 progress 事件，按 50 页节流会让小批量只剩首尾两个点。
+			// 每页本来就有一条 edit 事件，这里多一条不会改变事件量级
+			emit({ type: 'progress', done: index + 1, total: titles.length, message: '提交编辑' });
 			await sleep(cliArgs.interval);
 		}
 

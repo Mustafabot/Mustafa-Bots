@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { eventToLine, formatDuration } from './progressText';
+import { barMode, eventToLine, formatDuration } from './progressText';
 
 test('用时格式化到合适的单位', () => {
 	assert.equal(formatDuration(0), '0 秒');
@@ -46,4 +46,11 @@ test('done 事件把摘要各键转成中文标签', () => {
 	const line = eventToLine({ type: 'done', summary: { changed: 3, skipped: 1 }, at: 1700000000000 });
 	assert.ok(line.includes('修改 3'));
 	assert.ok(line.includes('跳过 1'));
+});
+
+test('只有有进度但总量未知的阶段才进动效，没有进度数据的阶段不动', () => {
+	// "跳过同步"这类阶段只有 phase 事件、没有任何 progress：不能让它一直转圈冒充在干活
+	assert.equal(barMode(false, undefined), 'idle');
+	assert.equal(barMode(true, undefined), 'indeterminate');
+	assert.equal(barMode(true, 10), 'determinate');
 });

@@ -22,6 +22,16 @@ export interface MirrorPage {
 /** 全量同步进度：键为命名空间编号，true 表示已完成，字符串为待续传的 gapcontinue */
 type SyncProgress = Record<string, string | true>;
 
+/** 同步过程中的结构化进度（供界面进度条；文本日志另有 log 回调） */
+export interface MirrorProgress {
+	/** 已完成的工作量（含义随阶段变化：已抓取/已比对/已补拉的页数） */
+	done: number;
+	/** 总量；全量抓取预先不知道页数，此时留空由界面显示不定长进度 */
+	total?: number;
+	/** 给用户看的说明 */
+	message?: string;
+}
+
 /** 镜像同步所需的依赖 */
 export interface MirrorSyncOptions {
 	/** 已登录的 MediaWiki API 实例 */
@@ -34,6 +44,8 @@ export interface MirrorSyncOptions {
 	requestInterval: number;
 	/** 进度日志（调用方控制 verbose） */
 	log: (message: string) => void;
+	/** 结构化进度回调；不传则只走 log */
+	onProgress?: (progress: MirrorProgress) => void;
 	/** true=真正删除线上已不存在的页面（并顺带清空历史标记），默认仅标记为已删除 */
 	purgeDeleted?: boolean;
 }
@@ -294,7 +306,7 @@ function mergePages(pageMap: Map<string, MirrorPage>, responsePages: ApiPage[]):
  * （页面重新出现时由 upsert 自动清除标记；purgeDeleted 为 true 时才真正删除并清理历史标记）。
  */
 export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSyncResult> {
-	const { api, mirror, namespaces, requestInterval, log, purgeDeleted = false } = options;
+	const { api, mirror, namespaces, requestInterval, log, onProgress, purgeDeleted = false } = options;
 
 	/** 发起一次查询：超时控制 + 失败重试（镜像查询只读，重试无副作用）+ 200 响应体内 API 错误检查 */
 	const query = async (params: Record<string, string | number | string[] | boolean | undefined>): Promise<MwApiResponse<ApiQueryResponse>> => {
@@ -326,8 +338,8 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 		mirror.setMeta('sync_progress', JSON.stringify(progress));
 	};
 
-	/** 全量抓取单个命名空间并写入镜像；断点存 meta 表，中断后可续传 */
-	const fetchAllPages = async (ns: number, resumeGapcontinue?: string): Promise<number> => {
+	/** 全量抓取单个命名空间并写入镜像；断点存 meta 表，中断后可续传。`base` 是此前各命名空间已抓取的页数 */
+	const fetchAllPages = async (ns: number, base: number, resumeGapcontinue?: string): Promise<number> => {
 		const progress = loadProgress();
 		let gapcontinue: string | undefined = resumeGapcontinue;
 		let count = 0;
@@ -365,6 +377,8 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 			progress[String(ns)] = nextGapcontinue ?? true;
 			saveProgress(progress);
 			log(`命名空间${ns}：已获取 ${count} 个页面`);
+			// 全量抓取不知道总页数，只能报"已抓多少"（total 留空）
+			onProgress?.({ done: base + count, message: `命名空间${ns}：已获取 ${count} 页` });
 			gapcontinue = nextGapcontinue;
 		} while (gapcontinue !== undefined);
 		progress[String(ns)] = true;
@@ -373,8 +387,8 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 		return count;
 	};
 
-	/** 拉取单个命名空间的全量标题与 revid 清单（不含正文，仅 gapcontinue 翻页） */
-	const fetchPageRevids = async (ns: number): Promise<Map<string, number>> => {
+	/** 拉取单个命名空间的全量标题与 revid 清单（不含正文，仅 gapcontinue 翻页）。`base` 是此前各命名空间已列出的页数 */
+	const fetchPageRevids = async (ns: number, base: number): Promise<Map<string, number>> => {
 		const result = new Map<string, number>();
 		let gapcontinue: string | undefined;
 		do {
@@ -391,6 +405,8 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 				const revid = page.revisions?.[0]?.revid;
 				if (revid !== undefined) result.set(page.title as string, revid);
 			}
+			// 清单阶段不用正文、但翻完全部命名空间也要几分钟：逐批报已列出的页数
+			onProgress?.({ done: base + result.size, message: `命名空间${ns}：已列出 ${result.size} 页` });
 			gapcontinue = (data.continue as Record<string, string> | undefined)?.gapcontinue;
 			await sleep(requestInterval);
 		} while (gapcontinue !== undefined);
@@ -436,7 +452,10 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 			const pages = [...pageMap.values()].filter((page) => tracked.has(page.ns));
 			mirror.upsertPages(pages);
 			count += pages.length;
-			log(`补拉进度：${Math.min(i + TITLE_BATCH, titleList.length)}/${titleList.length}`);
+			const fetched = Math.min(i + TITLE_BATCH, titleList.length);
+			log(`补拉进度：${fetched}/${titleList.length}`);
+			// 比对后已知待补拉总数，这里能给出确定进度
+			onProgress?.({ done: fetched, total: titleList.length, message: '补拉正文' });
 		}
 		return count;
 	};
@@ -446,12 +465,14 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 		log('开始增量同步（拉取全量 revid 清单比对）…');
 		const apiRevids = new Map<string, number>();
 		for (const ns of namespaces) {
-			const revids = await fetchPageRevids(ns);
+			const revids = await fetchPageRevids(ns, apiRevids.size);
 			for (const [title, revid] of revids) apiRevids.set(title, revid);
 			log(`命名空间${ns}：清单 ${revids.size} 个页面`);
 		}
 		const { titlesToFetch, titlesNoLongerOnWiki } = reconcileRevids(apiRevids, mirror.getPageRevids());
 		log(`比对完毕：待补拉 ${titlesToFetch.size} 个，${purgeDeleted ? '待删除' : '待标记删除'} ${titlesNoLongerOnWiki.size} 个`);
+		// 先亮出待补拉总数：即使一页都不用补，进度条也从"不确定"切到"确定"
+		if (titlesToFetch.size > 0) onProgress?.({ done: 0, total: titlesToFetch.size, message: `待补拉 ${titlesToFetch.size} 页` });
 		const upserted = await fetchPagesByTitles(titlesToFetch);
 		const markedDeleted = purgeDeleted ? mirror.deletePages([...titlesNoLongerOnWiki]) : mirror.markDeleted([...titlesNoLongerOnWiki]);
 		return { upserted, markedDeleted };
@@ -472,15 +493,15 @@ export async function syncMirror(options: MirrorSyncOptions): Promise<MirrorSync
 		for (const ns of namespaces) {
 			const state = progress[String(ns)];
 			// 无记录的命名空间视为尚未开始（上次中断在它之前），需从头抓取
-			if (typeof state === 'string') upserted += await fetchAllPages(ns, state);
-			else if (state !== true) upserted += await fetchAllPages(ns);
+			if (typeof state === 'string') upserted += await fetchAllPages(ns, upserted, state);
+			else if (state !== true) upserted += await fetchAllPages(ns, upserted);
 		}
 		return { mode: 'resume', upserted, markedDeleted: purgedHistory };
 	}
 	if (mirror.getPageCount() === 0) {
 		log('本地镜像为空，开始首次全量同步');
 		let upserted = 0;
-		for (const ns of namespaces) upserted += await fetchAllPages(ns);
+		for (const ns of namespaces) upserted += await fetchAllPages(ns, upserted);
 		return { mode: 'full', upserted, markedDeleted: purgedHistory };
 	}
 	const { upserted, markedDeleted } = await syncIncremental();

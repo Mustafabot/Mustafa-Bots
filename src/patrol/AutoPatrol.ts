@@ -287,11 +287,12 @@ async function patrolMovedPhase(
 			}
 		}
 
+		// 收集本身也可能翻很多页：每页结果回传一次，别让阶段2 开头长时间没有进度
+		emit({ type: 'progress', done: newPages.length, message: `阶段2 已收集 ${newPages.length} 条未巡查新页面` });
 		rccontinue = data.continue?.rccontinue;
 	} while (rccontinue);
 
 	console.log(`${PREFIX} 未巡查新页面: ${newPages.length}条`);
-	emit({ type: 'progress', done: newPages.length, message: `阶段2 已收集 ${newPages.length} 条未巡查新页面` });
 
 	if (newPages.length === 0) {
 		return { successCount: 0, skipCount: 0, failures: [], totalScanned: 0, candidateCount: 0, totalHit: 0, totalSkipped: 0, userSubpageHit: 0, draftHit: 0 };
@@ -318,10 +319,17 @@ async function patrolMovedPhase(
 	let draftHit = 0;
 	const failures: string[] = [];
 
+	// 逐条回传进度：这个循环每条之间都要 sleep（默认 4s），只在结束时发一次会让进度条整段不动
+	const reportProgress = (processed: number): void =>
+		emit({ type: 'progress', done: processed, total: newPages.length, message: `阶段2 命中 ${totalHit}，成功 ${successCount}，跳过 ${skipCount}` });
+	let processed = 0;
+
 	for (const rc of newPages) {
 		const moveInfo = movedPages.get(rc.title);
 		if (!moveInfo) {
 			totalSkipped++;
+			processed++;
+			reportProgress(processed);
 			continue;
 		}
 
@@ -337,6 +345,8 @@ async function patrolMovedPhase(
 
 		if (!hitKind) {
 			totalSkipped++;
+			processed++;
+			reportProgress(processed);
 			continue;
 		}
 
@@ -356,6 +366,8 @@ async function patrolMovedPhase(
 			// 与阶段1 一致：空跑照发事件、照计成功数
 			successCount++;
 			emit({ type: 'edit', title: rc.title, status: 'changed', oldRevid: null, newRevid: null, message: `[DRY-RUN] rcid=${rc.rcid} ${kindLabel}` });
+			processed++;
+			reportProgress(processed);
 			continue;
 		}
 
@@ -397,10 +409,13 @@ async function patrolMovedPhase(
 			}
 		}
 
+		processed++;
+		reportProgress(processed);
 		await sleep(randomInterval(interval));
 	}
 
-	emit({ type: 'progress', done: newPages.length, total: newPages.length, message: `阶段2 命中 ${totalHit}，成功 ${successCount}，跳过 ${skipCount}` });
+	// 被 --limit 提前 break 时不能硬报 100%：按实际处理条数收尾
+	reportProgress(processed);
 	return { successCount, skipCount, failures, totalScanned: newPages.length, candidateCount: movedPages.size, totalHit, totalSkipped, userSubpageHit, draftHit };
 }
 

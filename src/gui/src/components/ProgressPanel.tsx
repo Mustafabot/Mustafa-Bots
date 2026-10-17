@@ -1,8 +1,9 @@
 // 进度面板：状态徽章 + 用时 + 分阶段进度条 + 中止按钮。
-// 进度条取值来自 progress 事件的 done/total；没有 total 时用不定长条。阶段由 phase 事件分组。
+// 进度条取值来自 progress 事件的 done/total；有进度但无 total 用不定长动效，
+// 该阶段没有任何 progress（如「跳过同步」）则留静态空槽，不转圈。阶段由 phase 事件分组。
 import { useEffect, useState } from 'react';
 import type { ProgressEvent, TaskRecord, TaskStatus } from '../types';
-import { formatDuration } from './progressText';
+import { barMode, formatDuration } from './progressText';
 
 interface ProgressPanelProps {
 	task: TaskRecord | null;
@@ -64,15 +65,15 @@ function countEdits(events: ProgressEvent[]): { changed: number; skipped: number
 	return { changed, skipped, failed };
 }
 
-/** 一条进度条；total 有值时按比例，否则不定长 */
+/** 一条进度条；有总量按比例，有进度但无总量用不定长动效，没有进度数据则只留静态空槽 */
 function PhaseBar({ row }: { row: PhaseRow }): React.JSX.Element {
-	const determinate = row.hasProgress && row.total !== undefined;
-	const percent = determinate && row.total! > 0 ? Math.min(100, Math.round((row.done / row.total!) * 100)) : 0;
+	const mode = barMode(row.hasProgress, row.total);
+	const percent = mode === 'determinate' && row.total! > 0 ? Math.min(100, Math.round((row.done / row.total!) * 100)) : 0;
 	return (
 		<div className="phase-row">
 			<div className="phase-name">{row.name}</div>
-			<div className={`bar${determinate ? '' : ' bar-indeterminate'}`}>
-				<div className="bar-fill" style={determinate ? { width: `${percent}%` } : undefined} />
+			<div className={`bar${mode === 'indeterminate' ? ' bar-indeterminate' : ''}`}>
+				<div className="bar-fill" style={mode === 'determinate' ? { width: `${percent}%` } : undefined} />
 			</div>
 			<div className="phase-count">{row.hasProgress ? (row.total === undefined ? `${row.done}` : `${row.done}/${row.total}`) : ''}</div>
 		</div>

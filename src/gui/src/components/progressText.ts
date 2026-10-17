@@ -41,6 +41,21 @@ export function formatDuration(ms: number): string {
 	return `${hours} 小时 ${minutes} 分`;
 }
 
+/**
+ * 进度条的三种形态：
+ * - determinate：有总量，按比例填充；
+ * - indeterminate：有进度但总量未知（如全量抓取镜像），显示流动动效；
+ * - idle：该阶段压根没有进度数据（如「跳过同步」），只留静态空槽——
+ *   不能转圈，否则会被误认为还在干活。
+ */
+export type BarMode = 'determinate' | 'indeterminate' | 'idle';
+
+/** 由"是否有进度事件"与"总量是否已知"决定进度条形态 */
+export function barMode(hasProgress: boolean, total: number | undefined): BarMode {
+	if (!hasProgress) return 'idle';
+	return total === undefined ? 'indeterminate' : 'determinate';
+}
+
 /** 把 done 事件的摘要对象拼成「修改 3，跳过 1」样式的字符串 */
 function renderSummary(summary: Record<string, number>): string {
 	return Object.entries(summary)
