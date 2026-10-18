@@ -1,25 +1,21 @@
 import { MediaWikiApi } from 'wiki-saikou';
-import type { ApiPage, ApiQueryResponse } from 'types-mediawiki-response';
-import { URL } from 'url';
-import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync } from 'fs';
-import { resolve, dirname } from 'path';
+import { readFileSync, writeFileSync, existsSync, unlinkSync, mkdirSync, readdirSync, statSync } from 'fs';
+import { extname, resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { createZhApi, createCmApi } from '../utils/createApi.js';
+import { createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError } from '../utils/retry.js';
-
-interface FileConfig {
-	url: string;
-	filename?: string;
-}
-
-interface UploadConfig {
-	files: FileConfig[];
-	article?: string;
-	comment?: string;
-	text?: string;
-}
+import {
+	parseUploadConfig,
+	validateUploadConfig,
+	targetFilename,
+	generateFilePageText,
+	generateUploadComment,
+	type LocalFileProbe,
+	type UploadFileEntry,
+	type UploadTaskConfig,
+} from './uploadConfig.js';
 
 interface UploadResult {
 	filename: string;
@@ -28,105 +24,47 @@ interface UploadResult {
 	error?: string;
 }
 
-interface ValidationResult {
-	valid: boolean;
-	errors: string[];
-}
-
 interface CliArgs {
+	configFile: string;
 	dryRun: boolean;
 	verbose: boolean;
 }
 
-const zhApi = createZhApi();
 const cmApi = createCmApi();
 
 const MAX_RETRIES = 3;
-const DEFAULT_COMMENT = '机器人：自其他网站迁移文件';
-const CONFIG_PAGE = 'User:没有羽翼的格雷塔/BotConfig/UrlUpload.json';
+
+const USAGE = '用法: npx tsx src/upload/UrlUpload.ts --config-file <本地配置 JSON> [--check] [--only-missing] [--dry-run] [--quiet]';
+/** 逐条人类日志的开关，由 --quiet 关掉；GUI 拉起的任务一律带 --quiet */
+let verbose = true;
+function log(message: string): void {
+	if (verbose) console.log(message);
+}
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const TEMP_DIR = resolve(__dirname, '../../temp');
 
-async function fetchJsonConfig(api: MediaWikiApi, pageTitle: string): Promise<UploadConfig> {
-	const { data } = await api.post<ApiQueryResponse>({
-		action: 'query',
-		prop: 'revisions',
-		rvprop: 'content',
-		titles: pageTitle,
-	}, {
-		retry: 15,
-	} as any);
-
-	const pages = data.query.pages as ApiPage[];
-	const page = Object.values(pages)[0];
-	if (!page || !page.revisions) {
-		throw new Error(`配置页面 "${pageTitle}" 不存在或无法获取内容`);
-	}
-
-	const content = page.revisions[0].content as string;
+/** 读本地配置文件；不存在时给出可执行的提示 */
+function readLocalConfig(path: string): UploadTaskConfig {
+	const absolute = resolve(path);
+	if (!existsSync(absolute)) throw new Error(`配置文件不存在：${absolute}`);
 	try {
-		return JSON.parse(content) as UploadConfig;
-	} catch (e) {
-		throw new Error(`JSON解析失败: ${(e as Error).message}`, { cause: e });
+		return parseUploadConfig(readFileSync(absolute, 'utf-8'));
+	} catch (error) {
+		// `cause` 必须带：仓库的 eslint 开了 preserve-caught-error，不带会报 error
+		throw new Error(`配置文件 ${absolute} 有误：${(error as Error).message}`, { cause: error });
 	}
 }
 
-function validateConfig(uploadConfig: UploadConfig): ValidationResult {
-	const errors: string[] = [];
-
-	if (!uploadConfig || typeof uploadConfig !== 'object') {
-		errors.push('配置必须是一个对象');
-		return { valid: false, errors };
-	}
-
-	if (!Array.isArray(uploadConfig.files) || uploadConfig.files.length === 0) {
-		errors.push('files必须是非空数组');
-		return { valid: false, errors };
-	}
-
-	const hasMissingFilename = uploadConfig.files.some(f => !f.filename);
-	if (hasMissingFilename && !uploadConfig.article) {
-		errors.push('当filename未指定时，article为必填项');
-	}
-
-	uploadConfig.files.forEach((file, index) => {
-		if (!file.url) {
-			errors.push(`files[${index}]: url为必填项`);
-		} else {
-			try {
-				const url = new URL(file.url);
-				if (!['http:', 'https:'].includes(url.protocol)) {
-					errors.push(`files[${index}]: URL协议必须是http或https`);
-				}
-			} catch {
-				errors.push(`files[${index}]: URL格式无效`);
-			}
-		}
-	});
-
-	return {
-		valid: errors.length === 0,
-		errors,
-	};
-}
-
-function extractExtension(url: string): string {
+/** 探测本机文件：不存在或读不到大小都如实返回，交给校验判断 */
+const probeLocalFile: LocalFileProbe = (path) => {
 	try {
-		const urlObj = new URL(url);
-		const pathname = urlObj.pathname;
-		const match = pathname.match(/\.([a-zA-Z0-9]+)$/);
-		return match ? `.${match[1]}` : '';
+		return { exists: true, size: statSync(path).size };
 	} catch {
-		return '';
+		return { exists: false, size: null };
 	}
-}
-
-function generateFilename(url: string, article: string, index: number): string {
-	const ext = extractExtension(url);
-	return `File:${article} ${index}${ext}`;
-}
+};
 
 function ensureTempDir(): void {
 	if (!existsSync(TEMP_DIR)) {
@@ -175,17 +113,51 @@ async function downloadImage(url: string, filePath: string): Promise<string> {
 	return mimeType;
 }
 
+/** 一条上传涉及的目标文件名、正文与摘要，算一次用到底 */
+interface ResolvedEntry {
+	filename: string;
+	text: string;
+	comment: string;
+}
+
+function resolveEntry(uploadConfig: UploadTaskConfig, entry: UploadFileEntry): ResolvedEntry {
+	const filename = targetFilename(uploadConfig, entry);
+	return {
+		filename,
+		text: generateFilePageText(uploadConfig, entry),
+		comment: generateUploadComment(uploadConfig, entry),
+	};
+}
+
+const MIME_BY_EXTENSION: Record<string, string> = {
+	'.png': 'image/png',
+	'.jpg': 'image/jpeg',
+	'.jpeg': 'image/jpeg',
+	'.gif': 'image/gif',
+	'.webp': 'image/webp',
+	'.svg': 'image/svg+xml',
+	'.bmp': 'image/bmp',
+	'.ico': 'image/x-icon',
+	'.tif': 'image/tiff',
+	'.tiff': 'image/tiff',
+	'.pdf': 'application/pdf',
+};
+
+/** 本机文件按扩展名推 MIME；认不出的交给服务端判 */
+function mimeTypeForLocalFile(path: string): string {
+	return MIME_BY_EXTENSION[extname(path).toLowerCase()] ?? 'application/octet-stream';
+}
+
 async function uploadFromFile(
 	api: MediaWikiApi,
 	filePath: string,
-	filename: string,
-	comment: string,
-	text: string,
+	resolved: ResolvedEntry,
 	mimeType: string,
 	dryRun: boolean
 ): Promise<UploadResult> {
+	const { filename, comment, text } = resolved;
 	if (dryRun) {
-		console.log(`  [试运行] 将从本地上传: ${filename}`);
+		log(`  [试运行] 将从本地上传: ${filename}`);
 		return { filename, url: `file://${filePath}`, success: true };
 	}
 
@@ -226,7 +198,7 @@ async function uploadFromFile(
 					if (checkModerationQueuedError(error, '  文件已进入审核队列')) {
 						throw error;
 					}
-					console.log(`  本地上传失败（${error.message}），第${attempt}次重试...`);
+					log(`  本地上传失败（${error.message}），第${attempt}次重试...`);
 				},
 				shouldRetry: () => true
 			}
@@ -241,25 +213,15 @@ async function uploadFromFile(
 	}
 }
 
-async function uploadFromUrl(
-	api: MediaWikiApi,
-	fileConfig: FileConfig,
-	globalConfig: UploadConfig,
-	index: number,
-	dryRun: boolean,
-	article: string | undefined,
-): Promise<UploadResult> {
-	const filename = fileConfig.filename || generateFilename(fileConfig.url, article ?? '', index);
-	const comment = globalConfig.comment || DEFAULT_COMMENT;
-	const text = globalConfig.text || `{{Copyright}}[[Category:${article}]][[Category:迁移文件]]`;
-
-	console.log(`  来源URL: ${fileConfig.url}`);
+async function uploadFromUrl(api: MediaWikiApi, entry: UploadFileEntry, resolved: ResolvedEntry, dryRun: boolean): Promise<UploadResult> {
+	const { filename, comment, text } = resolved;
+	const sourceUrl = entry.url!;
 
 	if (dryRun) {
-		console.log('  [试运行模式] 跳过实际上传');
+		log('  [试运行模式] 跳过实际上传');
 		return {
 			filename,
-			url: fileConfig.url,
+			url: sourceUrl,
 			success: true,
 		};
 	}
@@ -269,7 +231,7 @@ async function uploadFromUrl(
 			() => api.postWithToken('csrf', {
 				action: 'upload',
 				filename,
-				url: fileConfig.url,
+				url: sourceUrl,
 				comment,
 				text,
 				ignorewarnings: true,
@@ -286,11 +248,11 @@ async function uploadFromUrl(
 				onSuccess: (data) => {
 					if (data.upload && data.upload.result === 'Success') {
 						if (data.upload.warnings) {
-							console.log('  警告: 文件已存在，已被覆盖');
+							log('  警告: 文件已存在，已被覆盖');
 						}
 						return {
 							filename,
-							url: fileConfig.url,
+							url: sourceUrl,
 							success: true,
 						};
 					}
@@ -298,7 +260,7 @@ async function uploadFromUrl(
 					if (checkModerationQueued(data, '  文件已进入审核队列')) {
 						return {
 							filename,
-							url: fileConfig.url,
+							url: sourceUrl,
 							success: true,
 						};
 					}
@@ -309,7 +271,7 @@ async function uploadFromUrl(
 					if (checkModerationQueuedError(error, '  文件已进入审核队列')) {
 						throw error;
 					}
-					console.log(`  上传失败（${error.message}），第${attempt}次重试...`);
+					log(`  上传失败（${error.message}），第${attempt}次重试...`);
 				},
 				shouldRetry: () => true
 			}
@@ -319,28 +281,28 @@ async function uploadFromUrl(
 	} catch (error: any) {
 		const errorMessage = error?.message || '';
 		if (errorMessage.includes('moderation-image-queued')) {
-			console.log('  文件已进入审核队列');
+			log('  文件已进入审核队列');
 			return {
 				filename,
-				url: fileConfig.url,
+				url: sourceUrl,
 				success: true,
 			};
 		}
 		if (errorMessage.includes('http-bad-status')) {
-			console.log('  URL上传失败，尝试本地下载后上传...');
+			log('  URL上传失败，尝试本地下载后上传...');
 			ensureTempDir();
 			const sanitizedFilename = filename.replace(/[<>:"/\\|?*]/g, '_');
 			const tempFilePath = resolve(TEMP_DIR, `${Date.now()}_${sanitizedFilename.replace(/^File:/i, '')}`);
 
 			try {
-				const mimeType = await downloadImage(fileConfig.url, tempFilePath);
-				const uploadResult = await uploadFromFile(api, tempFilePath, filename, comment, text, mimeType, dryRun);
+				const mimeType = await downloadImage(sourceUrl, tempFilePath);
+				const uploadResult = await uploadFromFile(api, tempFilePath, resolved, mimeType, dryRun);
 				return uploadResult;
 			} catch (downloadError: any) {
-				console.log(`  本地下载上传失败: ${downloadError.message}`);
+				log(`  本地下载上传失败: ${downloadError.message}`);
 				return {
 					filename,
-					url: fileConfig.url,
+					url: sourceUrl,
 					success: false,
 					error: `URL上传失败且备用渠道失败: ${errorMessage}; 备用渠道: ${downloadError.message}`,
 				};
@@ -351,109 +313,96 @@ async function uploadFromUrl(
 
 		return {
 			filename,
-			url: fileConfig.url,
+			url: sourceUrl,
 			success: false,
 			error: errorMessage || '未知错误',
 		};
 	}
 }
 
-async function batchUpload(
-	api: MediaWikiApi,
-	uploadConfig: UploadConfig,
-	dryRun: boolean,
-): Promise<UploadResult[]> {
-	const results: UploadResult[] = [];
-	const total = uploadConfig.files.length;
-
-	for (let i = 0; i < total; i++) {
-		const fileConfig = uploadConfig.files[i];
-		const index = i + 1;
-
-		console.log(`\n[${index}/${total}] 正在上传: ${fileConfig.filename || '(自动生成)'}`);
-
-		const result = await uploadFromUrl(api, fileConfig, uploadConfig, index, dryRun, uploadConfig.article);
-		results.push(result);
-
-		if (result.success) {
-			console.log('  上传成功！');
-		} else {
-			console.error(`  上传失败: ${result.error}`);
-		}
+/** 按条目来源分派：本机文件走 uploadFromFile，外站地址走 uploadFromUrl */
+async function uploadOne(api: MediaWikiApi, uploadConfig: UploadTaskConfig, entry: UploadFileEntry, dryRun: boolean): Promise<UploadResult> {
+	const resolved = resolveEntry(uploadConfig, entry);
+	log(`  目标文件名: ${resolved.filename}`);
+	if (entry.file !== undefined) {
+		log(`  来源文件: ${entry.file}`);
+		return uploadFromFile(api, entry.file, resolved, mimeTypeForLocalFile(entry.file), dryRun);
 	}
-
-	return results;
+	log(`  来源URL: ${entry.url}`);
+	return uploadFromUrl(api, entry, resolved, dryRun);
 }
 
-function parseArgs(args: string[]): CliArgs {
-	const result: CliArgs = {
-		dryRun: false,
-		verbose: true,
-	};
-
-	for (const arg of args) {
-		if (arg === '--dry-run') {
-			result.dryRun = true;
-		} else if (arg === '--quiet') {
-			result.verbose = false;
+function parseArgs(args: string[]): CliArgs | null {
+	const result: CliArgs = { configFile: '', dryRun: false, verbose: true };
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
+		if (arg === '--dry-run') result.dryRun = true;
+		else if (arg === '--quiet') result.verbose = false;
+		else if (arg === '--config-file' && args[i + 1] !== undefined) {
+			result.configFile = args[i + 1];
+			i++;
 		}
 	}
-
+	if (result.configFile === '') {
+		console.error(USAGE);
+		return null;
+	}
 	return result;
 }
 
 async function main(): Promise<void> {
 	console.log(`Start time: ${new Date().toISOString()}`);
 
+	const args = parseArgs(process.argv.slice(2));
+	if (args === null) process.exit(1);
+	verbose = args.verbose;
+
 	cleanupTempDir();
 
-	const args = parseArgs(process.argv.slice(2));
+	let uploadConfig: UploadTaskConfig;
+	try {
+		uploadConfig = readLocalConfig(args.configFile);
+	} catch (error) {
+		console.error((error as Error).message);
+		process.exit(1);
+	}
 
-	console.log('正在登录zh站...');
-	await clientlogin(zhApi, config.zh.bot.clientUsername!, config.zh.bot.clientPassword!)
-		.then((result) => { console.log('zh站登录成功', result); });
+	const issues = validateUploadConfig(uploadConfig, probeLocalFile);
+	if (issues.length > 0) {
+		console.error('配置校验失败：');
+		for (const issue of issues) console.error(`  - ${issue.message}`);
+		process.exit(1);
+	}
+
+	log(`配置解析成功，共 ${uploadConfig.files.length} 个文件待上传`);
+	if (args.dryRun) log('[试运行模式] 不会实际上传文件');
 
 	console.log('正在登录commons站...');
 	await clientlogin(cmApi, config.cm.bot.clientUsername!, config.cm.bot.clientPassword!, config.cm.api)
-		.then((result) => { console.log('commons站登录成功', result); });
+		.then((result) => { log(`commons站登录成功 ${result}`); });
 
-	console.log(`\n正在读取配置文件: ${CONFIG_PAGE}`);
-	let uploadConfig: UploadConfig;
-	try {
-		uploadConfig = await fetchJsonConfig(zhApi, CONFIG_PAGE);
-	} catch (error) {
-		console.error(`读取配置失败: ${(error as Error).message}`);
-		process.exit(1);
+	const results: UploadResult[] = [];
+	const total = uploadConfig.files.length;
+	for (const [position, entry] of uploadConfig.files.entries()) {
+		log(`\n[${position + 1}/${total}] 正在上传: ${targetFilename(uploadConfig, entry)}`);
+		const result = await uploadOne(cmApi, uploadConfig, entry, args.dryRun);
+		results.push(result);
+		if (result.success) log('  上传成功！');
+		else console.error(`  上传失败: ${result.error}`);
 	}
 
-	console.log('正在验证配置...');
-	const validation = validateConfig(uploadConfig);
-	if (!validation.valid) {
-		console.error('配置验证失败:');
-		validation.errors.forEach(err => console.error(`  - ${err}`));
-		process.exit(1);
-	}
-
-	console.log(`配置文件解析成功，共 ${uploadConfig.files.length} 个文件待上传`);
-
-	if (args.dryRun) {
-		console.log('\n[试运行模式] 不会实际上传文件');
-	}
-
-	const results = await batchUpload(cmApi, uploadConfig, args.dryRun);
-
-	const successCount = results.filter(r => r.success).length;
-	const failCount = results.filter(r => !r.success).length;
+	const successCount = results.filter((r) => r.success).length;
+	const failCount = results.filter((r) => !r.success).length;
 
 	console.log('\n上传完成！');
 	console.log(`成功: ${successCount} 个`);
 	console.log(`失败: ${failCount} 个`);
 
-	if (failCount > 0 && args.verbose) {
+	if (failCount > 0) {
 		console.log('\n失败详情:');
-		results.filter(r => !r.success).forEach(r => {
-			console.log(`  - ${r.filename}: ${r.error}`);
-		});
+		for (const result of results.filter((r) => !r.success)) {
+			console.log(`  - ${result.filename}: ${result.error}`);
+		}
 	}
 
 	console.log(`\nEnd time: ${new Date().toISOString()}`);
