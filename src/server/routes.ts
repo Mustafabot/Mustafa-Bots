@@ -6,6 +6,7 @@ import { validateValues } from '../core/descriptor.js';
 import type { ProgressEvent } from '../core/progress.js';
 import { DESCRIPTORS, findDescriptor } from '../core/registry.js';
 import { isLocalHeaderHost, isLocalOriginUrl, issueToken, verifyPassword, type ServerConfig } from './auth.js';
+import { CategoryService } from './categories.js';
 import { TextDraftStore } from './drafts.js';
 import { HistoryStore } from './history.js';
 import { NamespaceService } from './namespaces.js';
@@ -25,6 +26,7 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 	const uploadTasks = new TextDraftStore('data/gui/upload-tasks');
 	const scans = new ScanStore('data/gui/scans');
 	const namespaces = new NamespaceService();
+	const categories = new CategoryService();
 	const pageText = new PageTextService();
 	const publisher = new RulesetPublisher(rulesets);
 	// 描述符给的短名 → 草稿库；白名单化，避免描述符里的字符串直接参与路径拼接。
@@ -214,6 +216,14 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 				namespaces
 					.list(wiki)
 					.then((result) => sendJson(res, 200, result))
+					.catch((error: Error) => sendJson(res, 500, { error: error.message }));
+				return;
+			}
+
+			if (url.pathname === '/api/categories' && req.method === 'GET') {
+				categories
+					.search(url.searchParams.get('prefix') ?? '')
+					.then((list) => sendJson(res, 200, { categories: list }))
 					.catch((error: Error) => sendJson(res, 500, { error: error.message }));
 				return;
 			}
