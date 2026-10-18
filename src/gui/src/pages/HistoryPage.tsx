@@ -32,9 +32,11 @@ const SUMMARY_LABEL: Record<string, string> = {
 	scanned: '扫描',
 	edited: '编辑',
 	dryRun: '空跑',
+	notDisplayed: '未展示',
 	added: '新增',
 	removed: '删除',
 	undoFailed: '撤销失败',
+	checked: '已检查',
 };
 
 /** 一条页面记录的动作标签 */
