@@ -5,8 +5,9 @@ import { HistoryPage } from './pages/HistoryPage';
 import { RunPage } from './pages/RunPage';
 import { TaskList } from './pages/TaskList';
 import { TextReplacePage } from './pages/TextReplacePage';
+import { UploadPage } from './pages/UploadPage';
 
-type Route = { name: 'list' } | { name: 'task'; id: string } | { name: 'text-replace' } | { name: 'history' };
+type Route = { name: 'list' } | { name: 'task'; id: string } | { name: 'text-replace' } | { name: 'url-upload' } | { name: 'history' };
 
 /** 登录门状态：探测中 / 已认证 / 需登录 / 连不上服务 */
 type Gate = 'checking' | 'authed' | 'login' | 'offline';
@@ -15,6 +16,7 @@ function parseHash(): Route {
 	const hash = window.location.hash.replace(/^#/, '');
 	if (hash.startsWith('/task/')) return { name: 'task', id: decodeURIComponent(hash.slice('/task/'.length)) };
 	if (hash.startsWith('/text-replace')) return { name: 'text-replace' };
+	if (hash.startsWith('/url-upload')) return { name: 'url-upload' };
 	if (hash.startsWith('/history')) return { name: 'history' };
 	return { name: 'list' };
 }
@@ -54,12 +56,14 @@ export function App(): React.JSX.Element {
 				<nav>
 					<a href="#/">任务</a>
 					<a href="#/text-replace">文本替换</a>
+					<a href="#/url-upload">上传</a>
 					<a href="#/history">历史</a>
 				</nav>
 			</header>
 			{route.name === 'list' && <TaskList />}
 			{route.name === 'task' && <RunPage id={route.id} />}
 			{route.name === 'text-replace' && <TextReplacePage />}
+			{route.name === 'url-upload' && <UploadPage />}
 			{route.name === 'history' && <HistoryPage />}
 		</main>
 	);

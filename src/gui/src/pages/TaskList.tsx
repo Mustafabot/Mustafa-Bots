@@ -50,8 +50,8 @@ export function TaskList(): React.JSX.Element {
 			<div className="cards">
 				{descriptors === null && <p className="hint">加载中…</p>}
 				{descriptors?.map((descriptor) => (
-					// 文本替换有专属页面（规则表单 + 扫描 + 勾选提交），卡片直达那里；其余走通用运行页
-					<a className="card" key={descriptor.id} href={descriptor.id === 'text-replace' ? '#/text-replace' : `#/task/${descriptor.id}`}>
+					// 有专属页的任务（文本替换、URL 上传）直达该页，其余走通用运行页
+					<a className="card" key={descriptor.id} href={descriptor.page === undefined ? `#/task/${descriptor.id}` : `#/${descriptor.page}`}>
 						<h3>{descriptor.label}</h3>
 						<p className="entry">{descriptor.entry}</p>
 						<p className="hint">{descriptor.params.length > 0 ? `${descriptor.params.length} 个参数` : '无参数'}</p>

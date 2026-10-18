@@ -50,8 +50,8 @@ export function RunPage({ id }: { id: string }): React.JSX.Element {
 	}, [descriptor]);
 
 	const running = task?.status === 'running';
-	// 带规则集参数的任务（文本替换）需要先选规则集，其选择界面在「文本替换」页
-	const needsRuleset = descriptor?.configFileFlag !== undefined;
+	// 需要配置的任务（文本替换、URL 上传等）要先在自己的专属页里配好；没有专属页的才留在本页拦下
+	const needsConfig = descriptor?.configFileFlag !== undefined;
 	const shownError = error ?? loadError;
 
 	const onStart = (): void => {
@@ -76,13 +76,13 @@ export function RunPage({ id }: { id: string }): React.JSX.Element {
 					<div className="run-controls">
 						{running && <p className="hint">任务运行中，参数已锁定。点上方「中止」可停止。</p>}
 						<ParamForm spec={descriptor} values={values} onChange={setValues} disabled={running} />
-						{needsRuleset && !running && (
+						{needsConfig && !running && (
 							<p className="hint">
-								该任务需要先选规则集，请到 <a href="#/text-replace">文本替换</a> 页操作。
+								该任务需要先配好配置，请到 {descriptor.page === undefined ? '对应的专属页' : <a href={`#/${descriptor.page}`}>{descriptor.label}</a>} 页操作。
 							</p>
 						)}
 						{!running && (
-							<button type="button" className="primary start" onClick={onStart} disabled={busy || needsRuleset}>
+							<button type="button" className="primary start" onClick={onStart} disabled={busy || needsConfig}>
 								{busy ? '启动中…' : '开始'}
 							</button>
 						)}
