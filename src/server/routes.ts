@@ -252,8 +252,19 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 				}
 				try {
 					const body = readFileSync(file);
-					const type = MIME_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
-					res.writeHead(200, { 'content-type': type });
+					// 只有这几种图片按真实类型回：客户端传上来的 .html / .svg 若照扩展名回真实类型，
+					// 浏览器对 /api/uploads/x.html 做顶层导航就会在 GUI 自己的源上执行其中的脚本
+					// （带着 gui_session，等于同源存储型 XSS）。认不出的类型一律当二进制附件下载。
+					const imageType = PREVIEW_IMAGE_TYPES[extname(file).toLowerCase()];
+					const headers: Record<string, string> = { 'x-content-type-options': 'nosniff' };
+					if (imageType !== undefined) {
+						headers['content-type'] = imageType;
+					} else {
+						headers['content-type'] = 'application/octet-stream';
+						// 刻意不带 filename：文件名来自客户端，写进响应头会引入头注入面
+						headers['content-disposition'] = 'attachment';
+					}
+					res.writeHead(200, headers);
 					res.end(body);
 				} catch (error) {
 					sendJson(res, 404, { error: (error as Error).message });
@@ -511,6 +522,20 @@ const MIME_TYPES: Record<string, string> = {
 	'.png': 'image/png',
 	'.ico': 'image/x-icon',
 	'.woff2': 'font/woff2',
+};
+
+// 预览接口按真实类型返回的白名单：只有浏览器不会在其中执行脚本的位图格式。
+// .svg（image/svg+xml）能带脚本，刻意不列入，代价是 SVG 缩略图拿不到真实类型、会显示占位。
+const PREVIEW_IMAGE_TYPES: Record<string, string> = {
+	'.png': 'image/png',
+	'.jpg': 'image/jpeg',
+	'.jpeg': 'image/jpeg',
+	'.gif': 'image/gif',
+	'.webp': 'image/webp',
+	'.bmp': 'image/bmp',
+	'.ico': 'image/x-icon',
+	'.tif': 'image/tiff',
+	'.tiff': 'image/tiff',
 };
 
 function serveStatic(pathname: string, res: ServerResponse): void {

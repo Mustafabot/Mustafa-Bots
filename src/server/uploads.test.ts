@@ -10,4 +10,7 @@ test('上传文件名只取基本名并挡掉逃逸', () => {
 	assert.throws(() => safeUploadName(''), /文件名/);
 	assert.throws(() => safeUploadName('..'), /文件名/);
 	assert.throws(() => safeUploadName('a/b/..'), /文件名/);
+	// 控制字符会污染响应头与文件系统，一并拒掉
+	assert.throws(() => safeUploadName('a\r\nb.png'), /文件名/);
+	assert.throws(() => safeUploadName('图片\u0000.png'), /文件名/);
 });
