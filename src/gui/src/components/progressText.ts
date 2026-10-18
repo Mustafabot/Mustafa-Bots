@@ -23,6 +23,7 @@ const SUMMARY_LABEL: Record<string, string> = {
 	added: '新增',
 	removed: '删除',
 	undoFailed: '撤销失败',
+	checked: '已检查',
 };
 
 /**
