@@ -142,7 +142,7 @@ export interface RunRuleset {
  * 仅同步镜像（--sync-only）则两者都可以没有。名字在这里只当历史标签，缺省记「未命名规则」。
  */
 export function resolveRunRuleset(
-	store: Pick<RulesetStore, 'read'>,
+	store: { read(name: string): { content: string } | null },
 	input: { rulesetName?: string; rulesetContent?: string; syncOnly?: boolean },
 ): RunRuleset | null {
 	const name = typeof input.rulesetName === 'string' ? input.rulesetName.trim() : '';

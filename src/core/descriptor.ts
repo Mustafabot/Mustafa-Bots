@@ -40,8 +40,12 @@ export interface TaskDescriptor {
 	progressFlag: string;
 	/** 该脚本的人类可读日志静默开关，由服务端自动附加：GUI 拉起的任务不需要逐页日志 */
 	quietFlag: string;
-	/** 规则集参数开关；存在则该任务必须选择一个规则集 */
-	rulesetFlag?: string;
+	/** 专属页面的路由名；存在则任务卡片直达该页，不走通用运行页 */
+	page?: string;
+	/** 配置文件开关；存在则该任务必须有配置（内容直传或本地草稿），仅同步镜像除外 */
+	configFileFlag?: string;
+	/** 配置文件草稿库的短名（相对 data/gui/）；缺省 rulesets，即规则集草稿库 */
+	configSource?: string;
 }
 
 export type ParamValue = string | number | boolean | string[];

@@ -4,9 +4,9 @@ import { DESCRIPTORS, findDescriptor } from './registry.js';
 import { buildArgv } from './descriptor.js';
 import type { ParamSpec } from './descriptor.js';
 
-test('注册了两个描述符且 id 唯一', () => {
+test('注册了三个描述符且 id 唯一', () => {
 	const ids = DESCRIPTORS.map((d) => d.id);
-	assert.deepEqual(ids, ['text-replace', 'auto-patrol']);
+	assert.deepEqual(ids, ['text-replace', 'auto-patrol', 'url-upload']);
 	assert.equal(new Set(ids).size, ids.length);
 });
 
@@ -27,12 +27,20 @@ test('AutoPatrol 用等号风格拼参数，且保留 limit=0', () => {
 	assert.deepEqual(argv, ['--mode=edit', '--wiki=zh', '--days=7', '--limit=0', '--dry-run']);
 });
 
-test('两个描述符都声明了进度开关，且只有 TextReplace 需要规则集', () => {
+test('三个描述符都声明了进度开关，且各自声明了配置文件来源', () => {
 	for (const descriptor of DESCRIPTORS) {
 		assert.equal(descriptor.progressFlag, '--progress-json');
 	}
-	assert.equal(findDescriptor('text-replace')?.rulesetFlag, '--config-file');
-	assert.equal(findDescriptor('auto-patrol')?.rulesetFlag, undefined);
+	assert.equal(findDescriptor('text-replace')?.configFileFlag, '--config-file');
+	assert.equal(findDescriptor('text-replace')?.configSource, 'rulesets');
+	assert.equal(findDescriptor('url-upload')?.configSource, 'upload-tasks');
+	assert.equal(findDescriptor('auto-patrol')?.configFileFlag, undefined);
+});
+
+test('有专属页的任务标出路由名', () => {
+	assert.equal(findDescriptor('text-replace')?.page, 'text-replace');
+	assert.equal(findDescriptor('url-upload')?.page, 'url-upload');
+	assert.equal(findDescriptor('auto-patrol')?.page, undefined);
 });
 
 test('危险开关被标记出来', () => {

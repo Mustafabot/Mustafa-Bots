@@ -13,7 +13,9 @@ export const DESCRIPTORS: TaskDescriptor[] = [
 		style: 'space',
 		progressFlag: '--progress-json',
 		quietFlag: '--quiet',
-		rulesetFlag: '--config-file',
+		page: 'text-replace',
+		configFileFlag: '--config-file',
+		configSource: 'rulesets',
 		params: [
 			{
 				kind: 'enum',
@@ -72,6 +74,22 @@ export const DESCRIPTORS: TaskDescriptor[] = [
 			{ kind: 'number', flag: '--interval', label: '请求间隔（毫秒）', default: 4000, min: 0 },
 			{ kind: 'number', flag: '--limit', label: '数量上限', default: 0, min: 0, description: '0 表示不限' },
 			{ kind: 'boolean', flag: '--dry-run', label: '空跑，不实际巡查' },
+		],
+	},
+	{
+		id: 'url-upload',
+		label: 'URL 上传',
+		entry: 'src/upload/UrlUpload.ts',
+		style: 'space',
+		page: 'url-upload',
+		configFileFlag: '--config-file',
+		configSource: 'upload-tasks',
+		progressFlag: '--progress-json',
+		quietFlag: '--quiet',
+		params: [
+			{ kind: 'boolean', flag: '--check', label: '只检查线上状态，不上传' },
+			{ kind: 'boolean', flag: '--only-missing', label: '只上传线上不存在的文件' },
+			{ kind: 'boolean', flag: '--dry-run', label: '空跑，不提交任何上传' },
 		],
 	},
 ];

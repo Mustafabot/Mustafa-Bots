@@ -113,18 +113,17 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 						// 跑这次任务所用规则集的快照：历史库只存参数与页面 revid，事后回溯要知道"当时跑的是哪套规则"，
 						// 故把规则原文随参数一并落库（几百字节的元数据，与"不存 diff 正文"不冲突）
 						let rulesetSnapshot: RunRuleset | null = null;
-						if (descriptor.rulesetFlag) {
-							// 仅同步镜像（--sync-only）的任务不读规则集：CLI 在 sync 下不构建、不校验规则，
-							// 因此可以两样都不带（抓取命名空间发生在用户配规则之前）。
-							// 其余情况要嘛带规则原文（界面上现填的规则，不必先存预设），要嘛指定本地草稿。
+						if (descriptor.configFileFlag) {
+							// 仅同步镜像（--sync-only）的任务不读配置：CLI 在 sync 下不构建、不校验，
+							// 因此可以两样都不带。
 							const syncOnly = values?.['--sync-only'] === true;
 							rulesetSnapshot = resolveRunRuleset(rulesets, { rulesetName, rulesetContent, syncOnly });
 							if (rulesetSnapshot) {
-								// 文件名不能用规则集名：名字可能是页面标题，带 / 与 : 会拼出非法路径
-								const tempFile = resolve('data/gui/runtime', `ruleset-${Date.now()}.json`);
+								// 文件名只用时间戳：配置名可能是页面标题，带 / 与 : 会拼出非法路径
+								const tempFile = resolve('data/gui/runtime', `config-${Date.now()}.json`);
 								mkdirSync(dirname(tempFile), { recursive: true });
 								writeFileSync(tempFile, rulesetSnapshot.content, 'utf-8');
-								injected.push(descriptor.rulesetFlag, tempFile);
+								injected.push(descriptor.configFileFlag, tempFile);
 							}
 						}
 						// 界面勾选的页面清单：脚本要读文件，所以由服务端落一个临时清单
