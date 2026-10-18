@@ -17,6 +17,8 @@ import type {
 	StartTaskBody,
 	TaskDescriptor,
 	TaskRecord,
+	UploadTaskDraft,
+	UploadTaskSummary,
 } from './types';
 
 /**
@@ -114,4 +116,25 @@ export const api = {
 			request<{ draft: RulesetDraft }>(`/api/rulesets/${seg(name)}`, jsonInit('PUT', { content, ...(page === undefined ? {} : { page }) })),
 		publish: (name: string, options: PublishOptions = {}) => request<PublishSuccess>(`/api/rulesets/${seg(name)}/publish`, jsonInit('POST', options)),
 	},
+	uploads: {
+		/**
+		 * 上传一个本机文件：请求体就是文件原始字节，服务端存进 data/gui/uploads/。
+		 * 回参里 `name` 只是文件名，`path` 是仓库相对路径（`data/gui/uploads/<name>`）——
+		 * 配置里要填的是 `path`：脚本以仓库根为工作目录解析它，填 `name` 会判成文件不存在。
+		 */
+		put: (file: File) => request<{ name: string; size: number; path: string }>(`/api/uploads?name=${seg(file.name)}`, { method: 'POST', body: file }),
+		/** 列出现有的暂存文件与总大小，供清理前告知用户将删掉多少 */
+		list: () => request<{ files: Array<{ name: string; size: number }>; total: number }>('/api/uploads'),
+		/** 本机文件的预览地址，直接给 <img src> */
+		previewUrl: (name: string) => `/api/uploads/${seg(name)}`,
+		clear: () => request<{ removed: number }>('/api/uploads', { method: 'DELETE' }),
+	},
+	uploadTasks: {
+		list: () => request<{ tasks: UploadTaskSummary[] }>('/api/upload-tasks'),
+		read: (name: string) => request<{ task: UploadTaskDraft | null }>(`/api/upload-tasks/${seg(name)}`),
+		save: (name: string, content: string) => request<{ task: UploadTaskDraft }>(`/api/upload-tasks/${seg(name)}`, jsonInit('PUT', { content })),
+		remove: (name: string) => request<{ ok: boolean }>(`/api/upload-tasks/${seg(name)}`, { method: 'DELETE' }),
+	},
+	/** 共享站的分类前缀搜索，供分类输入补全 */
+	categories: (prefix: string) => request<{ categories: string[] }>(`/api/categories?prefix=${seg(prefix)}`),
 };

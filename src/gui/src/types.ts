@@ -48,8 +48,12 @@ export interface TaskDescriptor {
 	progressFlag: string;
 	/** 静默人类可读日志的开关，由服务端自动附加 */
 	quietFlag: string;
-	/** 规则集参数开关；存在则该任务要有规则（内容直传或本地草稿），仅同步镜像除外 */
-	rulesetFlag?: string;
+	/** 专属页面的路由名；存在则任务卡片直达该页 */
+	page?: string;
+	/** 配置文件开关；存在则该任务由服务端注入一份配置文件 */
+	configFileFlag?: string;
+	/** 配置文件草稿库的短名 */
+	configSource?: string;
 }
 
 /** 表单值：字符串、数字、布尔或字符串数组 */
@@ -298,4 +302,19 @@ export interface PublishOptions {
 export interface PublishSuccess {
 	ok: true;
 	revid: number | null;
+}
+
+// ── 上传任务草稿（镜像 src/server/drafts.ts 的 TextDraftStore 与 /api/upload-tasks）──
+
+/** 列表用的上传任务元信息 */
+export interface UploadTaskSummary {
+	name: string;
+	updatedAt: number;
+}
+
+/** 一份上传任务草稿；content 是配置 JSON 原文 */
+export interface UploadTaskDraft {
+	name: string;
+	content: string;
+	updatedAt: number;
 }

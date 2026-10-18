@@ -51,7 +51,7 @@ export function RunPage({ id }: { id: string }): React.JSX.Element {
 
 	const running = task?.status === 'running';
 	// 带规则集参数的任务（文本替换）需要先选规则集，其选择界面在「文本替换」页
-	const needsRuleset = descriptor?.rulesetFlag !== undefined;
+	const needsRuleset = descriptor?.configFileFlag !== undefined;
 	const shownError = error ?? loadError;
 
 	const onStart = (): void => {
