@@ -22,7 +22,8 @@ export function outcomesFromEvents(events: ProgressEvent[]): Map<string, UploadO
 		if (event.type === 'detail') {
 			const online = event.fields['线上状态'];
 			if (typeof online !== 'string') continue;
-			outcomes.set(keyOf(event.title), { ...outcomes.get(keyOf(event.title)), online });
+			const key = keyOf(event.title);
+			outcomes.set(key, { ...outcomes.get(key), online });
 			continue;
 		}
 		if (event.type !== 'edit') continue;

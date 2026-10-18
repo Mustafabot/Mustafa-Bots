@@ -65,7 +65,7 @@ export function UploadFileList({ rows, outcomes, prefix, selectedId, onSelect, o
 										<option value="">（默认 Copyright）</option>
 										{LICENSE_OPTIONS.map((option) => (
 											<option key={option.value} value={option.value} title={option.title}>
-												{option.label}
+												{option.value === 'none:gotoCommons' ? `${option.label}（批量上传不支持）` : option.label}
 											</option>
 										))}
 									</select>

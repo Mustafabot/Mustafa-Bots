@@ -30,7 +30,14 @@ function suggestedFilename(source: { url?: string; file?: string }): string {
 	const raw = source.url ?? source.file ?? '';
 	const withoutQuery = raw.split(/[?#]/)[0];
 	const last = withoutQuery.split(/[\\/]/).pop() ?? '';
-	return last === '' ? '' : decodeURIComponent(last);
+	if (last === '') return '';
+	try {
+		return decodeURIComponent(last);
+	} catch {
+		// 末段含裸 % 之类会让 decodeURIComponent 抛 URIError；退回原文，
+		// 否则粘贴一批地址时整批都会丢，本机文件还会被误报成「暂存失败」
+		return last;
+	}
 }
 
 /** 造一行；粘贴地址与选择本机文件都走它 */

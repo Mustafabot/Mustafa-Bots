@@ -51,3 +51,10 @@ test('粘贴地址时按末段预填文件名', () => {
 	assert.equal(makeRow({ url: 'https://example.com/' }).filename, '');
 	assert.equal(makeRow({ file: 'C:/tmp/b.png' }).filename, 'b.png');
 });
+
+test('末段含裸 % 时退回原文，不抛错', () => {
+	// decodeURIComponent('100%off.png') 会抛 URIError；这里应退回原样，而不是让整批粘贴丢掉
+	assert.equal(makeRow({ url: 'https://example.com/100%off.png' }).filename, '100%off.png');
+	// 正常编码的末段仍照常解码
+	assert.equal(makeRow({ url: 'https://example.com/%E5%9B%BE.png' }).filename, '图.png');
+});

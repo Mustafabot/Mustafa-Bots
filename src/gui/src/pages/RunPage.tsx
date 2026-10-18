@@ -78,7 +78,7 @@ export function RunPage({ id }: { id: string }): React.JSX.Element {
 						<ParamForm spec={descriptor} values={values} onChange={setValues} disabled={running} />
 						{needsConfig && !running && (
 							<p className="hint">
-								该任务需要先配好配置，请到 {descriptor.page === undefined ? '对应的专属页' : <a href={`#/${descriptor.page}`}>{descriptor.label}</a>} 页操作。
+								该任务需要先配好配置，请到 {descriptor.page === undefined ? '对应的专属页' : <a href={`#/${descriptor.page}`}>{descriptor.label}</a>} 里操作。
 							</p>
 						)}
 						{!running && (

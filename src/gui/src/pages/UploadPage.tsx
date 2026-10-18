@@ -2,7 +2,7 @@
 //
 // 任务配置存本地草稿（api.uploadTasks），不写 wiki——条目里有本机文件的绝对路径。
 // 跑任务时把表单内容随 rulesetContent 直接下发，不必先保存草稿。
-// [检查线上状态] 走 --check（只查不传），[差分上传] 走 --only-missing。
+// [检查线上状态] 走 --check（只查不传），[差分上传] 走 --only-missing，[空跑] 走 --dry-run（走一遍流程但不写 wiki）。
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../api';
 import { CategoryInput } from '../components/CategoryInput';
@@ -16,7 +16,7 @@ import { outcomesFromEvents } from '../uploadOutcome';
 import type { ParamValue, StartTaskBody, TaskDescriptor, UploadTaskSummary } from '../types';
 
 /** 本次要跑的动作 */
-type Action = 'check' | 'upload' | 'diff';
+type Action = 'check' | 'upload' | 'diff' | 'dryrun';
 
 interface Notice {
 	text: string;
@@ -87,6 +87,7 @@ export function UploadPage(): React.JSX.Element {
 		const values: Record<string, ParamValue> = {};
 		if (action === 'check') values['--check'] = true;
 		if (action === 'diff') values['--only-missing'] = true;
+		if (action === 'dryrun') values['--dry-run'] = true;
 		const body: StartTaskBody = {
 			descriptorId: descriptor.id,
 			values,
@@ -216,19 +217,20 @@ export function UploadPage(): React.JSX.Element {
 			</div>
 			{shownError !== null && <p className="error">{shownError}</p>}
 			{notice !== null && <p className={notice.kind === 'error' ? 'error' : 'hint'}>{notice.text}</p>}
+			{descriptor === null && loadError === null && <p className="hint">加载中…</p>}
 
 			<ProgressPanel task={task} events={events} onAbort={() => void abort()} aborting={busy && running} />
 
 			<div className="upload-shared">
-				<label className="field">
-					<span>前缀</span>
-					<input type="text" value={form.prefix} disabled={running} placeholder="拼在每个目标文件名前面" onChange={(event) => setForm((prev) => ({ ...prev, prefix: event.target.value }))} />
-				</label>
+				<div className="field">
+					<label htmlFor="upload-prefix">前缀</label>
+					<input id="upload-prefix" type="text" value={form.prefix} disabled={running} placeholder="拼在每个目标文件名前面" onChange={(event) => setForm((prev) => ({ ...prev, prefix: event.target.value }))} />
+				</div>
 				<CategoryInput categories={form.categories} disabled={running} onChange={(categories) => setForm((prev) => ({ ...prev, categories }))} />
-				<label className="field">
-					<span>上传摘要</span>
-					<input type="text" value={form.comment} disabled={running} placeholder="留空则按协议、人物、作者、源地址、分类自动拼" onChange={(event) => setForm((prev) => ({ ...prev, comment: event.target.value }))} />
-				</label>
+				<div className="field">
+					<label htmlFor="upload-comment">上传摘要</label>
+					<input id="upload-comment" type="text" value={form.comment} disabled={running} placeholder="留空则按协议、人物、作者、源地址、分类自动拼" onChange={(event) => setForm((prev) => ({ ...prev, comment: event.target.value }))} />
+				</div>
 			</div>
 
 			<div
@@ -263,6 +265,9 @@ export function UploadPage(): React.JSX.Element {
 				<button type="button" className="primary" disabled={descriptor === null || running || form.rows.length === 0} onClick={() => void startAction('upload')}>
 					上传
 				</button>
+				<button type="button" disabled={descriptor === null || running || form.rows.length === 0} onClick={() => void startAction('dryrun')}>
+					空跑
+				</button>
 				<button type="button" disabled={descriptor === null || running || form.rows.length === 0} onClick={() => void startAction('diff')}>
 					差分上传
 				</button>
@@ -294,10 +299,10 @@ export function UploadPage(): React.JSX.Element {
 			/>
 
 			<div className="upload-drafts">
-				<label className="field">
-					<span>任务名</span>
-					<input type="text" value={taskName} disabled={running} placeholder="起个名字才能保存到本地草稿" onChange={(event) => setTaskName(event.target.value)} />
-				</label>
+				<div className="field">
+					<label htmlFor="upload-task-name">任务名</label>
+					<input id="upload-task-name" type="text" value={taskName} disabled={running} placeholder="起个名字才能保存到本地草稿" onChange={(event) => setTaskName(event.target.value)} />
+				</div>
 				<button type="button" disabled={running} onClick={() => void saveDraft()}>
 					保存草稿
 				</button>
