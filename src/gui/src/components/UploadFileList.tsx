@@ -1,5 +1,6 @@
 // 上传文件列表：每行给出缩略图、来源、目标文件名、逐条信息与删除按钮。
 // 缩略图直接给地址：本机文件走服务端的预览接口，外站地址交给浏览器加载（加载不出来就显示占位）。
+import { useState } from 'react';
 import { api } from '../api';
 import { LICENSE_OPTIONS } from '../licenseOptions';
 import type { UploadRow } from '../uploadTaskCodec';
@@ -25,6 +26,9 @@ function patchRow(rows: UploadRow[], id: string, patch: Partial<UploadRow>): Upl
 
 /** 上传文件列表 */
 export function UploadFileList({ rows, outcomes, prefix, selectedId, onSelect, onChange, disabled = false }: UploadFileListProps): React.JSX.Element {
+	// 缩略图加载失败的行 id：外站图被禁热链或已失效时退回与「无预览」相同的占位，
+	// 不给浏览器破图标留位置
+	const [failedThumbs, setFailedThumbs] = useState<ReadonlySet<string>>(new Set());
 	if (rows.length === 0) {
 		return <p className="hint">还没有文件。可以粘贴一批地址，或选择本机文件。</p>;
 	}
@@ -37,9 +41,12 @@ export function UploadFileList({ rows, outcomes, prefix, selectedId, onSelect, o
 				const outcome = outcomes.get(target) ?? {};
 				const source = row.url !== '' ? row.url : row.file;
 				const preview = row.url !== '' ? row.url : row.file !== '' ? api.uploads.previewUrl(row.file.split(/[\\/]/).pop() ?? '') : '';
+				const showThumb = preview !== '' && !failedThumbs.has(row.id);
 				return (
 					<li className={`upload-row${selectedId === row.id ? ' upload-row-selected' : ''}`} key={row.id} onClick={() => onSelect(row.id)}>
-						<div className="upload-thumb">{preview === '' ? <span className="hint">无预览</span> : <img src={preview} alt="" />}</div>
+						<div className="upload-thumb">
+							{showThumb ? <img src={preview} alt="" onError={() => setFailedThumbs((prev) => new Set(prev).add(row.id))} /> : <span className="hint">无预览</span>}
+						</div>
 						<div className="upload-fields">
 							<div className="upload-source">
 								<span className="hint">来源</span>

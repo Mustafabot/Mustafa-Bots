@@ -3,7 +3,7 @@
 // 任务配置存本地草稿（api.uploadTasks），不写 wiki——条目里有本机文件的绝对路径。
 // 跑任务时把表单内容随 rulesetContent 直接下发，不必先保存草稿。
 // [检查线上状态] 走 --check（只查不传），[差分上传] 走 --only-missing。
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { ApiError, api } from '../api';
 import { CategoryInput } from '../components/CategoryInput';
 import { LogView } from '../components/LogView';
@@ -34,7 +34,6 @@ export function UploadPage(): React.JSX.Element {
 	const [pasteOpen, setPasteOpen] = useState(false);
 	const [pasteText, setPasteText] = useState('');
 	const [selectedId, setSelectedId] = useState<string | null>(null);
-	const pendingRef = useRef<Action | null>(null);
 
 	const { task, events, busy, error, start, abort } = useTaskRun();
 
@@ -94,10 +93,8 @@ export function UploadPage(): React.JSX.Element {
 			// 名字只当历史标签，没填就给一个能认出来的
 			rulesetName: taskName.trim() === '' ? '未命名上传任务' : taskName.trim(),
 		};
-		pendingRef.current = action;
 		setNotice(null);
-		const started = await start(body);
-		if (started === null) pendingRef.current = null;
+		await start(body);
 	};
 
 	const saveDraft = async (): Promise<void> => {
@@ -125,6 +122,8 @@ export function UploadPage(): React.JSX.Element {
 			}
 			setTaskName(name);
 			setForm(decodeUploadTask(result.task.content));
+			// 换了一整份行（新 id），旧的选中 id 已经不存在，清掉免得「同步文件信息」点了只报错
+			setSelectedId(null);
 			setNotice({ text: `已载入草稿「${name}」。`, kind: 'info' });
 		} catch (reason) {
 			setNotice({ text: reason instanceof ApiError ? reason.message : '载入草稿失败', kind: 'error' });
@@ -184,13 +183,13 @@ export function UploadPage(): React.JSX.Element {
 			</div>
 
 			<div className="upload-actions">
-				<button type="button" disabled={running || form.rows.length === 0} onClick={() => void startAction('check')}>
+				<button type="button" disabled={descriptor === null || running || form.rows.length === 0} onClick={() => void startAction('check')}>
 					检查线上状态
 				</button>
-				<button type="button" className="primary" disabled={running || form.rows.length === 0} onClick={() => void startAction('upload')}>
+				<button type="button" className="primary" disabled={descriptor === null || running || form.rows.length === 0} onClick={() => void startAction('upload')}>
 					上传
 				</button>
-				<button type="button" disabled={running || form.rows.length === 0} onClick={() => void startAction('diff')}>
+				<button type="button" disabled={descriptor === null || running || form.rows.length === 0} onClick={() => void startAction('diff')}>
 					差分上传
 				</button>
 				<button type="button" disabled={running || selectedId === null} onClick={syncSelectedInfo}>
