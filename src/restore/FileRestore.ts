@@ -5,6 +5,7 @@ import process from 'process';
 import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
+import { createEmitter, type EmitProgress } from '../core/progress.js';
 
 interface RestoreResult {
 	filename: string;
@@ -183,7 +184,7 @@ async function undoLastEdit(
 	api: MediaWikiApi,
 	title: string,
 	comment: string,
-): Promise<{ success: boolean; error?: string; noEdits?: boolean }> {
+): Promise<{ success: boolean; error?: string; noEdits?: boolean; undone?: { revid: number; user: string; comment: string } }> {
 	let revisions: Array<{ revid: number; user: string; comment: string }>;
 
 	try {
@@ -236,7 +237,7 @@ async function undoLastEdit(
 			});
 
 			if (data.edit && data.edit.result === 'Success') {
-				return { success: true };
+				return { success: true, undone: { revid: lastRevId, user: lastRevUser, comment: lastRevComment } };
 			}
 
 			if ((data as any).edit && (data as any).edit.captcha) {
@@ -269,6 +270,7 @@ async function processFile(
 	rawFilename: string,
 	comment: string,
 	options: CliArgs,
+	emit: EmitProgress,
 	index: number,
 	total: number,
 ): Promise<RestoreResult> {
@@ -276,7 +278,11 @@ async function processFile(
 		? rawFilename
 		: `File:${rawFilename}`;
 
-	console.log(`\n[${index}/${total}] 处理: ${filename}`);
+	const log = (message: string): void => {
+		if (options.verbose) console.log(message);
+	};
+
+	log(`\n[${index}/${total}] 处理: ${filename}`);
 
 	const result: RestoreResult = {
 		filename,
@@ -287,61 +293,97 @@ async function processFile(
 
 	const deletedRevisions = await fetchDeletedRevisions(api, filename);
 	if (deletedRevisions.length === 0) {
-		console.log('  页面不在删除记录中，跳过');
+		log('  页面不在删除记录中，跳过');
 		result.skipped = true;
 		result.skipReason = '页面不在删除记录中';
+		emit({ type: 'detail', title: filename, fields: { 删除者: null, 理由: null, 时间: null, 版本数: 0, 可否还原: '不在删除记录中' } });
+		emit({ type: 'edit', title: filename, status: 'skipped', oldRevid: null, newRevid: null, message: '页面不在删除记录中' });
 		return result;
 	}
 
-	console.log(`  删除修订数: ${deletedRevisions.length}`);
+	const latest = deletedRevisions[0];
+	emit({
+		type: 'detail',
+		title: filename,
+		fields: {
+			删除者: latest?.user ?? null,
+			理由: latest?.comment ?? null,
+			时间: latest?.timestamp ?? null,
+			版本数: deletedRevisions.length,
+			可否还原: '可还原',
+		},
+	});
+
+	log(`  删除修订数: ${deletedRevisions.length}`);
 
 	if (options.dryRun) {
-		console.log('  [试运行] 将还原此文件');
+		log('  [试运行] 将还原此文件');
 		if (!options.noUndoEdit) {
-			console.log('  [试运行] 将在还原后撤销最后一笔编辑');
+			log('  [试运行] 将在还原后撤销最后一笔编辑');
 		}
 		result.skipped = true;
 		result.skipReason = '试运行模式';
+		emit({ type: 'edit', title: filename, status: 'skipped', oldRevid: null, newRevid: null, message: '[DRY-RUN] 将还原此文件' });
 		return result;
 	}
 
-	console.log(`  还原文件...`);
+	log(`  还原文件...`);
 	const undeleteResult = await undeleteFile(api, filename, comment);
 	if (!undeleteResult.success) {
 		if (undeleteResult.noResults) {
-			console.log('  没有可还原的版本，跳过');
+			log('  没有可还原的版本，跳过');
 			result.skipped = true;
 			result.skipReason = '没有可还原的删除版本';
 		} else {
 			console.error(`  还原失败: ${undeleteResult.error}`);
 			result.undeleteError = undeleteResult.error;
 		}
+		emit({
+			type: 'edit',
+			title: filename,
+			status: 'failed',
+			oldRevid: null,
+			newRevid: null,
+			message: undeleteResult.noResults ? '没有可还原的删除版本' : `还原失败：${undeleteResult.error}`,
+		});
 		return result;
 	}
 
 	result.undeleteSuccess = true;
-	console.log('  还原成功');
+	log('  还原成功');
 
 	if (options.noUndoEdit) {
-		console.log('  跳过撤销最后一笔编辑（--no-undo-edit）');
+		log('  跳过撤销最后一笔编辑（--no-undo-edit）');
 		result.undoSuccess = true;
+		emit({ type: 'edit', title: filename, status: 'changed', oldRevid: null, newRevid: null, message: '还原成功（未撤销编辑）' });
 		return result;
 	}
 
-	console.log('  撤销最后一笔编辑...');
+	log('  撤销最后一笔编辑...');
 	await new Promise(resolve => setTimeout(resolve, 500));
 
 	const undoResult = await undoLastEdit(api, filename, comment);
 	if (undoResult.noEdits) {
-		console.log(`  无法撤销: ${undoResult.error}`);
+		log(`  无法撤销: ${undoResult.error}`);
 		result.undoSuccess = true;
 	} else if (!undoResult.success) {
 		console.error(`  撤销失败: ${undoResult.error}`);
 		result.undoError = undoResult.error;
 	} else {
 		result.undoSuccess = true;
-		console.log('  撤销成功');
+		log('  撤销成功');
 	}
+
+	const undone = undoResult.undone;
+	const detail = undone === undefined ? '' : `，撤销 revid=${undone.revid}（${undone.user}：${undone.comment || '无摘要'}）`;
+	emit({
+		type: 'edit',
+		title: filename,
+		status: 'changed',
+		oldRevid: null,
+		newRevid: null,
+		message: result.undoError === undefined ? `还原成功${detail}` : `还原成功，撤销失败：${result.undoError}`,
+	});
 
 	return result;
 }
@@ -371,6 +413,10 @@ async function main(): Promise<void> {
 
 	const args = parseArgs(process.argv.slice(2));
 
+	const emit = createEmitter(process.argv.includes('--progress-json'));
+	emit({ type: 'start', task: '文件还原' });
+	emit({ type: 'phase', name: '读取队列' });
+
 	console.log('正在登录zh站和commons站...');
 	const [zhResult, cmResult] = await Promise.all([
 		clientlogin(zhApi, config.zh.bot.clientUsername!, config.zh.bot.clientPassword!),
@@ -393,6 +439,9 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
+	emit({ type: 'progress', done: 0, total: filenames.length, message: '待还原' });
+	emit({ type: 'phase', name: '还原' });
+
 	const comment = DEFAULT_COMMENT;
 	const total = filenames.length;
 
@@ -407,8 +456,9 @@ async function main(): Promise<void> {
 	const results: RestoreResult[] = [];
 
 	for (let i = 0; i < total; i++) {
-		const result = await processFile(cmApi, filenames[i], comment, args, i + 1, total);
+		const result = await processFile(cmApi, filenames[i], comment, args, emit, i + 1, total);
 		results.push(result);
+		emit({ type: 'progress', done: i + 1, total, message: '已处理' });
 	}
 
 	const skipped = results.filter(r => r.skipped);
@@ -445,6 +495,16 @@ async function main(): Promise<void> {
 			}
 		}
 	}
+
+	emit({
+		type: 'done',
+		summary: {
+			changed: undeleteSuccess.length,
+			skipped: skipped.length,
+			failed: undeleteFailed.length,
+			undoFailed: undoFailed.length,
+		},
+	});
 
 	console.log('\n正在清空队列...');
 	if (!args.dryRun) {
