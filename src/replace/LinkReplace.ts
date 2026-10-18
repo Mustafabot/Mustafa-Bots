@@ -8,6 +8,7 @@ import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { buildTemplateNameMap } from '../utils/templateRedirects.js';
 import { checkModerationQueued, checkModerationQueuedError, extractApiError, isPermissionDeniedError } from '../utils/retry.js';
+import { createEmitter, type EmitProgress } from '../core/progress.js';
 import type { MwApiParams } from 'wiki-saikou';
 import type { ApiEditResponse, ApiMoveResponse, ApiParseResponse, ApiQueryResponse } from 'types-mediawiki-response';
 
@@ -531,12 +532,12 @@ async function fetchJsonConfig(pageTitle: string): Promise<BotConfig> {
 	}
 }
 
-/** 取页面正文与是否为消歧义页（pageprops.disambiguation） */
-async function fetchPageData(title: string): Promise<{ content: string | null; isDisambiguation: boolean }> {
+/** 取页面正文、是否为消歧义页（pageprops.disambiguation）与当前版本号 */
+async function fetchPageData(title: string): Promise<{ content: string | null; isDisambiguation: boolean; revid: number | null }> {
 	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
 		prop: 'revisions|pageprops',
-		rvprop: 'content',
+		rvprop: 'ids|content',
 		titles: title,
 	}, {
 		retry: 15,
@@ -546,7 +547,8 @@ async function fetchPageData(title: string): Promise<{ content: string | null; i
 	const page = pages ? Object.values(pages)[0] : undefined;
 	const content = page?.revisions?.[0]?.content ?? null;
 	const isDisambiguation = page?.pageprops !== undefined && 'disambiguation' in page.pageprops;
-	return { content, isDisambiguation };
+	const revid = typeof page?.revisions?.[0]?.revid === 'number' ? page.revisions[0].revid : null;
+	return { content, isDisambiguation, revid };
 }
 
 async function fetchPageContent(title: string): Promise<string | null> {
@@ -633,7 +635,7 @@ async function attemptMove(params: MwApiParams): Promise<{ ok: boolean; code?: s
 }
 
 /** 移动阶段：返回移动成功（或视为已完成）的规则，失败的规则本轮不参与链接替换 */
-async function runMovePhase(cfg: BotConfig, summary: string, interval: number, dryRun: boolean, log: (msg: string) => void): Promise<PreparedRule[]> {
+async function runMovePhase(cfg: BotConfig, summary: string, interval: number, dryRun: boolean, log: (msg: string) => void, emit: EmitProgress): Promise<PreparedRule[]> {
 	const moveCfg = cfg.move ?? {};
 	const applicable: PreparedRule[] = [];
 	console.log(`== 移动阶段（${cfg.replacements.length} 条规则） ==`);
@@ -648,12 +650,15 @@ async function runMovePhase(cfg: BotConfig, summary: string, interval: number, d
 		const state = await checkMoveState(rule.fromTitle, rule.toTitle);
 		if (state === 'redirected') {
 			log(`  ${rule.fromTitle} 已是 ${rule.toTitle} 的重定向，跳过移动`);
+			emit({ type: 'edit', title: rule.fromTitle, status: 'skipped', oldRevid: null, newRevid: null, message: `已是 ${rule.toTitle} 的重定向` });
 			applicable.push(rule);
 		} else if (state === 'missing') {
 			console.log(`  ${rule.fromTitle} 不存在，视为已完成移动`);
+			emit({ type: 'edit', title: rule.fromTitle, status: 'skipped', oldRevid: null, newRevid: null, message: '页面不存在，视为已完成移动' });
 			applicable.push(rule);
 		} else if (dryRun) {
 			log(`  [DRY-RUN] 将移动 ${rule.fromTitle} → ${rule.toTitle}`);
+			emit({ type: 'edit', title: rule.fromTitle, status: 'changed', oldRevid: null, newRevid: null, message: `[DRY-RUN] 移动到 ${rule.toTitle}` });
 			applicable.push(rule);
 		} else {
 			const params: MwApiParams = {
@@ -680,9 +685,11 @@ async function runMovePhase(cfg: BotConfig, summary: string, interval: number, d
 			}
 			if (result.ok) {
 				log(`  已移动 ${rule.fromTitle} → ${rule.toTitle}`);
+				emit({ type: 'edit', title: rule.fromTitle, status: 'changed', oldRevid: null, newRevid: null, message: `已移动到 ${rule.toTitle}` });
 				applicable.push(rule);
 			} else {
 				console.error(`  移动失败 ${rule.fromTitle} → ${rule.toTitle}: [${result.code}] ${result.info}（该规则本轮不执行链接替换）`);
+				emit({ type: 'edit', title: rule.fromTitle, status: 'failed', oldRevid: null, newRevid: null, message: `移动失败：[${result.code}] ${result.info}` });
 			}
 		}
 		await sleep(interval);
@@ -753,7 +760,7 @@ async function attemptEdit(params: MwApiParams): Promise<{ data: ApiEditResponse
 	}
 }
 
-async function submitEdit(title: string, text: string, summary: string, log: (msg: string) => void): Promise<void> {
+async function submitEdit(title: string, text: string, summary: string, log: (msg: string) => void): Promise<number | null> {
 	const params = {
 		action: 'edit',
 		title,
@@ -776,12 +783,13 @@ async function submitEdit(title: string, text: string, summary: string, log: (ms
 	}
 	if (thrown) throw thrown;
 	// moderation-*-queued 是 error 形态的成功响应，必须在 extractApiError 判失败之前处理
-	if (checkModerationQueued(data, '  编辑请求已进入审核队列（视为成功）')) return;
+	if (checkModerationQueued(data, '  编辑请求已进入审核队列（视为成功）')) return null;
 	const apiError = extractApiError(data);
 	if (apiError) throw new Error(`[${apiError.code}] ${apiError.info}`);
 	if (data?.edit?.result !== 'Success') {
 		throw new Error(`编辑响应异常: ${JSON.stringify(data)}`);
 	}
+	return typeof data.edit.newrevid === 'number' ? data.edit.newrevid : null;
 }
 
 async function processPage(
@@ -791,8 +799,8 @@ async function processPage(
 	summary: string,
 	dryRun: boolean,
 	log: (msg: string) => void,
-): Promise<Map<string, number>> {
-	const { content, isDisambiguation } = await fetchPageData(title);
+): Promise<{ hits: Map<string, number>; oldRevid: number | null; newRevid: number | null }> {
+	const { content, isDisambiguation, revid } = await fetchPageData(title);
 	if (content === null) {
 		throw new Error('页面不存在或无法获取内容');
 	}
@@ -803,13 +811,13 @@ async function processPage(
 	replaceTemplateArgs(parsed, templateMap, index, hits, isDisambiguation);
 	renameTransclusions(parsed, index, hits);
 	const newContent = parsed.toString();
-	if (newContent === content) return hits;
+	if (newContent === content) return { hits, oldRevid: revid, newRevid: revid };
 	if (dryRun) {
 		log('  [DRY-RUN] 将提交编辑');
-		return hits;
+		return { hits, oldRevid: revid, newRevid: null };
 	}
-	await submitEdit(title, newContent, summary, log);
-	return hits;
+	const newRevid = await submitEdit(title, newContent, summary, log);
+	return { hits, oldRevid: revid, newRevid };
 }
 
 function parseArgs(args: string[]): CliArgs | null {
@@ -881,6 +889,8 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 	console.log(`Start time: ${new Date().toISOString()}`);
 	const cliArgs = parseArgs(process.argv.slice(2));
 	if (!cliArgs) process.exit(1);
+	const emit = createEmitter(process.argv.includes('--progress-json'));
+	emit({ type: 'start', task: '链接替换' });
 	const verbose = !cliArgs.quiet;
 	const log = (msg: string) => {
 		if (verbose) console.log(msg);
@@ -898,8 +908,9 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 		const templateMap = await buildTemplateMap(cfg.linkTemplates);
 		if (templateMap.size > 0) log(`链接模板配置 ${cfg.linkTemplates!.length} 项（含重定向共 ${templateMap.size} 个模板名）`);
 
+		if (mode === 'move') emit({ type: 'phase', name: '移动阶段' });
 		const applicableRules: PreparedRule[] = mode === 'move'
-			? await runMovePhase(cfg, summary, cliArgs.interval, cliArgs.dryRun, log)
+			? await runMovePhase(cfg, summary, cliArgs.interval, cliArgs.dryRun, log, emit)
 			: cfg.replacements.map(prepareRule);
 		if (applicableRules.length === 0) {
 			console.log('没有可用的替换规则（全部移动失败），结束');
@@ -914,6 +925,7 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 		}
 		log(`待处理页面共 ${pages.length} 个`);
 
+		emit({ type: 'phase', name: '替换阶段' });
 		const checkpoint = loadCheckpoint(cliArgs.configPage, configFingerprint(cfg), cliArgs);
 		let changed = 0;
 		let unchanged = 0;
@@ -921,15 +933,27 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 		for (const title of pages) {
 			if (checkpoint.completed.includes(title)) {
 				log(`跳过（checkpoint 已完成）: ${title}`);
+				emit({ type: 'edit', title, status: 'skipped', oldRevid: null, newRevid: null, message: '续跑：checkpoint 已完成' });
+				emit({ type: 'progress', done: checkpoint.completed.length, total: pages.length, message: '已处理' });
 				continue;
 			}
 			try {
-				const hits = await processPage(title, index, templateMap, summary, cliArgs.dryRun, log);
+				const { hits, oldRevid, newRevid } = await processPage(title, index, templateMap, summary, cliArgs.dryRun, log);
+				const detail = [...hits.entries()].map(([rule, count]) => `${rule} ${count} 处`).join('，');
 				if (hits.size > 0) {
-					console.log(`${title}: ${[...hits.entries()].map(([rule, count]) => `${rule} ${count} 处`).join('，')}`);
+					console.log(`${title}: ${detail}`);
 					changed++;
+					emit({
+						type: 'edit',
+						title,
+						status: 'changed',
+						oldRevid,
+						newRevid: cliArgs.dryRun ? null : newRevid,
+						message: cliArgs.dryRun ? `[DRY-RUN] ${detail}` : detail,
+					});
 				} else {
 					unchanged++;
+					emit({ type: 'edit', title, status: 'skipped', oldRevid, newRevid: oldRevid, message: '无匹配' });
 				}
 				// 无论是否命中均标记完成：无命中页重跑也不会再命中
 				checkpoint.completed.push(title);
@@ -941,9 +965,11 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 					process.exit(1);
 				}
 				console.error(`处理失败 ${title}: ${err.message}`);
+				emit({ type: 'edit', title, status: 'failed', oldRevid: null, newRevid: null, message: err.message });
 				checkpoint.failed[title] = err.message;
 				failed++;
 			}
+			emit({ type: 'progress', done: checkpoint.completed.length, total: pages.length, message: '已处理' });
 			if (!cliArgs.dryRun) saveCheckpoint(checkpoint);
 			await sleep(cliArgs.interval);
 		}
@@ -951,6 +977,7 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 		console.log(`\n汇总：修改 ${changed} 页，无变化 ${unchanged} 页，失败 ${failed} 页` +
 			(mode === 'move' ? `，适用规则 ${applicableRules.length}/${cfg.replacements.length} 条` : '') +
 			(cliArgs.dryRun ? '（dry-run，未提交任何编辑）' : ''));
+		emit({ type: 'done', summary: { changed, skipped: unchanged, failed } });
 		if (!cliArgs.dryRun && Object.keys(checkpoint.failed).length > 0) {
 			console.log('失败页面（续跑将自动重试）:');
 			for (const [title, message] of Object.entries(checkpoint.failed)) {
