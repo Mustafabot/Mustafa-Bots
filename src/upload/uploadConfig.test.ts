@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { MAX_UPLOAD_BYTES, parseUploadConfig, validateUploadConfig, type UploadTaskConfig } from './uploadConfig.js';
+import { MAX_UPLOAD_BYTES, parseUploadConfig, validateUploadConfig, generateFilePageText, generateUploadComment, normalizeFileTitle, type UploadTaskConfig } from './uploadConfig.js';
 
 /** 造一份最小可用的配置；用 overrides 改单个条目 */
 function config(entry: Record<string, unknown> = {}, rest: Record<string, unknown> = {}): UploadTaskConfig {
@@ -122,4 +122,44 @@ test('没有文件时报整体性错误', () => {
 	const issues = validateUploadConfig(parseUploadConfig('{"files":[]}'));
 	assert.equal(issues.length, 1);
 	assert.equal(issues[0].index, 0);
+});
+
+test('文件页正文按分类行、源地址、协议模板拼装', () => {
+	const parsed = config({ charaName: '某某', author: '某某', source: 'https://example.com/page', license: 'CC BY-SA' }, { categories: ['萌娘百科', '动画截图'] });
+	assert.equal(generateFilePageText(parsed, parsed.files[0]), [
+		'== 文件说明 ==',
+		'[[分类:某某]][[分类:作者:某某]][[分类:萌娘百科]][[分类:动画截图]]',
+		'源地址：https://example.com/page',
+		'== 授权协议 ==',
+		'{{CC BY-SA}}',
+	].join('\n'));
+});
+
+test('分类行全空时是空行，源地址为空时不输出该行，协议为空时用 Copyright', () => {
+	// 这条要的是"分类行本身为空"，所以把共享分类显式清空——默认的 config() 会带上一个分类
+	const parsed = config({}, { categories: [] });
+	assert.equal(generateFilePageText(parsed, parsed.files[0]), [
+		'== 文件说明 ==',
+		'',
+		'== 授权协议 ==',
+		'{{Copyright}}',
+	].join('\n'));
+});
+
+test('上传摘要依次拼协议、人物、作者、源地址与其他分类，并带机器人前缀', () => {
+	const parsed = config({ charaName: '某某', author: '某某', source: 'https://example.com', license: 'CC BY' }, { categories: ['甲', '乙'] });
+	assert.equal(
+		generateUploadComment(parsed, parsed.files[0]),
+		'机器人：批量上传文件，协议：CC BY，人物：[[分类:某某|某某]]，作者：[[分类:作者:某某|某某]]，源地址：https://example.com，其他分类：[[分类:甲]]、[[分类:乙]]',
+	);
+});
+
+test('配置给了 comment 就以它为准', () => {
+	const parsed = config({ license: 'CC BY' }, { comment: '机器人：定制摘要' });
+	assert.equal(generateUploadComment(parsed, parsed.files[0]), '机器人：定制摘要');
+});
+
+test('查存在性用的标题按首字母大写与下划线转空格归一', () => {
+	assert.equal(normalizeFileTitle('File:some_pic.png'), 'Some pic.png');
+	assert.equal(normalizeFileTitle('Some pic.png'), 'Some pic.png');
 });

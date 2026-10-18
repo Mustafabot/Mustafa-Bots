@@ -163,3 +163,39 @@ export function validateUploadConfig(config: UploadTaskConfig, probe?: LocalFile
 
 	return issues;
 }
+
+/** 默认摘要的开头；后面按条目拼具体信息 */
+export const DEFAULT_UPLOAD_COMMENT = '机器人：批量上传文件';
+
+/**
+ * 查线上存在性用的标题归一：MediaWiki 会把首字母转大写、把下划线当空格，
+ * 不按同样规则归一就会出现"明明存在却查不到"。
+ */
+export function normalizeFileTitle(name: string): string {
+	const withoutPrefix = name.replace(/^File:/i, '').replace(/_/g, ' ');
+	return withoutPrefix === '' ? '' : withoutPrefix.charAt(0).toUpperCase() + withoutPrefix.slice(1);
+}
+
+/** 文件页正文：分类行、源地址、授权协议模板 */
+export function generateFilePageText(config: UploadTaskConfig, entry: UploadFileEntry): string {
+	const metaCategories = `${entry.charaName ? `[[分类:${entry.charaName}]]` : ''}${entry.author ? `[[分类:作者:${entry.author}]]` : ''}`;
+	const categories = (config.categories ?? []).map((name) => `[[分类:${name}]]`).join('');
+	// 分类行始终占一行（全空时就是空行），源地址没有则整行不输出
+	const lines = ['== 文件说明 ==', metaCategories + categories];
+	if (entry.source) lines.push(`源地址：${entry.source}`);
+	lines.push('== 授权协议 ==', `{{${entry.license ?? 'Copyright'}}}`);
+	return lines.join('\n');
+}
+
+/** 上传摘要：配置给了 comment 就用它，否则按协议、人物、作者、源地址、其他分类拼 */
+export function generateUploadComment(config: UploadTaskConfig, entry: UploadFileEntry): string {
+	if (config.comment !== undefined) return config.comment;
+	const parts: string[] = [];
+	if (entry.license !== undefined) parts.push(`协议：${entry.license}`);
+	if (entry.charaName !== undefined) parts.push(`人物：[[分类:${entry.charaName}|${entry.charaName}]]`);
+	if (entry.author !== undefined) parts.push(`作者：[[分类:作者:${entry.author}|${entry.author}]]`);
+	if (entry.source !== undefined) parts.push(`源地址：${entry.source}`);
+	const categories = config.categories ?? [];
+	if (categories.length > 0) parts.push(`其他分类：${categories.map((name) => `[[分类:${name}]]`).join('、')}`);
+	return [DEFAULT_UPLOAD_COMMENT, ...parts].join('，');
+}
