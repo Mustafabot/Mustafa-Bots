@@ -6,12 +6,14 @@ import { validateValues } from '../core/descriptor.js';
 import type { ProgressEvent } from '../core/progress.js';
 import { DESCRIPTORS, findDescriptor } from '../core/registry.js';
 import { isLocalHeaderHost, isLocalOriginUrl, issueToken, verifyPassword, type ServerConfig } from './auth.js';
+import { TextDraftStore } from './drafts.js';
 import { HistoryStore } from './history.js';
 import { NamespaceService } from './namespaces.js';
 import { PageTextService } from './pageText.js';
 import { RulesetPublisher, RulesetStore, draftBaseline, pageTitleFor, resolveRunRuleset, type RunRuleset } from './rulesets.js';
 import { ScanStore } from './scans.js';
 import { TaskRunner, type TaskRecord } from './taskRunner.js';
+import { clearUploads, receiveUpload, resolveUpload } from './uploads.js';
 
 // fileURLToPath 对以 / 结尾的 URL 会保留尾部路径分隔符，必须先 resolve 归一化，
 // 否则下面 `PUBLIC_DIR + sep` 会成为双分隔符前缀，把正常文件也判成越界。
@@ -20,10 +22,23 @@ const PUBLIC_DIR = resolve(fileURLToPath(new URL('./public/', import.meta.url)))
 export function createRouter(config: ServerConfig, runner: TaskRunner = new TaskRunner()) {
 	const history = new HistoryStore('data/gui/history.db');
 	const rulesets = new RulesetStore('data/gui/rulesets');
+	const uploadTasks = new TextDraftStore('data/gui/upload-tasks');
 	const scans = new ScanStore('data/gui/scans');
 	const namespaces = new NamespaceService();
 	const pageText = new PageTextService();
 	const publisher = new RulesetPublisher(rulesets);
+	// 描述符给的短名 → 草稿库；白名单化，避免描述符里的字符串直接参与路径拼接。
+	// 规则集草稿比上传任务多 page 与 baseRevid 两个字段，故这里只声明用得到的 read。
+	const draftStores = new Map<string, { read(name: string): { content: string } | null }>([
+		['rulesets', rulesets],
+		['upload-tasks', uploadTasks],
+	]);
+	const draftStoreFor = (source: string | undefined): { read(name: string): { content: string } | null } => {
+		const key = source ?? 'rulesets';
+		const store = draftStores.get(key);
+		if (store === undefined) throw new Error(`未知的配置来源：${key}`);
+		return store;
+	};
 	const pendingParams = new Map<string, Record<string, unknown>>();
 	// 会话集合必须活在 createRouter 作用域：若放进请求回调，每次请求都会得到空集，
 	// 登录换来的 cookie 在下一个请求就失效。
@@ -117,7 +132,7 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 							// 仅同步镜像（--sync-only）的任务不读配置：CLI 在 sync 下不构建、不校验，
 							// 因此可以两样都不带。
 							const syncOnly = values?.['--sync-only'] === true;
-							rulesetSnapshot = resolveRunRuleset(rulesets, { rulesetName, rulesetContent, syncOnly });
+							rulesetSnapshot = resolveRunRuleset(draftStoreFor(descriptor.configSource), { rulesetName, rulesetContent, syncOnly });
 							if (rulesetSnapshot) {
 								// 文件名只用时间戳：配置名可能是页面标题，带 / 与 : 会拼出非法路径
 								const tempFile = resolve('data/gui/runtime', `config-${Date.now()}.json`);
@@ -201,6 +216,98 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 					.then((result) => sendJson(res, 200, result))
 					.catch((error: Error) => sendJson(res, 500, { error: error.message }));
 				return;
+			}
+
+			// ── 上传用的本机文件暂存 ──
+			if (url.pathname === '/api/uploads' && req.method === 'POST') {
+				let name: string;
+				try {
+					name = (url.searchParams.get('name') ?? '').trim();
+					if (name === '') throw new Error('缺少 name 查询参数');
+				} catch (error) {
+					sendJson(res, 400, { error: (error as Error).message });
+					return;
+				}
+				// 请求体是文件原始字节：原生 http 下这样最省事，不必手写 multipart 解析
+				receiveUpload(req, res, name);
+				return;
+			}
+
+			// 已知边界：暂存目录按文件名存放，同一批里两张都叫 a.png 的本机文件只会留下一份
+			// （后传的覆盖先传的）。界面上不做去重——用户看得见自己选了什么；真要传两张同名图，
+			// 先前在文件管理器里改个名。
+
+			if (url.pathname === '/api/uploads' && req.method === 'DELETE') {
+				sendJson(res, 200, { removed: clearUploads() });
+				return;
+			}
+
+			const uploadFileMatch = /^\/api\/uploads\/([^/]+)$/.exec(url.pathname);
+			if (uploadFileMatch && req.method === 'GET') {
+				// 预览本机图片：只认暂存目录内的文件，越界一律 404
+				const file = resolveUpload(uploadFileMatch[1]);
+				if (file === null) {
+					sendJson(res, 404, { error: '文件不存在' });
+					return;
+				}
+				try {
+					const body = readFileSync(file);
+					const type = MIME_TYPES[extname(file).toLowerCase()] ?? 'application/octet-stream';
+					res.writeHead(200, { 'content-type': type });
+					res.end(body);
+				} catch (error) {
+					sendJson(res, 404, { error: (error as Error).message });
+				}
+				return;
+			}
+
+			// ── 上传任务的本地草稿 ──
+			if (url.pathname === '/api/upload-tasks' && req.method === 'GET') {
+				sendJson(res, 200, { tasks: uploadTasks.list() });
+				return;
+			}
+
+			const uploadTaskMatch = /^\/api\/upload-tasks\/([^/]+)$/.exec(url.pathname);
+			if (uploadTaskMatch) {
+				let name: string;
+				try {
+					name = decodeURIComponent(uploadTaskMatch[1]);
+				} catch {
+					sendJson(res, 400, { error: '草稿名编码有误' });
+					return;
+				}
+				if (req.method === 'GET') {
+					try {
+						sendJson(res, 200, { task: uploadTasks.read(name) });
+					} catch (error) {
+						sendJson(res, 400, { error: (error as Error).message });
+					}
+					return;
+				}
+				if (req.method === 'PUT') {
+					readBody(req).then((body) => {
+						try {
+							const { content } = JSON.parse(body || '{}') as { content?: string };
+							// content 不是字符串（含空 body）时必须拒绝：直接写盘会把已存草稿覆盖成没有正文的残骸
+							if (typeof content !== 'string') {
+								sendJson(res, 400, { error: '请求体缺少字符串字段 content，已取消保存' });
+								return;
+							}
+							sendJson(res, 200, { task: uploadTasks.write(name, content) });
+						} catch (error) {
+							sendJson(res, 400, { error: (error as Error).message });
+						}
+					});
+					return;
+				}
+				if (req.method === 'DELETE') {
+					try {
+						sendJson(res, 200, { ok: uploadTasks.remove(name) });
+					} catch (error) {
+						sendJson(res, 400, { error: (error as Error).message });
+					}
+					return;
+				}
 			}
 
 			const scanDiff = /^\/api\/scans\/([^/]+)\/diff$/.exec(url.pathname);
