@@ -6,10 +6,12 @@ import { createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { withApiRetry, checkModerationQueued, checkModerationQueuedError } from '../utils/retry.js';
+import { createEmitter } from '../core/progress.js';
 import {
 	parseUploadConfig,
 	validateUploadConfig,
 	targetFilename,
+	normalizeFileTitle,
 	generateFilePageText,
 	generateUploadComment,
 	type LocalFileProbe,
@@ -28,6 +30,10 @@ interface CliArgs {
 	configFile: string;
 	dryRun: boolean;
 	verbose: boolean;
+	/** 只查线上是否存在，不上传 */
+	checkOnly: boolean;
+	/** 只上传线上不存在的 */
+	onlyMissing: boolean;
 }
 
 const cmApi = createCmApi();
@@ -332,12 +338,39 @@ async function uploadOne(api: MediaWikiApi, uploadConfig: UploadTaskConfig, entr
 	return uploadFromUrl(api, entry, resolved, dryRun);
 }
 
+/** 一次查询能带的标题数上限 */
+const MAX_TITLES_PER_QUERY = 50;
+
+/**
+ * 查这些目标文件名在共享站上存在与否。
+ * 标题按 MediaWiki 的规则归一后当键，避免"首字母大写""下划线当空格"造成的假阴性。
+ */
+async function checkExisting(api: MediaWikiApi, filenames: string[]): Promise<Map<string, boolean>> {
+	const result = new Map<string, boolean>();
+	for (let offset = 0; offset < filenames.length; offset += MAX_TITLES_PER_QUERY) {
+		const batch = filenames.slice(offset, offset + MAX_TITLES_PER_QUERY);
+		const { data } = await api.post<{ query?: { pages?: Array<{ title?: string; missing?: unknown }> } }>({
+			action: 'query',
+			prop: 'info',
+			titles: batch.map((name) => `File:${name}`).join('|'),
+		}, { retry: 15 } as any);
+		for (const page of data.query?.pages ?? []) {
+			const title = typeof page.title === 'string' ? page.title : '';
+			if (title === '') continue;
+			result.set(normalizeFileTitle(title), page.missing === undefined);
+		}
+	}
+	return result;
+}
+
 function parseArgs(args: string[]): CliArgs | null {
-	const result: CliArgs = { configFile: '', dryRun: false, verbose: true };
+	const result: CliArgs = { configFile: '', dryRun: false, verbose: true, checkOnly: false, onlyMissing: false };
 	for (let i = 0; i < args.length; i++) {
 		const arg = args[i];
 		if (arg === '--dry-run') result.dryRun = true;
 		else if (arg === '--quiet') result.verbose = false;
+		else if (arg === '--check') result.checkOnly = true;
+		else if (arg === '--only-missing') result.onlyMissing = true;
 		else if (arg === '--config-file' && args[i + 1] !== undefined) {
 			result.configFile = args[i + 1];
 			i++;
@@ -356,6 +389,9 @@ async function main(): Promise<void> {
 	const args = parseArgs(process.argv.slice(2));
 	if (args === null) process.exit(1);
 	verbose = args.verbose;
+
+	const emit = createEmitter(process.argv.includes('--progress-json'));
+	emit({ type: 'start', task: 'URL 上传' });
 
 	cleanupTempDir();
 
@@ -381,15 +417,75 @@ async function main(): Promise<void> {
 	await clientlogin(cmApi, config.cm.bot.clientUsername!, config.cm.bot.clientPassword!, config.cm.api)
 		.then((result) => { log(`commons站登录成功 ${result}`); });
 
+	if (args.checkOnly) {
+		emit({ type: 'phase', name: '检查线上状态' });
+		const names = uploadConfig.files.map((entry) => targetFilename(uploadConfig, entry));
+		const existing = await checkExisting(cmApi, names);
+		for (const [index, name] of names.entries()) {
+			const exists = existing.get(normalizeFileTitle(name)) === true;
+			emit({ type: 'detail', title: `File:${name}`, fields: { 线上状态: exists ? '已存在' : '不存在' } });
+			emit({ type: 'progress', done: index + 1, total: names.length, message: '已检查' });
+			log(`${name}: ${exists ? '已存在' : '不存在'}`);
+		}
+		emit({ type: 'done', summary: { checked: names.length } });
+		return;
+	}
+
+	let targets = uploadConfig.files;
+	if (args.onlyMissing) {
+		emit({ type: 'phase', name: '检查线上状态' });
+		const existing = await checkExisting(cmApi, uploadConfig.files.map((entry) => targetFilename(uploadConfig, entry)));
+		const skipped: string[] = [];
+		targets = uploadConfig.files.filter((entry) => {
+			const name = targetFilename(uploadConfig, entry);
+			if (existing.get(normalizeFileTitle(name)) === true) {
+				skipped.push(name);
+				return false;
+			}
+			return true;
+		});
+		for (const name of skipped) {
+			emit({ type: 'edit', title: `File:${name}`, status: 'skipped', oldRevid: null, newRevid: null, message: '线上已存在，差分上传跳过' });
+			log(`跳过（线上已存在）: ${name}`);
+		}
+		log(`差分上传：跳过 ${skipped.length} 个，待上传 ${targets.length} 个`);
+		if (targets.length === 0) {
+			emit({ type: 'done', summary: { changed: 0, skipped: skipped.length, failed: 0 } });
+			console.log('差分上传：没有需要上传的文件');
+			return;
+		}
+	}
+
+	emit({ type: 'phase', name: '上传' });
 	const results: UploadResult[] = [];
-	const total = uploadConfig.files.length;
-	for (const [position, entry] of uploadConfig.files.entries()) {
-		log(`\n[${position + 1}/${total}] 正在上传: ${targetFilename(uploadConfig, entry)}`);
+	const skippedCount = uploadConfig.files.length - targets.length;
+	const total = targets.length;
+	for (const [position, entry] of targets.entries()) {
+		const name = targetFilename(uploadConfig, entry);
+		log(`\n[${position + 1}/${total}] 正在上传: ${name}`);
 		const result = await uploadOne(cmApi, uploadConfig, entry, args.dryRun);
 		results.push(result);
+		emit({
+			type: 'edit',
+			title: `File:${result.filename}`,
+			status: result.success ? 'changed' : 'failed',
+			oldRevid: null,
+			newRevid: null,
+			message: result.success ? (args.dryRun ? '[DRY-RUN] 将上传' : '上传成功') : `上传失败：${result.error ?? '未知错误'}`,
+		});
+		emit({ type: 'progress', done: position + 1, total, message: '已上传' });
 		if (result.success) log('  上传成功！');
 		else console.error(`  上传失败: ${result.error}`);
 	}
+
+	emit({
+		type: 'done',
+		summary: {
+			changed: results.filter((r) => r.success).length,
+			skipped: skippedCount,
+			failed: results.filter((r) => !r.success).length,
+		},
+	});
 
 	const successCount = results.filter((r) => r.success).length;
 	const failCount = results.filter((r) => !r.success).length;
