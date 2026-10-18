@@ -951,3 +951,13 @@ button.danger:hover:not(:disabled) {
 .upload-remove {
 	align-self: flex-start;
 }
+
+.upload-drop {
+	align-items: center;
+	border: 1px dashed rgba(127, 127, 127, 0.5);
+	border-radius: 0.5rem;
+	display: flex;
+	gap: 0.75rem;
+	margin: 0.75rem 0;
+	padding: 0.6rem;
+}

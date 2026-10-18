@@ -8,6 +8,9 @@ export interface LicenseOption {
 	title?: string;
 }
 
+/** 共享站单文件上限：与 src/upload/uploadConfig.ts 的 MAX_UPLOAD_BYTES 一致 */
+export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
+
 export const LICENSE_OPTIONS: ReadonlyArray<LicenseOption> = [
 	{ group: 'CC协议', value: 'CC Zero', label: 'CC-0', title: '作者授权以无著作权方式使用' },
 	{ group: 'CC协议', value: 'CC BY', label: 'CC BY 3.0', title: '作者授权以署名方式使用，该授权需兼容 3.0 协议' },

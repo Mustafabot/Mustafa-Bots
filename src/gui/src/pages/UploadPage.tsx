@@ -3,13 +3,14 @@
 // 任务配置存本地草稿（api.uploadTasks），不写 wiki——条目里有本机文件的绝对路径。
 // 跑任务时把表单内容随 rulesetContent 直接下发，不必先保存草稿。
 // [检查线上状态] 走 --check（只查不传），[差分上传] 走 --only-missing。
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../api';
 import { CategoryInput } from '../components/CategoryInput';
 import { LogView } from '../components/LogView';
 import { ProgressPanel } from '../components/ProgressPanel';
 import { UploadFileList } from '../components/UploadFileList';
 import { useTaskRun } from '../hooks/useTaskRun';
+import { MAX_UPLOAD_BYTES } from '../licenseOptions';
 import { decodeUploadTask, encodeUploadTask, makeRow, type UploadFormState, type UploadRow } from '../uploadTaskCodec';
 import { outcomesFromEvents } from '../uploadOutcome';
 import type { ParamValue, StartTaskBody, TaskDescriptor, UploadTaskSummary } from '../types';
@@ -143,6 +144,37 @@ export function UploadPage(): React.JSX.Element {
 		setPasteOpen(false);
 	};
 
+	const fileInputRef = useRef<HTMLInputElement>(null);
+
+	/**
+	 * 把选中的本机文件交给服务端暂存，再把返回的**仓库相对路径**放进列表。
+	 * 服务端按文件名存放，所以同名文件会互相覆盖——加之前先提醒一次，免得两张不同的图指向同一份字节。
+	 * 前端先按大小拦一道：等服务端回 413 也要走一遍网络，不划算。
+	 */
+	const addLocalFiles = async (files: File[]): Promise<void> => {
+		const accepted = files.filter((file) => file.size <= MAX_UPLOAD_BYTES);
+		const rejected = files.filter((file) => file.size > MAX_UPLOAD_BYTES);
+		if (rejected.length > 0) {
+			setNotice({ text: `这些文件超过 20 MB，没有加进来：${rejected.map((file) => file.name).join('、')}`, kind: 'error' });
+		}
+		// 暂存目录按文件名存，同名会覆盖：已经在列表里的名字要先提醒
+		const staged = new Set(form.rows.filter((row) => row.file !== '').map((row) => row.file.split('/').pop() ?? ''));
+		const collisions = accepted.filter((file) => staged.has(file.name)).map((file) => file.name);
+		if (collisions.length > 0 && !window.confirm(`这些文件名与列表里已有的本机文件相同，暂存会互相覆盖（两张图会指向同一份字节）：${collisions.join('、')}。仍要添加？`)) {
+			return;
+		}
+		const rows: UploadRow[] = [];
+		for (const file of accepted) {
+			try {
+				const uploaded = await api.uploads.put(file);
+				rows.push(makeRow({ file: uploaded.path }));
+			} catch (reason) {
+				setNotice({ text: reason instanceof ApiError ? reason.message : `暂存 ${file.name} 失败`, kind: 'error' });
+			}
+		}
+		if (rows.length > 0) setForm((prev) => ({ ...prev, rows: [...prev.rows, ...rows] }));
+	};
+
 	/** 同步文件信息：把选中那一行除来源与文件名以外的信息复制到全部行 */
 	const syncSelectedInfo = (): void => {
 		const source = form.rows.find((row) => row.id === selectedId);
@@ -155,6 +187,23 @@ export function UploadPage(): React.JSX.Element {
 			...prev,
 			rows: prev.rows.map((row) => ({ ...row, charaName: source.charaName, author: source.author, source: source.source, license: source.license })),
 		}));
+	};
+
+	/** 清空服务端的暂存目录；先问一次，并把要删掉多少、占多大说清楚 */
+	const clearUploads = async (): Promise<void> => {
+		try {
+			const listed = await api.uploads.list();
+			if (listed.files.length === 0) {
+				setNotice({ text: '暂存目录里没有文件。', kind: 'info' });
+				return;
+			}
+			const sizeText = `${(listed.total / 1024 / 1024).toFixed(1)} MB`;
+			if (!window.confirm(`将删除 ${listed.files.length} 个暂存文件（共 ${sizeText}）。已加进列表的本机文件路径会随之失效（可以重新拖进来）。继续？`)) return;
+			const result = await api.uploads.clear();
+			setNotice({ text: `已清理 ${result.removed} 个暂存文件（共 ${sizeText}）。`, kind: 'info' });
+		} catch (reason) {
+			setNotice({ text: reason instanceof ApiError ? reason.message : '清理失败', kind: 'error' });
+		}
 	};
 
 	const shownError = error ?? loadError;
@@ -180,6 +229,31 @@ export function UploadPage(): React.JSX.Element {
 					<span>上传摘要</span>
 					<input type="text" value={form.comment} disabled={running} placeholder="留空则按协议、人物、作者、源地址、分类自动拼" onChange={(event) => setForm((prev) => ({ ...prev, comment: event.target.value }))} />
 				</label>
+			</div>
+
+			<div
+				className="upload-drop"
+				onDragOver={(event) => event.preventDefault()}
+				onDrop={(event) => {
+					event.preventDefault();
+					void addLocalFiles([...event.dataTransfer.files]);
+				}}
+			>
+				<input
+					ref={fileInputRef}
+					type="file"
+					accept="image/*,.svg,.pdf"
+					multiple
+					style={{ display: 'none' }}
+					onChange={(event) => {
+						void addLocalFiles([...(event.target.files ?? [])]);
+						event.target.value = '';
+					}}
+				/>
+				<button type="button" disabled={running} onClick={() => fileInputRef.current?.click()}>
+					添加本机文件
+				</button>
+				<span className="hint">也可以把文件拖到这里（单个不超过 20 MB）</span>
 			</div>
 
 			<div className="upload-actions">
@@ -236,6 +310,13 @@ export function UploadPage(): React.JSX.Element {
 					))}
 				</select>
 				<p className="hint">草稿存在本地（data/gui/upload-tasks/），不上传任何 wiki 页面；跑任务不必先保存。</p>
+			</div>
+
+			<div className="upload-drafts">
+				<button type="button" disabled={running} onClick={() => void clearUploads()}>
+					清理临时文件
+				</button>
+				<p className="hint">删掉服务端暂存的本机文件（data/gui/uploads/）。不自动清理，因为清单里的路径还指着它们。</p>
 			</div>
 
 			<LogView events={events} />
