@@ -13,7 +13,7 @@ import { PageTextService } from './pageText.js';
 import { RulesetPublisher, RulesetStore, draftBaseline, pageTitleFor, resolveRunRuleset, type RunRuleset } from './rulesets.js';
 import { ScanStore } from './scans.js';
 import { TaskRunner, type TaskRecord } from './taskRunner.js';
-import { clearUploads, receiveUpload, resolveUpload } from './uploads.js';
+import { clearUploads, listUploads, receiveUpload, resolveUpload } from './uploads.js';
 
 // fileURLToPath 对以 / 结尾的 URL 会保留尾部路径分隔符，必须先 resolve 归一化，
 // 否则下面 `PUBLIC_DIR + sep` 会成为双分隔符前缀，把正常文件也判成越界。
@@ -219,6 +219,12 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 			}
 
 			// ── 上传用的本机文件暂存 ──
+			// 先给清理按钮一个问路的口子：它要告诉用户"将删掉几个文件、多大空间"
+			if (url.pathname === '/api/uploads' && req.method === 'GET') {
+				sendJson(res, 200, listUploads());
+				return;
+			}
+
 			if (url.pathname === '/api/uploads' && req.method === 'POST') {
 				let name: string;
 				try {

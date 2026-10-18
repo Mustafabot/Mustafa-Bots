@@ -44,7 +44,7 @@ export interface TaskDescriptor {
 	page?: string;
 	/** 配置文件开关；存在则该任务必须有配置（内容直传或本地草稿），仅同步镜像除外 */
 	configFileFlag?: string;
-	/** 配置文件草稿库的短名（相对 data/gui/）；缺省 rulesets，即规则集草稿库 */
+	/** 配置来源的白名单键，在服务端 routes.ts 的草稿库映射里登记；未登记的值会抛错。缺省 rulesets */
 	configSource?: string;
 }
 

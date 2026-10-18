@@ -66,7 +66,10 @@ function readLocalConfig(path: string): UploadTaskConfig {
 /** 探测本机文件：不存在或读不到大小都如实返回，交给校验判断 */
 const probeLocalFile: LocalFileProbe = (path) => {
 	try {
-		return { exists: true, size: statSync(path).size };
+		const stat = statSync(path);
+		// 目录等非普通文件当作不存在：好在校验阶段就拦下，而不是上传时才以 EISDIR 炸掉整批
+		if (!stat.isFile()) return { exists: false, size: null };
+		return { exists: true, size: stat.size };
 	} catch {
 		return { exists: false, size: null };
 	}
@@ -167,10 +170,11 @@ async function uploadFromFile(
 		return { filename, url: `file://${filePath}`, success: true };
 	}
 
-	const fileBuffer = readFileSync(filePath);
-	const file = new File([fileBuffer], filename.replace(/^File:/i, ''), { type: mimeType });
-
 	try {
+		// 读文件也放进 try：目录（EISDIR）或读不到（EACCES）时让这一条失败并计入结果，
+		// 而不是抛到 main().catch 上，把整批连同已完成的结果一起丢掉
+		const fileBuffer = readFileSync(filePath);
+		const file = new File([fileBuffer], filename.replace(/^File:/i, ''), { type: mimeType });
 		return await withApiRetry(
 			() => api.postWithToken('csrf', {
 				action: 'upload',
@@ -393,8 +397,6 @@ async function main(): Promise<void> {
 	const emit = createEmitter(process.argv.includes('--progress-json'));
 	emit({ type: 'start', task: 'URL 上传' });
 
-	cleanupTempDir();
-
 	let uploadConfig: UploadTaskConfig;
 	try {
 		uploadConfig = readLocalConfig(args.configFile);
@@ -409,6 +411,10 @@ async function main(): Promise<void> {
 		for (const issue of issues) console.error(`  - ${issue.message}`);
 		process.exit(1);
 	}
+
+	// 清理临时目录放在读配置与校验之后：配置文件本身可能就放在 temp/ 里，
+	// 早清会把马上要读的文件删掉。temp/ 只服务于 URL 下载回退，晚清不改变别的行为。
+	cleanupTempDir();
 
 	log(`配置解析成功，共 ${uploadConfig.files.length} 个文件待上传`);
 	if (args.dryRun) log('[试运行模式] 不会实际上传文件');

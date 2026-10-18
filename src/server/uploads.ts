@@ -4,12 +4,15 @@
  * 放在 data/gui/uploads/ 而不是 temp/：外部图片迁移在启动时会清空 temp/，
  * 会把界面刚收下的文件一起删掉。文件不自动清理，界面上给手动清理入口。
  */
-import { existsSync, mkdirSync, readdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
+import { existsSync, mkdirSync, readdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { basename, resolve, sep } from 'node:path';
-import { MAX_UPLOAD_BYTES } from '../upload/uploadConfig.js';
+import { MAX_UPLOAD_BYTES, MAX_UPLOAD_SIZE_TEXT } from '../upload/uploadConfig.js';
 
-export const UPLOAD_DIR = resolve('data/gui/uploads');
+/** 相对仓库根的暂存目录：上传脚本以仓库根为工作目录，配置里的 file 就写这个相对路径 */
+export const UPLOAD_REL_DIR = 'data/gui/uploads';
+export const UPLOAD_DIR = resolve(UPLOAD_REL_DIR);
 
 function ensureDir(): void {
 	mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -56,16 +59,35 @@ export function clearUploads(): number {
 	return removed;
 }
 
+/** 列出暂存目录里的文件与总大小：界面的清理动作据此告诉用户会删掉多少 */
+export function listUploads(): { files: Array<{ name: string; size: number }>; total: number } {
+	if (!existsSync(UPLOAD_DIR)) return { files: [], total: 0 };
+	const files: Array<{ name: string; size: number }> = [];
+	let total = 0;
+	for (const name of readdirSync(UPLOAD_DIR).sort()) {
+		try {
+			// 进程被中断留下的 <名字>.<uuid>.part 也照列：清理动作会把它一并删掉
+			const size = statSync(resolve(UPLOAD_DIR, name)).size;
+			files.push({ name, size });
+			total += size;
+		} catch {
+			// 单个条目读不到大小就跳过，不影响其余
+		}
+	}
+	return { files, total };
+}
+
 /** 接收一个文件：请求体就是原始字节，边收边写，超限即断 */
 export function receiveUpload(req: IncomingMessage, res: ServerResponse, name: string): void {
 	ensureDir();
 	const safe = safeUploadName(name);
 	const target = resolve(UPLOAD_DIR, safe);
-	// 先写 <名字>.part、收完且长度达标才改名到目标名：任何失败路径只删 .part，
+	// 先写 <名字>.<uuid>.part、收完且长度达标才改名到目标名：任何失败路径只删 .part，
 	// 绝不碰已存在的同名正式文件。否则"先传好 a.png、随后误传一个 25 MB 的 a.png"
 	// 会在校验前就把好的那个删掉、新文件又没写成，落得两头空。
-	const part = `${target}.part`;
-	if (existsSync(part)) unlinkSync(part);
+	// 后缀带 uuid 是为了并发同名上传时各写各的临时文件，不会把两股字节追加进同一个路径，
+	// 完成时的 rename 依旧是原子替换到目标名。
+	const part = `${target}.${randomUUID()}.part`;
 	let received = 0;
 	let aborted = false;
 
@@ -94,7 +116,7 @@ export function receiveUpload(req: IncomingMessage, res: ServerResponse, name: s
 		if (aborted) return;
 		received += chunk.length;
 		if (received > MAX_UPLOAD_BYTES) {
-			fail(413, '文件超过 20 MB 上限（共享站的上传上限），请先压缩');
+			fail(413, `文件超过 ${MAX_UPLOAD_SIZE_TEXT} 上限（共享站的上传上限），请先压缩`);
 			return;
 		}
 		// 逐块追加：图片最大 20 MB，直接缓冲也不会吃满内存，但仍按流写以免留两份拷贝。
@@ -120,7 +142,9 @@ export function receiveUpload(req: IncomingMessage, res: ServerResponse, name: s
 			return;
 		}
 		res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' });
-		res.end(JSON.stringify({ name: safe, size: received }));
+		// path 是相对仓库根的路径（正斜杠）：上传脚本以仓库根为工作目录，草稿里的 file 直接写它。
+		// 只给文件名的话，脚本按仓库根解析就找不到文件，校验会以"本机文件不存在"拒绝。
+		res.end(JSON.stringify({ name: safe, size: received, path: `${UPLOAD_REL_DIR}/${safe}` }));
 	});
 	req.on('error', () => {
 		if (!aborted) fail(400, '接收文件时连接中断');

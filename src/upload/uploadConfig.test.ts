@@ -39,6 +39,11 @@ test('坏 JSON 与非对象都抛错', () => {
 	assert.throws(() => parseUploadConfig('{"files":{}}'), /files 数组/);
 });
 
+test('旧格式的 article / text 字段被点名拒绝', () => {
+	assert.throws(() => parseUploadConfig(JSON.stringify({ article: '某条目', files: [{ url: 'https://example.com/a.jpg' }] })), /article \/ text 字段已移除/);
+	assert.throws(() => parseUploadConfig(JSON.stringify({ text: '正文', files: [] })), /filename/);
+});
+
 test('空文件名与两种来源都给或都不给都要报错', () => {
 	const issues = validateUploadConfig(parseUploadConfig(JSON.stringify({
 		categories: ['甲'],

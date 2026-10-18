@@ -72,6 +72,10 @@ export class RulesetStore {
 		return { name, page, baseRevid, content, updatedAt };
 	}
 
+	/**
+	 * 存草稿。baseRevid 必须是 page 这个页面的版本号；换了页就不能把旧页的基线带过去，
+	 * 先前的基线要由 draftBaseline(draft, page) 依新页作废。
+	 */
 	write(name: string, content: string, baseRevid: number | null, page?: string): RulesetDraft {
 		const safe = safeName(name);
 		const previous = this.read(safe);

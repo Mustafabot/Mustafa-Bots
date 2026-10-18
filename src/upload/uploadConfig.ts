@@ -8,6 +8,9 @@
 /** 共享站单文件上限：siteinfo 的 maxuploadsize 即 20971520 字节 */
 export const MAX_UPLOAD_BYTES = 20 * 1024 * 1024;
 
+/** 上限的人类可读文本（整数 MB）：脚本与服务端共用，免得提示文字与常量走散 */
+export const MAX_UPLOAD_SIZE_TEXT = `${Math.round(MAX_UPLOAD_BYTES / (1024 * 1024))} MB`;
+
 /** 批量上传不许用的协议：它要求逐文件填授权信息，得走普通上传工具 */
 export const BULK_FORBIDDEN_LICENSE = 'none:gotoCommons';
 
@@ -73,6 +76,11 @@ export function parseUploadConfig(text: string): UploadTaskConfig {
 	}
 	if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) throw new Error('配置必须是一个对象');
 	const raw = parsed as Record<string, unknown>;
+	// 旧格式把文件名与正文交给顶层 article/text 推导，如今每条要自带 filename，
+	// 命中时直接说清楚，免得落到逐条的通用报错上让人猜
+	if ('article' in raw || 'text' in raw) {
+		throw new Error('配置里的 article / text 字段已移除：现在每条 files 条目要自带 filename，共享字段改用 prefix / categories / comment');
+	}
 	if (!Array.isArray(raw.files)) throw new Error('配置缺少 files 数组');
 
 	const categories = Array.isArray(raw.categories)
@@ -120,7 +128,9 @@ export function validateUploadConfig(config: UploadTaskConfig, probe?: LocalFile
 			issues.push({ index, filename: entry.filename, message: `${where}：${message}` });
 		};
 
+		// 目标文件名不带 File: 前缀：前缀由 config.prefix 拼上，写进 filename 会拼成 File:File:x.png
 		if (entry.filename === '') add('filename 不能为空');
+		else if (/^File:/i.test(entry.filename)) add('filename 不要带 File: 前缀，前缀会自动加上');
 
 		if (entry.url !== undefined && entry.file !== undefined) {
 			add('url 与 file 只能给一个');
@@ -140,7 +150,7 @@ export function validateUploadConfig(config: UploadTaskConfig, probe?: LocalFile
 		if (entry.file !== undefined && probe !== undefined) {
 			const info = probe(entry.file);
 			if (!info.exists) add(`本机文件不存在：${entry.file}`);
-			else if (info.size !== null && info.size > MAX_UPLOAD_BYTES) add(`本机文件超过 20 MB 上限（共享站的上限）`);
+			else if (info.size !== null && info.size > MAX_UPLOAD_BYTES) add(`本机文件超过 ${MAX_UPLOAD_SIZE_TEXT} 上限（共享站的上限）`);
 		}
 
 		// 重名按"拼上前缀之后"比，空格连续出现同样算同一个名字
