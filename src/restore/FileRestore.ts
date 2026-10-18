@@ -6,6 +6,7 @@ import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { createEmitter, type EmitProgress } from '../core/progress.js';
+import { checkModerationQueued, checkModerationQueuedError } from '../utils/retry.js';
 
 interface RestoreResult {
 	filename: string;
@@ -119,26 +120,33 @@ async function fetchDeletedRevisions(
 ): Promise<Array<{ revid: number; user: string; comment: string; timestamp: string }>> {
 	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
-		list: 'deletedrevs',
-		drtitle: title,
-		drprop: 'revid|user|comment|timestamp',
-		drlimit: 50,
+		prop: 'deletedrevisions',
+		titles: title,
+		drvprop: 'ids|user|comment|timestamp',
+		drvlimit: 50,
 	}, {
 		retry: 15,
 	} as Parameters<typeof api.post>[1]);
 
-	const deletedrevs = data.query.deletedrevs;
-	if (!deletedrevs || !Array.isArray(deletedrevs) || deletedrevs.length === 0) {
+	const pages = data.query.pages as ApiPage[];
+	const page = Object.values(pages)[0];
+	if (!page || !page.deletedrevisions) {
 		return [];
 	}
 
-	return (deletedrevs[0].revisions || []) as Array<{ revid: number; user: string; comment: string; timestamp: string }>;
+	return page.deletedrevisions.map(revision => ({
+		revid: revision.revid ?? 0,
+		user: revision.user ?? '',
+		comment: revision.comment ?? '',
+		timestamp: revision.timestamp ?? '',
+	}));
 }
 
 async function undeleteFile(
 	api: MediaWikiApi,
 	title: string,
 	comment: string,
+	verbose: boolean,
 ): Promise<{ success: boolean; error?: string; noResults?: boolean }> {
 	let lastError: Error | null = null;
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -159,6 +167,11 @@ async function undeleteFile(
 				return { success: true };
 			}
 
+			if (checkModerationQueued(data)) {
+				if (verbose) console.log('  还原请求已进入审核队列，视为成功');
+				return { success: true };
+			}
+
 			if (data.error?.code === 'undelete-no-results') {
 				return { success: false, noResults: true };
 			}
@@ -169,9 +182,13 @@ async function undeleteFile(
 			if (errMsg.includes('undelete-no-results')) {
 				return { success: false, noResults: true };
 			}
+			if (checkModerationQueuedError(error)) {
+				if (verbose) console.log('  还原请求已进入审核队列，视为成功');
+				return { success: true };
+			}
 			lastError = error;
 			if (attempt < MAX_RETRIES) {
-				console.log(`  还原失败（${errMsg}），第${attempt}次重试...`);
+				if (verbose) console.log(`  还原失败（${errMsg}），第${attempt}次重试...`);
 				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
 			}
 		}
@@ -184,6 +201,7 @@ async function undoLastEdit(
 	api: MediaWikiApi,
 	title: string,
 	comment: string,
+	verbose: boolean,
 ): Promise<{ success: boolean; error?: string; noEdits?: boolean; undone?: { revid: number; user: string; comment: string } }> {
 	let revisions: Array<{ revid: number; user: string; comment: string }>;
 
@@ -217,7 +235,7 @@ async function undoLastEdit(
 	const lastRevUser = revisions[0].user;
 	const lastRevComment = revisions[0].comment;
 
-	console.log(`  最后一笔编辑: revid=${lastRevId}, user=${lastRevUser}, comment=${lastRevComment || '(无)'}`);
+	if (verbose) console.log(`  最后一笔编辑: revid=${lastRevId}, user=${lastRevUser}, comment=${lastRevComment || '(无)'}`);
 
 	let lastError: Error | null = null;
 	for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
@@ -248,7 +266,7 @@ async function undoLastEdit(
 		} catch (error: any) {
 			const errMsg = error?.message || String(error);
 			if (errMsg.includes('moderation')) {
-				console.log('  撤销编辑请求已进入审核队列，视为成功');
+				if (verbose) console.log('  撤销编辑请求已进入审核队列，视为成功');
 				return { success: true };
 			}
 			if (errMsg.includes('undo-failure')) {
@@ -256,7 +274,7 @@ async function undoLastEdit(
 			}
 			lastError = error;
 			if (attempt < MAX_RETRIES) {
-				console.log(`  撤销编辑失败（${errMsg}），第${attempt}次重试...`);
+				if (verbose) console.log(`  撤销编辑失败（${errMsg}），第${attempt}次重试...`);
 				await new Promise(resolve => setTimeout(resolve, 1000 * attempt));
 			}
 		}
@@ -328,7 +346,7 @@ async function processFile(
 	}
 
 	log(`  还原文件...`);
-	const undeleteResult = await undeleteFile(api, filename, comment);
+	const undeleteResult = await undeleteFile(api, filename, comment, options.verbose);
 	if (!undeleteResult.success) {
 		if (undeleteResult.noResults) {
 			log('  没有可还原的版本，跳过');
@@ -341,7 +359,7 @@ async function processFile(
 		emit({
 			type: 'edit',
 			title: filename,
-			status: 'failed',
+			status: undeleteResult.noResults ? 'skipped' : 'failed',
 			oldRevid: null,
 			newRevid: null,
 			message: undeleteResult.noResults ? '没有可还原的删除版本' : `还原失败：${undeleteResult.error}`,
@@ -362,7 +380,7 @@ async function processFile(
 	log('  撤销最后一笔编辑...');
 	await new Promise(resolve => setTimeout(resolve, 500));
 
-	const undoResult = await undoLastEdit(api, filename, comment);
+	const undoResult = await undoLastEdit(api, filename, comment, options.verbose);
 	if (undoResult.noEdits) {
 		log(`  无法撤销: ${undoResult.error}`);
 		result.undoSuccess = true;
