@@ -75,6 +75,10 @@ export function eventToLine(event: ProgressEvent): string {
 			const label = event.message === undefined ? '进度' : event.message;
 			return `${label}（${event.done}${total}）`;
 		}
+		case 'detail': {
+			const parts = Object.entries(event.fields).map(([key, value]) => `${key}：${value === null ? '（无）' : value}`);
+			return [event.title, parts.join('，')].join(' · ');
+		}
 		case 'hit':
 			return `命中：${event.title}`;
 		case 'edit': {

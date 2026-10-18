@@ -12,6 +12,8 @@ export type ProgressEvent =
 	| { type: 'phase'; name: string; at: number }
 	| { type: 'progress'; done: number; total?: number; message?: string; at: number }
 	| { type: 'hit'; title: string; at: number }
+	/** 一条结构化明细，如某个文件的删除日志；fields 的键是给人看的中文标签 */
+	| { type: 'detail'; title: string; fields: Record<string, string | number | null>; at: number }
 	| {
 			type: 'edit';
 			title: string;

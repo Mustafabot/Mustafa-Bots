@@ -54,3 +54,13 @@ test('只有有进度但总量未知的阶段才进动效，没有进度数据�
 	assert.equal(barMode(true, undefined), 'indeterminate');
 	assert.equal(barMode(true, 10), 'determinate');
 });
+
+test('detail 事件把各字段拼成一行明细', () => {
+	const line = eventToLine({ type: 'detail', title: 'File:A.png', fields: { 删除者: '某某', 理由: '侵权', 时间: '2026-10-15T09:00:00Z' }, at: 1700000000000 });
+	assert.equal(line, 'File:A.png · 删除者：某某，理由：侵权，时间：2026-10-15T09:00:00Z');
+});
+
+test('detail 事件的 null 字段显示为（无）', () => {
+	const line = eventToLine({ type: 'detail', title: 'File:B.png', fields: { 删除者: null, 版本数: 2 }, at: 1700000000000 });
+	assert.equal(line, 'File:B.png · 删除者：（无），版本数：2');
+});

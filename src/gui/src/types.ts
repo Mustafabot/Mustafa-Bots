@@ -75,6 +75,7 @@ export type ProgressEvent =
 	| { type: 'phase'; name: string; at: number }
 	| { type: 'progress'; done: number; total?: number; message?: string; at: number }
 	| { type: 'hit'; title: string; at: number }
+	| { type: 'detail'; title: string; fields: Record<string, string | number | null>; at: number }
 	| { type: 'edit'; title: string; status: 'changed' | 'skipped' | 'failed'; oldRevid: number | null; newRevid: number | null; message?: string; at: number }
 	| { type: 'done'; summary: Record<string, number>; resultFile?: string; at: number }
 	| { type: 'log'; level: 'info' | 'warn' | 'error'; message: string; at: number };
