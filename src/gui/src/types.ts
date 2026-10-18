@@ -69,7 +69,7 @@ export interface StartTaskBody {
 
 // ── 进度事件（镜像 src/core/progress.ts）──
 
-/** 进度事件：七种分支与服务端联合类型一一对应 */
+/** 进度事件：八种分支与服务端联合类型一一对应 */
 export type ProgressEvent =
 	| { type: 'start'; task: string; at: number }
 	| { type: 'phase'; name: string; at: number }

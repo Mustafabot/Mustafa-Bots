@@ -128,7 +128,7 @@ async function fetchDeletedRevisions(
 		retry: 15,
 	} as Parameters<typeof api.post>[1]);
 
-	const pages = data.query.pages as ApiPage[];
+	const pages = (data.query?.pages ?? {}) as ApiPage[];
 	const page = Object.values(pages)[0];
 	if (!page || !page.deletedrevisions) {
 		return [];
@@ -265,7 +265,7 @@ async function undoLastEdit(
 			throw new Error(JSON.stringify(data));
 		} catch (error: any) {
 			const errMsg = error?.message || String(error);
-			if (errMsg.includes('moderation')) {
+			if (checkModerationQueuedError(error)) {
 				if (verbose) console.log('  撤销编辑请求已进入审核队列，视为成功');
 				return { success: true };
 			}
@@ -314,7 +314,7 @@ async function processFile(
 		log('  页面不在删除记录中，跳过');
 		result.skipped = true;
 		result.skipReason = '页面不在删除记录中';
-		emit({ type: 'detail', title: filename, fields: { 删除者: null, 理由: null, 时间: null, 版本数: 0, 可否还原: '不在删除记录中' } });
+		emit({ type: 'detail', title: filename, fields: { 最后编辑者: null, 最后编辑摘要: null, 最后编辑时间: null, 版本数: 0, 可否还原: '不在删除记录中' } });
 		emit({ type: 'edit', title: filename, status: 'skipped', oldRevid: null, newRevid: null, message: '页面不在删除记录中' });
 		return result;
 	}
@@ -324,9 +324,9 @@ async function processFile(
 		type: 'detail',
 		title: filename,
 		fields: {
-			删除者: latest?.user ?? null,
-			理由: latest?.comment ?? null,
-			时间: latest?.timestamp ?? null,
+			最后编辑者: latest?.user ?? null,
+			最后编辑摘要: latest?.comment ?? null,
+			最后编辑时间: latest?.timestamp ?? null,
 			版本数: deletedRevisions.length,
 			可否还原: '可还原',
 		},
@@ -457,8 +457,8 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	emit({ type: 'progress', done: 0, total: filenames.length, message: '待还原' });
 	emit({ type: 'phase', name: '还原' });
+	emit({ type: 'progress', done: 0, total: filenames.length, message: '待还原' });
 
 	const comment = DEFAULT_COMMENT;
 	const total = filenames.length;

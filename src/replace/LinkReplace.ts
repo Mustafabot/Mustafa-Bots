@@ -653,7 +653,7 @@ async function runMovePhase(cfg: BotConfig, summary: string, interval: number, d
 			emit({ type: 'edit', title: rule.fromTitle, status: 'skipped', oldRevid: null, newRevid: null, message: `已是 ${rule.toTitle} 的重定向` });
 			applicable.push(rule);
 		} else if (state === 'missing') {
-			console.log(`  ${rule.fromTitle} 不存在，视为已完成移动`);
+			log(`  ${rule.fromTitle} 不存在，视为已完成移动`);
 			emit({ type: 'edit', title: rule.fromTitle, status: 'skipped', oldRevid: null, newRevid: null, message: '页面不存在，视为已完成移动' });
 			applicable.push(rule);
 		} else if (dryRun) {
@@ -934,14 +934,14 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 			if (checkpoint.completed.includes(title)) {
 				log(`跳过（checkpoint 已完成）: ${title}`);
 				emit({ type: 'edit', title, status: 'skipped', oldRevid: null, newRevid: null, message: '续跑：checkpoint 已完成' });
-				emit({ type: 'progress', done: checkpoint.completed.length, total: pages.length, message: '已处理' });
+				emit({ type: 'progress', done: Math.min(checkpoint.completed.length, pages.length), total: pages.length, message: '已处理' });
 				continue;
 			}
 			try {
 				const { hits, oldRevid, newRevid } = await processPage(title, index, templateMap, summary, cliArgs.dryRun, log);
 				const detail = [...hits.entries()].map(([rule, count]) => `${rule} ${count} 处`).join('，');
 				if (hits.size > 0) {
-					console.log(`${title}: ${detail}`);
+					log(`${title}: ${detail}`);
 					changed++;
 					emit({
 						type: 'edit',
@@ -969,7 +969,7 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 				checkpoint.failed[title] = err.message;
 				failed++;
 			}
-			emit({ type: 'progress', done: checkpoint.completed.length, total: pages.length, message: '已处理' });
+			emit({ type: 'progress', done: Math.min(checkpoint.completed.length, pages.length), total: pages.length, message: '已处理' });
 			if (!cliArgs.dryRun) saveCheckpoint(checkpoint);
 			await sleep(cliArgs.interval);
 		}

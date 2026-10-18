@@ -34,6 +34,7 @@ const SUMMARY_LABEL: Record<string, string> = {
 	dryRun: '空跑',
 	added: '新增',
 	removed: '删除',
+	undoFailed: '撤销失败',
 };
 
 /** 一条页面记录的动作标签 */

@@ -22,6 +22,7 @@ const SUMMARY_LABEL: Record<string, string> = {
 	notDisplayed: '未展示',
 	added: '新增',
 	removed: '删除',
+	undoFailed: '撤销失败',
 };
 
 /**
