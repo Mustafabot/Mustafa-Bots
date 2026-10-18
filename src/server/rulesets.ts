@@ -1,7 +1,6 @@
-import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from 'node:fs';
-import { resolve } from 'node:path';
 import type { MwApiParams } from 'wiki-saikou';
 import { checkModerationQueued, checkModerationQueuedError, extractApiError } from '../utils/retry.js';
+import { DraftStore, safeDraftName } from './drafts.js';
 import { getSession } from './session.js';
 
 const PAGE_PREFIX = 'User:没有羽翼的格雷塔/BotConfig/';
@@ -21,15 +20,8 @@ export interface RulesetSummary {
 	draftUpdatedAt: number | null;
 }
 
-/** 规则集名必须能安全地当文件名，且不能逃出草稿目录 */
-export function safeName(name: string): string {
-	// ':' 必须挡掉：Windows 上 `C:evil` 是驱动器相对路径，
-	// resolve 后会落到进程工作目录而不是草稿目录
-	if (name === '' || name.includes('/') || name.includes('\\') || name.includes('..') || name.includes(':')) {
-		throw new Error(`规则集名 "${name}" 非法：不能为空，且不能包含斜杠、冒号或 ..`);
-	}
-	return name;
-}
+/** 规则集名与通用草稿名同一套规则；保留旧名以免调用方到处改 */
+export const safeName = safeDraftName;
 
 export function pageTitleFor(name: string): string {
 	return `${PAGE_PREFIX}${safeName(name)}`;
@@ -47,27 +39,21 @@ export function draftBaseline(previous: { page: string; baseRevid: number | null
 }
 
 export class RulesetStore {
-	private readonly dir: string;
+	private readonly drafts: DraftStore;
 
 	constructor(draftDir: string) {
-		this.dir = resolve(draftDir);
-		mkdirSync(this.dir, { recursive: true });
-	}
-
-	private fileFor(name: string): string {
-		return resolve(this.dir, `${safeName(name)}.json`);
+		this.drafts = new DraftStore(draftDir);
 	}
 
 	list(): RulesetSummary[] {
-		return readdirSync(this.dir)
-			.filter((file) => file.endsWith('.json'))
-			.map((file): RulesetSummary | null => {
-				const name = file.slice(0, -'.json'.length);
+		return this.drafts
+			.listFiles()
+			.map((name): RulesetSummary | null => {
 				try {
 					const draft = this.read(name);
 					return draft ? { name, pageTitle: draft.page, draftUpdatedAt: draft.updatedAt } : null;
 				} catch {
-					// 名字非法或文件损坏：跳过这一条，不要让一个野文件搞崩整个列表
+					// 名字非法：跳过这一条，不要让一个野文件搞崩整个列表
 					return null;
 				}
 			})
@@ -76,34 +62,27 @@ export class RulesetStore {
 	}
 
 	read(name: string): RulesetDraft | null {
-		const file = this.fileFor(name);
-		if (!existsSync(file)) return null;
-		try {
-			const draft = JSON.parse(readFileSync(file, 'utf-8')) as RulesetDraft;
-			// 早期草稿没有 page 字段，补上默认目标页，免得调用方到处判缺
-			return { ...draft, name, page: draft.page ?? pageTitleFor(name) };
-		} catch {
-			return null;
-		}
+		const raw = this.drafts.readRaw(name);
+		if (raw === null) return null;
+		const baseRevid = typeof raw.baseRevid === 'number' ? raw.baseRevid : null;
+		// 早期草稿没有 page 字段，补上默认目标页，免得调用方到处判缺
+		const page = typeof raw.page === 'string' && raw.page !== '' ? raw.page : pageTitleFor(name);
+		const content = typeof raw.content === 'string' ? raw.content : '';
+		const updatedAt = typeof raw.updatedAt === 'number' ? raw.updatedAt : 0;
+		return { name, page, baseRevid, content, updatedAt };
 	}
 
-	/**
-	 * 写草稿。`baseRevid` 须是 `page` 这一页的版本号（换页时别照抄旧基线，用 `draftBaseline`）。
-	 */
 	write(name: string, content: string, baseRevid: number | null, page?: string): RulesetDraft {
 		const safe = safeName(name);
 		const previous = this.read(safe);
 		const target = typeof page === 'string' && page.trim() !== '' ? page.trim() : (previous?.page ?? pageTitleFor(safe));
 		const draft: RulesetDraft = { name: safe, page: target, baseRevid, content, updatedAt: Date.now() };
-		writeFileSync(this.fileFor(safe), JSON.stringify(draft, null, 2), 'utf-8');
+		this.drafts.writeRaw(safe, { ...draft });
 		return draft;
 	}
 
 	remove(name: string): boolean {
-		const file = this.fileFor(name);
-		if (!existsSync(file)) return false;
-		rmSync(file);
-		return true;
+		return this.drafts.remove(name);
 	}
 }
 
