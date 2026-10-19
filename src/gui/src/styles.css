@@ -1068,3 +1068,33 @@ button.danger:hover:not(:disabled) {
 	gap: 0.5rem;
 	margin-bottom: 0.4rem;
 }
+
+.lr-results {
+	list-style: none;
+	margin: 0.75rem 0;
+	padding: 0;
+}
+
+.lr-result {
+	border: 1px solid rgba(127, 127, 127, 0.35);
+	border-radius: 0.5rem;
+	margin-bottom: 0.5rem;
+	padding: 0.6rem;
+}
+
+.lr-status {
+	border-radius: 0.25rem;
+	padding: 0.05rem 0.4rem;
+}
+
+.lr-status-changed {
+	background: rgba(76, 175, 80, 0.15);
+}
+
+.lr-status-skipped {
+	background: rgba(127, 127, 127, 0.15);
+}
+
+.lr-status-failed {
+	background: rgba(244, 67, 54, 0.15);
+}
