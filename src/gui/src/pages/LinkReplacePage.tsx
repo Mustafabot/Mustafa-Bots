@@ -82,12 +82,12 @@ export function LinkReplacePage(): React.JSX.Element {
 	const { task, events, busy, error, start, abort } = useTaskRun();
 	const running = task?.status === 'running';
 
-	/** 一次运行里逐页的结果：title → { status, message } */
+	/** 一次运行里逐页的结果：title → { status, message, newRevid }；newRevid 为 null 表示没产生新版本 */
 	const results = useMemo(() => {
-		const map = new Map<string, { status: string; message: string }>();
+		const map = new Map<string, { status: string; message: string; newRevid: number | null }>();
 		for (const event of events) {
 			if (event.type !== 'edit') continue;
-			map.set(event.title, { status: event.status, message: event.message ?? '' });
+			map.set(event.title, { status: event.status, message: event.message ?? '', newRevid: event.newRevid });
 		}
 		return map;
 	}, [events]);
@@ -96,6 +96,15 @@ export function LinkReplacePage(): React.JSX.Element {
 	const [openDiffs, setOpenDiffs] = useState<Set<string>>(new Set());
 	const [diffLines, setDiffLines] = useState<Record<string, DiffLine[]>>({});
 	const [diffError, setDiffError] = useState<Record<string, string>>({});
+
+	// 换一次运行就清空上回的 diff 状态：否则同名页面会直接复用上一次的行，空跑留下的错误文案也会串到真跑。
+	// 依赖 task?.id（原始字符串）而非 task 对象——SSE 每帧都会换一个新的 task 对象，依赖对象会每帧清空。
+	useEffect(() => {
+		setOpenDiffs(new Set());
+		setDiffLines({});
+		setDiffError({});
+	}, [task?.id]);
+
 	const toggleDiff = (title: string): void => {
 		const next = new Set(openDiffs);
 		if (next.has(title)) {
@@ -290,23 +299,27 @@ export function LinkReplacePage(): React.JSX.Element {
 
 			{results.size > 0 && (
 				<ul className="lr-results">
-					{[...results.entries()].map(([title, result]) => (
-						<li className="lr-result" key={title}>
-							<div className="restore-line">
-								<span className="restore-title">{title}</span>
-								<span className={`lr-status lr-status-${result.status}`}>{result.status === 'changed' ? '修改' : result.status === 'skipped' ? '跳过' : '失败'}</span>
-								{result.message !== '' && <span className="hint">{result.message}</span>}
-								<button type="button" onClick={() => toggleDiff(title)}>
-									{openDiffs.has(title) ? '收起 diff' : '看 diff'}
-								</button>
-							</div>
-							{openDiffs.has(title) && (
-								<div className="hit-diff">
-									{diffLines[title] !== undefined ? <DiffView lines={diffLines[title]} /> : <p className="hint">{diffError[title] ?? '正在取 diff…'}</p>}
+					{[...results.entries()].map(([title, result]) => {
+						// 任务还在跑时历史尚未落库、空跑/跳过/失败的行没有新版本，都点不出 diff，先禁掉并说明
+						const blocked = running ? '任务结束后才能看 diff' : result.newRevid === null ? '空跑未产生新版本，无法对比' : null;
+						return (
+							<li className="lr-result" key={title}>
+								<div className="restore-line">
+									<span className="restore-title">{title}</span>
+									<span className={`lr-status lr-status-${result.status}`}>{result.status === 'changed' ? '修改' : result.status === 'skipped' ? '跳过' : '失败'}</span>
+									{result.message !== '' && <span className="hint">{result.message}</span>}
+									<button type="button" disabled={blocked !== null} title={blocked ?? undefined} onClick={() => toggleDiff(title)}>
+										{openDiffs.has(title) ? '收起 diff' : '看 diff'}
+									</button>
 								</div>
-							)}
-						</li>
-					))}
+								{openDiffs.has(title) && (
+									<div className="hit-diff">
+										{diffLines[title] !== undefined ? <DiffView lines={diffLines[title]} /> : <p className="hint">{diffError[title] ?? '正在取 diff…'}</p>}
+									</div>
+								)}
+							</li>
+						);
+					})}
 				</ul>
 			)}
 
