@@ -17,3 +17,12 @@ test('拒绝缺字段与错类型', () => {
 test('条目去空白、去空、去重', () => {
 	assert.deepEqual(parseQueueSaveRequest({ entries: [' File:A.png ', '', 'File:A.png', 'File:B.png'], baseRevid: 1 }).entries, ['File:A.png', 'File:B.png']);
 });
+
+test('非字符串元素一律拒绝，不静默丢成空清单把队列清空', () => {
+	assert.throws(() => parseQueueSaveRequest({ entries: [123], baseRevid: 1 }), /字符串/);
+	assert.throws(() => parseQueueSaveRequest({ entries: ['File:A.png', null], baseRevid: 1 }), /字符串/);
+});
+
+test('条目归一为带 File: 前缀', () => {
+	assert.deepEqual(parseQueueSaveRequest({ entries: ['A.png', 'File:B.png'], baseRevid: 1 }).entries, ['File:A.png', 'File:B.png']);
+});

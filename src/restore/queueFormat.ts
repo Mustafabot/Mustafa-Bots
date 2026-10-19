@@ -17,7 +17,12 @@ export const QUEUE_PAGE = 'User:没有羽翼的格雷塔/BotConfig/FileRestore';
  */
 export const QUEUE_HEADER = '{{用户 允许他人编辑}}\n需要还原的文件请填入下方<code><nowiki><poem></nowiki></code>标签中，一行一个，带File前缀。填写后请联系[[User talk:没有羽翼的格雷塔|操作者]]手动运行脚本。\n----\n';
 
-/** 从页面正文里取出队列条目：<poem> 内逐行、去空白、去重 */
+/** 归一文件名：缺 `File:` 前缀就补上（前缀大小写不敏感，已带则原样保留） */
+export function normalizeEntry(name: string): string {
+	return /^file:/i.test(name) ? name : `File:${name}`;
+}
+
+/** 从页面正文里取出队列条目：<poem> 内逐行、去空白、补 `File:` 前缀、去重 */
 export function parseQueue(content: string): string[] {
 	const parsed = Parser.parse(content, QUEUE_PAGE);
 	const poems = parsed.querySelectorAll<Parser.ExtToken>('ext#poem');
@@ -30,9 +35,10 @@ export function parseQueue(content: string): string[] {
 		if (!innerText) continue;
 		for (const line of innerText.split('\n')) {
 			const trimmed = line.trim();
-			if (trimmed !== '') entries.push(trimmed);
+			if (trimmed !== '') entries.push(normalizeEntry(trimmed));
 		}
 	}
+	// 归一之后再比：正文写法不同的同一文件（`A.png` 与 `File:A.png`）只保留一条
 	return [...new Set(entries)];
 }
 

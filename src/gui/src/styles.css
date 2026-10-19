@@ -963,6 +963,10 @@ button.danger:hover:not(:disabled) {
 }
 
 /* ── 文件还原页 ── */
+.restore-page {
+	display: block;
+}
+
 .restore-actions {
 	align-items: center;
 	display: flex;
@@ -985,6 +989,14 @@ button.danger:hover:not(:disabled) {
 	gap: 0.75rem;
 	margin-bottom: 0.5rem;
 	padding: 0.6rem;
+}
+
+.restore-row-muted {
+	opacity: 0.6;
+}
+
+.restore-remove {
+	align-self: flex-start;
 }
 
 .restore-main {

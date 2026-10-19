@@ -5,7 +5,7 @@ import { readFileSync } from 'node:fs';
 import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
-import { QUEUE_PAGE, parseQueue, renderQueue } from './queueFormat.js';
+import { QUEUE_PAGE, normalizeEntry, parseQueue, renderQueue } from './queueFormat.js';
 import { createEmitter, type EmitProgress } from '../core/progress.js';
 import { checkModerationQueued, checkModerationQueuedError, extractApiError } from '../utils/retry.js';
 
@@ -289,9 +289,7 @@ async function processFile(
 	index: number,
 	total: number,
 ): Promise<RestoreResult> {
-	const filename = rawFilename.startsWith('File:')
-		? rawFilename
-		: `File:${rawFilename}`;
+	const filename = normalizeEntry(rawFilename);
 
 	const log = (message: string): void => {
 		if (options.verbose) console.log(message);
@@ -539,10 +537,7 @@ async function main(): Promise<void> {
 
 	// 只把处理成功的条目从队列里移除：失败的与未选中的都留着
 	const succeeded = new Set(undeleteSuccess.map((r) => r.filename));
-	const remaining = queue.entries.filter((entry) => {
-		const normalized = entry.startsWith('File:') ? entry : `File:${entry}`;
-		return !succeeded.has(normalized);
-	});
+	const remaining = queue.entries.filter((entry) => !succeeded.has(normalizeEntry(entry)));
 
 	console.log('\n正在更新队列...');
 	if (args.dryRun) {

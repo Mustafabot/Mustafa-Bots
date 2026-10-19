@@ -2,36 +2,17 @@
 //
 // 队列的正文由服务端读写（API 只收发条目），解析与生成在服务端的 queueFormat 里，
 // 界面不碰 wikitext。跑任务时把勾选的文件名经 submitTitles 下发给脚本。
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../api';
 import { LogView } from '../components/LogView';
 import { ProgressPanel } from '../components/ProgressPanel';
 import { useTaskRun } from '../hooks/useTaskRun';
-import type { PageWriteResult, ProgressEvent, RestoreQueueState, StartTaskBody, TaskDescriptor } from '../types';
+import { restoreOutcomesFromEvents } from '../restoreOutcome';
+import type { PageWriteResult, RestoreQueueState, StartTaskBody, TaskDescriptor } from '../types';
 
-/** 一行在本次运行里的状态，按事件归并出来 */
-interface RowState {
-	log?: Record<string, string | number | null>;
-	result?: string;
-}
-
-/** 从事件里归并逐条状态：detail 给删除日志，edit 给还原结果 */
-function rowStatesFromEvents(events: ProgressEvent[]): Map<string, RowState> {
-	const states = new Map<string, RowState>();
-	for (const event of events) {
-		if (event.type === 'detail') {
-			const key = event.title.replace(/^File:/i, '');
-			states.set(key, { ...states.get(key), log: event.fields });
-		} else if (event.type === 'edit') {
-			const key = event.title.replace(/^File:/i, '');
-			const previous = states.get(key) ?? {};
-			const label = event.status === 'changed'
-				? (event.message?.startsWith('[DRY-RUN]') === true ? '空跑' : (event.message ?? '已还原'))
-				: event.status === 'skipped' ? (event.message ?? '跳过') : `失败：${event.message ?? '未知原因'}`;
-			states.set(key, { ...previous, result: label });
-		}
-	}
-	return states;
+/** 事件与队列都以 `File:xxx` 记文件名，界面用去掉前缀的键互相对上 */
+function entryKey(name: string): string {
+	return name.replace(/^File:/i, '');
 }
 
 /** 文件还原页 */
@@ -44,12 +25,27 @@ export function FileRestorePage(): React.JSX.Element {
 	const [notice, setNotice] = useState<{ text: string; kind: 'info' | 'error' } | null>(null);
 	const [conflict, setConflict] = useState<{ remote: string | null; reason: string } | null>(null);
 
+	// 上一次列表里的条目：重载时据它区分"早先就在的行"（保留勾选）与"新出现的行"（默认勾上）
+	const previousEntries = useRef<string[]>([]);
+	useEffect(() => {
+		previousEntries.current = entries;
+	}, [entries]);
+
 	const loadQueue = useCallback(async (): Promise<void> => {
 		try {
 			const result = await api.restoreQueue.load();
+			// 只认前一次列表：首次载入时它是空的，于是整队默认勾上；之后的重载保留用户在界面上的增删勾选
+			const known = new Set(previousEntries.current);
 			setQueue(result);
 			setEntries(result.entries);
-			setSelected(new Set(result.entries));
+			setSelected((prev) => {
+				const next = new Set<string>();
+				for (const entry of result.entries) {
+					// 早先就在的行沿用此前的勾选状态，新出现的行默认勾上
+					if (!known.has(entry) || prev.has(entry)) next.add(entry);
+				}
+				return next;
+			});
 			setConflict(null);
 		} catch (reason) {
 			setNotice({ text: reason instanceof ApiError ? reason.message : '读取队列失败', kind: 'error' });
@@ -62,7 +58,7 @@ export function FileRestorePage(): React.JSX.Element {
 	});
 
 	const running = task?.status === 'running';
-	const states = useMemo(() => rowStatesFromEvents(events), [events]);
+	const states = useMemo(() => restoreOutcomesFromEvents(events), [events]);
 
 	useEffect(() => {
 		void loadQueue();
@@ -82,15 +78,27 @@ export function FileRestorePage(): React.JSX.Element {
 		};
 	}, []);
 
-	/** 只处理勾选的文件；一个都没勾时提示 */
-	const selectedEntries = (): string[] => entries.filter((entry) => selected.has(entry));
+	/** 检查/还原报过"不可还原"的行：标灰、不勾选、不计数、不进工作清单 */
+	const isRestorable = useCallback((entry: string): boolean => states.get(entryKey(entry))?.restorable !== false, [states]);
+
+	/** 只处理勾选且可还原的文件；一个都没有时后续动作提示 */
+	const chosenEntries = (): string[] => entries.filter((entry) => selected.has(entry) && isRestorable(entry));
+	const chosenCount = entries.filter((entry) => selected.has(entry) && isRestorable(entry)).length;
 
 	const startTask = async (values: Record<string, boolean>): Promise<void> => {
 		if (descriptor === null) return;
-		const chosen = selectedEntries();
+		const chosen = chosenEntries();
 		if (chosen.length === 0) {
 			setNotice({ text: '先勾选要处理的文件。', kind: 'error' });
 			return;
+		}
+		// 真任务：本地新加、尚未写回队列的行跑完就不在队列里了，动手前先说清楚（空跑不改动队列，不必问）
+		if (values['--dry-run'] !== true) {
+			const onServer = new Set(queue?.entries ?? []);
+			const unsaved = chosen.filter((entry) => !onServer.has(entry));
+			if (unsaved.length > 0 && !window.confirm(`有 ${unsaved.length} 个选中的条目不在队列里（本地新增、尚未保存）。它们会被处理，但处理后不会留在队列里。仍要继续吗？`)) {
+				return;
+			}
 		}
 		const body: StartTaskBody = { descriptorId: descriptor.id, values, rulesetName: '文件还原', submitTitles: chosen };
 		setNotice(null);
@@ -142,8 +150,6 @@ export function FileRestorePage(): React.JSX.Element {
 		setSelected(next);
 	};
 
-	const shownError = error;
-
 	return (
 		<section className="restore-page">
 			<div className="page-head">
@@ -151,7 +157,7 @@ export function FileRestorePage(): React.JSX.Element {
 				<h2>文件还原</h2>
 			</div>
 
-			{shownError !== null && <p className="error">{shownError}</p>}
+			{error !== null && <p className="error">{error}</p>}
 			{notice !== null && <p className={notice.kind === 'error' ? 'error' : 'hint'}>{notice.text}</p>}
 
 			<ProgressPanel task={task} events={events} onAbort={() => void abort()} aborting={busy && running} />
@@ -161,7 +167,7 @@ export function FileRestorePage(): React.JSX.Element {
 					检查选中的
 				</button>
 				<button type="button" className="primary" disabled={running || descriptor === null} onClick={() => void startTask({})}>
-					还原选中的 {selected.size} 个
+					还原选中的 {chosenCount} 个
 				</button>
 				<button type="button" disabled={running || queue === null} onClick={() => void saveQueue()}>
 					保存队列
@@ -171,15 +177,16 @@ export function FileRestorePage(): React.JSX.Element {
 
 			<ul className="restore-rows">
 				{entries.map((entry) => {
-					const key = entry.replace(/^File:/i, '');
-					const state = states.get(key);
+					const state = states.get(entryKey(entry));
+					const restorable = state?.restorable !== false;
 					return (
-						<li className="restore-row" key={entry}>
-							<input type="checkbox" checked={selected.has(entry)} disabled={running} onChange={(event) => toggle(entry, event.target.checked)} />
+						<li className={restorable ? 'restore-row' : 'restore-row restore-row-muted'} key={entry}>
+							<input type="checkbox" checked={restorable && selected.has(entry)} disabled={running || !restorable} onChange={(event) => toggle(entry, event.target.checked)} />
 							<div className="restore-main">
 								<div className="restore-line">
 									<span className="restore-title">{entry}</span>
 									{state?.result !== undefined && <span className="restore-result">{state.result}</span>}
+									{!restorable && <span className="hint">不可还原</span>}
 								</div>
 								{state?.log !== undefined && (
 									<div className="restore-log">
