@@ -39,8 +39,9 @@ function parseParam(text: string): number | number[] | 'all' | undefined {
 	const trimmed = text.trim();
 	if (trimmed === '') return undefined;
 	if (trimmed === 'all') return 'all';
-	const parts = trimmed.split(',').map((part) => Number(part.trim()));
-	if (parts.some((n) => !Number.isInteger(n) || n < 0) || parts.length === 0) return undefined;
+	// 只接受「数字(,数字)*」：否则 "1,"、",1"、"1,,2" 会被 Number('') 悄悄当成 0
+	if (!/^\d+(,\d+)*$/.test(trimmed)) return undefined;
+	const parts = trimmed.split(',').map((part) => Number(part));
 	return parts.length === 1 ? parts[0] : parts;
 }
 
@@ -131,6 +132,12 @@ export function decodeLinkConfig(content: string): LinkConfigForm {
 	return form;
 }
 
+/** 标题归一化：去首尾空白、下划线当空格、首字母大写——与脚本 normalizeTitle 对齐，用于「从/到」相同判定 */
+function normalizeTitle(title: string): string {
+	const cleaned = title.trim().replace(/_/g, ' ');
+	return cleaned ? cleaned[0].toUpperCase() + cleaned.slice(1) : cleaned;
+}
+
 /** 校验表单；返回给人看的错误列表，空数组表示可以保存或运行 */
 export function validateLinkConfigForm(form: LinkConfigForm): string[] {
 	const errors: string[] = [];
@@ -141,9 +148,9 @@ export function validateLinkConfigForm(form: LinkConfigForm): string[] {
 		if (from === '' || to === '') errors.push(`第 ${i + 1} 条规则缺少「从」或「到」`);
 		else if (from.startsWith('#')) errors.push(`第 ${i + 1} 条规则的「从」标题部分不能为空`);
 		else if (to.startsWith('#')) errors.push(`第 ${i + 1} 条规则的「到」标题部分不能为空`);
-		else if (from === to) errors.push(`第 ${i + 1} 条规则的「从」与「到」相同`);
+		else if (normalizeTitle(from) === normalizeTitle(to)) errors.push(`第 ${i + 1} 条规则的「从」与「到」相同`);
 	}
-	if (form.pages.length === 0 && form.namespaces.length === 0) errors.push('至少要有显式页面，或勾选一个命名空间');
+	if (form.pages.filter((page) => page.trim() !== '').length === 0 && form.namespaces.length === 0) errors.push('至少要有显式页面，或勾选一个命名空间');
 	for (const [i, row] of form.linkTemplates.entries()) {
 		if (row.name.trim() === '') continue;
 		if (parseParam(row.param) === undefined) errors.push(`第 ${i + 1} 个模板缺少可用的参数位`);

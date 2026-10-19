@@ -64,6 +64,17 @@ test('缺名字或缺参数的模板行整行跳过', () => {
 	assert.equal(encoded.linkTemplates, undefined);
 });
 
+test('参数位含空段的写法被拒绝，不再悄悄当成 0', () => {
+	const form: LinkConfigForm = {
+		...emptyLinkConfig(),
+		pages: ['苹果'],
+		replacements: [{ from: '苹果', to: '梨' }],
+		linkTemplates: [{ name: 'Template:A', param: '1,', displayParam: '', valueSeparator: '' }],
+	};
+	const encoded = JSON.parse(encodeLinkConfig(form)) as { linkTemplates?: unknown };
+	assert.equal(encoded.linkTemplates, undefined);
+});
+
 test('解码把参数位还原成字符串形式', () => {
 	const form = decodeLinkConfig(JSON.stringify({
 		mode: 'move',
@@ -114,4 +125,13 @@ test('表单校验：缺规则、缺页面来源、from 与 to 相同、纯锚�
 	assert.match(validateLinkConfigForm({ ...fullForm(), replacements: [{ from: '苹果', to: '苹果' }] }).join('；'), /「从」与「到」相同/);
 	assert.match(validateLinkConfigForm({ ...fullForm(), replacements: [{ from: '#锚点', to: '苹果' }] }).join('；'), /标题部分不能为空/);
 	assert.match(validateLinkConfigForm({ ...fullForm(), linkTemplates: [{ name: 'Template:A', param: '', displayParam: '', valueSeparator: '' }] }).join('；'), /缺少可用的参数位/);
+});
+
+test('表单校验：只有空行的显式页面框不算有页面来源', () => {
+	assert.match(validateLinkConfigForm({ ...fullForm(), pages: [''], namespaces: [] }).join('；'), /至少要有显式页面/);
+	assert.match(validateLinkConfigForm({ ...fullForm(), pages: ['   ', '\t'], namespaces: [] }).join('；'), /至少要有显式页面/);
+});
+
+test('表单校验：「从」与「到」归一化后相同（下划线当空格）也判为相同', () => {
+	assert.match(validateLinkConfigForm({ ...fullForm(), replacements: [{ from: '苹果 梨', to: '苹果_梨' }] }).join('；'), /「从」与「到」相同/);
 });

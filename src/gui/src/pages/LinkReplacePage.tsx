@@ -2,7 +2,7 @@
 //
 // 配置的权威形状在 src/replace/LinkReplace.ts；界面用 linkConfigCodec 镜像一份。
 // 配置页只在「保存到配置页」时才写回，运行走 --config-file（服务端落临时文件）。
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { ApiError, api } from '../api';
 import { DiffView } from '../components/DiffView';
 import { LinkRuleList } from '../components/LinkRuleList';
@@ -81,6 +81,9 @@ export function LinkReplacePage(): React.JSX.Element {
 	// 任务编排（SSE + 启动/中止 + 状态）与其它页面共用一份
 	const { task, events, busy, error, start, abort } = useTaskRun();
 	const running = task?.status === 'running';
+	// 当前任务的 id，渲染时同步；toggleDiff 拿它判断在途响应是否已属于上一轮任务
+	const taskIdRef = useRef<string | null>(null);
+	taskIdRef.current = task?.id ?? null;
 
 	/** 一次运行里逐页的结果：title → { status, message, newRevid }；newRevid 为 null 表示没产生新版本 */
 	const results = useMemo(() => {
@@ -115,10 +118,17 @@ export function LinkReplacePage(): React.JSX.Element {
 		next.add(title);
 		setOpenDiffs(next);
 		if (task === null || diffLines[title] !== undefined) return;
+		// 闭包住发起时的任务号：响应回来时若已换了一轮任务（状态已被清空），一律丢弃，
+		// 否则在途响应会把上一轮的 diff 写进新任务的表，新任务便不再重取、显示旧内容。
+		const startedFor = task.id;
 		api.history
 			.diff(task.id, title)
-			.then((result) => setDiffLines((prev) => ({ ...prev, [title]: result.lines })))
+			.then((result) => {
+				if (taskIdRef.current !== startedFor) return;
+				setDiffLines((prev) => ({ ...prev, [title]: result.lines }));
+			})
 			.catch((reason: unknown) => {
+				if (taskIdRef.current !== startedFor) return;
 				const reasonCode = reason instanceof ApiError ? (reason.body as { reason?: string } | null)?.reason : undefined;
 				const text = reasonCode === 'unchanged' ? '这一页没有实际改动' : reasonCode === 'missing' ? '线上已找不到这个页面' : reason instanceof ApiError ? reason.message : '取 diff 失败';
 				setDiffError((prev) => ({ ...prev, [title]: text }));
@@ -128,13 +138,18 @@ export function LinkReplacePage(): React.JSX.Element {
 	/** 启动一次运行：空跑带 --dry-run；另按需带 --reset。表单先过一遍校验再下发 */
 	const startRun = async (dryRun: boolean): Promise<void> => {
 		if (descriptor === null) return;
+		// 配置页标题是脚本的断点标识：空标题会让脚本改用每次都不一样的临时文件当标识，续跑失效、还留下一堆断点文件，故直接拦下
+		const title = configPage.trim();
+		if (title === '') {
+			setNotice({ text: '请先填配置页标题：脚本用它当断点标识，空标题会导致续跑失效。', kind: 'error' });
+			return;
+		}
 		const problems = validateLinkConfigForm(form);
 		if (problems.length > 0) {
 			setNotice({ text: `先修好这些再运行：${problems.join('；')}`, kind: 'error' });
 			return;
 		}
-		// 配置页标题始终下发（可为空串）：脚本用它当断点标识，缺了每次都会换一个临时文件当标识，续跑就失效
-		const values: Record<string, boolean | string> = { configPage: configPage.trim() };
+		const values: Record<string, boolean | string> = { configPage: title };
 		if (dryRun) values['--dry-run'] = true;
 		if (resetCheckpoint) values['--reset'] = true;
 		setNotice(null);
@@ -142,7 +157,7 @@ export function LinkReplacePage(): React.JSX.Element {
 			descriptorId: descriptor.id,
 			values,
 			rulesetContent: encodeLinkConfig(form),
-			rulesetName: configPage.trim() === '' ? '未命名链接替换' : configPage.trim(),
+			rulesetName: title,
 		});
 	};
 
@@ -155,10 +170,18 @@ export function LinkReplacePage(): React.JSX.Element {
 		}
 		setSaving(true);
 		try {
-			await api.linkConfig.save(configPage.trim(), encodeLinkConfig(form), loaded?.revid ?? null, force);
+			const target = configPage.trim();
+			// 只有当「载入的页面」就是当前目标页时才复用它那一版；改了标题（或换个标题载入失败）后，旧版本的号的基线属于别的页面，用了会误报冲突
+			const baseRevid = loaded !== null && loaded.page === target ? loaded.revid : null;
+			const result = await api.linkConfig.save(target, encodeLinkConfig(form), baseRevid, force);
 			setConflict(null);
-			setNotice({ text: '配置已保存。', kind: 'info' });
-			await loadConfig(configPage.trim());
+			if (result.ok && result.revid === null) {
+				// 写入被送进审核队列：线上仍是旧内容，此刻回读会把刚保存的表单改回去，故跳过回读
+				setNotice({ text: '已提交，等待审核；线上内容尚未更新', kind: 'info' });
+			} else {
+				setNotice({ text: '配置已保存。', kind: 'info' });
+				await loadConfig(target);
+			}
 		} catch (reason) {
 			const body = reason instanceof ApiError ? reason.body : null;
 			if (body !== null && (body as { ok?: unknown }).ok === false) {
@@ -224,14 +247,14 @@ export function LinkReplacePage(): React.JSX.Element {
 
 				<div className="field">
 					<label htmlFor="lr-pages">显式页面（一行一个，可留空）</label>
-					<textarea id="lr-pages" rows={4} value={form.pages.join('\n')} onChange={(event) => setForm((prev) => ({ ...prev, pages: event.target.value.split(/\r?\n/).map((line) => line.trim()).filter((line) => line !== '') }))} />
+					<textarea id="lr-pages" rows={4} value={form.pages.join('\n')} onChange={(event) => setForm((prev) => ({ ...prev, pages: event.target.value.split(/\r?\n/) }))} />
 				</div>
 
 				<div className="field">
 					<span>页面来源的命名空间（链入与嵌入引用按此过滤；不勾则只看显式页面）</span>
 				</div>
 				<div className="ns-grid">
-					{namespaces.map((ns) => (
+					{namespaces.filter((ns) => ns.id >= 0).map((ns) => (
 						<label className="ns-item" key={ns.id}>
 							<input type="checkbox" checked={form.namespaces.includes(ns.id)} onChange={(event) => toggleNamespace(ns.id, event.target.checked)} />
 							<span>{ns.label}</span>
@@ -289,10 +312,10 @@ export function LinkReplacePage(): React.JSX.Element {
 					<input type="checkbox" checked={resetCheckpoint} disabled={running} onChange={(event) => setResetCheckpoint(event.target.checked)} />
 					丢弃断点
 				</label>
-				<button type="button" disabled={running || descriptor === null} onClick={() => void startRun(true)}>
+				<button type="button" disabled={running || busy || descriptor === null} onClick={() => void startRun(true)}>
 					空跑
 				</button>
-				<button type="button" className="primary" disabled={running || descriptor === null} onClick={() => void startRun(false)}>
+				<button type="button" className="primary" disabled={running || busy || descriptor === null} onClick={() => void startRun(false)}>
 					运行
 				</button>
 			</div>
@@ -300,8 +323,9 @@ export function LinkReplacePage(): React.JSX.Element {
 			{results.size > 0 && (
 				<ul className="lr-results">
 					{[...results.entries()].map(([title, result]) => {
-						// 任务还在跑时历史尚未落库、空跑/跳过/失败的行没有新版本，都点不出 diff，先禁掉并说明
-						const blocked = running ? '任务结束后才能看 diff' : result.newRevid === null ? '空跑未产生新版本，无法对比' : null;
+						// 任务还在跑时历史尚未落库、无从取 diff；此外只有「没产生新版本」的行才点不出 diff——
+						// 空跑、移动成功（newRevid 为 null）都是这种；被跳过（如「无匹配」）的行仍带 newRevid === oldRevid，可对比
+						const blocked = running ? '任务结束后才能看 diff' : result.newRevid === null ? '该动作没有产生新版本，无法对比' : null;
 						return (
 							<li className="lr-result" key={title}>
 								<div className="restore-line">
