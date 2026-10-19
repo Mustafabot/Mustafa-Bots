@@ -537,16 +537,6 @@ async function main(): Promise<void> {
 		}
 	}
 
-	emit({
-		type: 'done',
-		summary: {
-			changed: undeleteSuccess.length,
-			skipped: skipped.length,
-			failed: undeleteFailed.length,
-			undoFailed: undoFailed.length,
-		},
-	});
-
 	// 只把处理成功的条目从队列里移除：失败的与未选中的都留着
 	const succeeded = new Set(undeleteSuccess.map((r) => r.filename));
 	const remaining = queue.entries.filter((entry) => {
@@ -563,6 +553,18 @@ async function main(): Promise<void> {
 			console.error('  队列页已被他人改动，本次不写回；请刷新后重试');
 		}
 	}
+
+	// done 是"连队列写回在内都已完成"的信号：界面收到它就会重读队列，
+	// 所以必须排在队列更新之后发，否则界面读到的还是写回前的旧队列。
+	emit({
+		type: 'done',
+		summary: {
+			changed: undeleteSuccess.length,
+			skipped: skipped.length,
+			failed: undeleteFailed.length,
+			undoFailed: undoFailed.length,
+		},
+	});
 
 	console.log(`\nEnd time: ${new Date().toISOString()}`);
 }
