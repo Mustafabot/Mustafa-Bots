@@ -11,6 +11,7 @@ import { CategoryService } from './categories.js';
 import { TextDraftStore } from './drafts.js';
 import { HistoryStore } from './history.js';
 import { NamespaceService } from './namespaces.js';
+import { parsePageSaveRequest } from './pageSaveRequest.js';
 import { PageTextService } from './pageText.js';
 import { readPage, writePage } from './pageWrite.js';
 import { parseQueueSaveRequest } from './queueRequest.js';
@@ -38,6 +39,7 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 	const draftStores = new Map<string, { read(name: string): { content: string } | null }>([
 		['rulesets', rulesets],
 		['upload-tasks', uploadTasks],
+		['link-configs', new TextDraftStore('data/gui/link-configs')],
 	]);
 	const draftStoreFor = (source: string | undefined): { read(name: string): { content: string } | null } => {
 		const key = source ?? 'rulesets';
@@ -529,6 +531,47 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 							baseRevid: request.baseRevid,
 							force: request.force,
 							summary: '机器人：更新还原队列',
+						}))
+						.then((result) => sendJson(res, result.ok ? 200 : 409, result))
+						.catch((error: Error) => sendJson(res, 500, { error: error.message }));
+				});
+				return;
+			}
+
+			if (url.pathname === '/api/link-config' && req.method === 'GET') {
+				const page = (url.searchParams.get('page') ?? '').trim();
+				if (page === '') {
+					sendJson(res, 400, { error: '缺少 page 查询参数' });
+					return;
+				}
+				getSession('zh')
+					.then((api) => readPage(api, page).then((remote) => {
+						if (remote.content === null) {
+							sendJson(res, 409, { error: `配置页不存在或无法读取：${page}` });
+							return;
+						}
+						sendJson(res, 200, { page, revid: remote.revid, content: remote.content });
+					}))
+					.catch((error: Error) => sendJson(res, 500, { error: error.message }));
+				return;
+			}
+
+			if (url.pathname === '/api/link-config' && req.method === 'PUT') {
+				readBody(req).then((bodyText) => {
+					let request: ReturnType<typeof parsePageSaveRequest>;
+					try {
+						request = parsePageSaveRequest(JSON.parse(bodyText || '{}'));
+					} catch (error) {
+						sendJson(res, 400, { error: (error as Error).message });
+						return;
+					}
+					getSession('zh')
+						.then((api) => writePage(api, {
+							title: request.page,
+							text: request.content,
+							baseRevid: request.baseRevid,
+							force: request.force,
+							summary: '机器人：更新链接替换配置',
 						}))
 						.then((result) => sendJson(res, result.ok ? 200 : 409, result))
 						.catch((error: Error) => sendJson(res, 500, { error: error.message }));

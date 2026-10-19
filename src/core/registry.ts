@@ -105,6 +105,22 @@ export const DESCRIPTORS: TaskDescriptor[] = [
 			{ kind: 'boolean', flag: '--no-undo-edit', label: '还原后不撤销最后一笔编辑' },
 		],
 	},
+	{
+		id: 'link-replace',
+		label: '链接替换',
+		entry: 'src/replace/LinkReplace.ts',
+		style: 'space',
+		page: 'link-replace',
+		configFileFlag: '--config-file',
+		configSource: 'link-configs',
+		progressFlag: '--progress-json',
+		quietFlag: '--quiet',
+		params: [
+			{ kind: 'boolean', flag: '--dry-run', label: '空跑，只看会改哪些页' },
+			{ kind: 'boolean', flag: '--reset', label: '丢弃断点，从头开始' },
+			{ kind: 'positional', name: 'configPage', label: '配置页标题（用作断点标识）', index: 0 },
+		],
+	},
 ];
 
 export function findDescriptor(id: string): TaskDescriptor | undefined {
