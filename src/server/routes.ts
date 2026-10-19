@@ -5,14 +5,18 @@ import { fileURLToPath } from 'node:url';
 import { validateValues } from '../core/descriptor.js';
 import type { ProgressEvent } from '../core/progress.js';
 import { DESCRIPTORS, findDescriptor } from '../core/registry.js';
+import { QUEUE_PAGE, parseQueue, renderQueue } from '../restore/queueFormat.js';
 import { isLocalHeaderHost, isLocalOriginUrl, issueToken, verifyPassword, type ServerConfig } from './auth.js';
 import { CategoryService } from './categories.js';
 import { TextDraftStore } from './drafts.js';
 import { HistoryStore } from './history.js';
 import { NamespaceService } from './namespaces.js';
 import { PageTextService } from './pageText.js';
+import { readPage, writePage } from './pageWrite.js';
+import { parseQueueSaveRequest } from './queueRequest.js';
 import { RulesetPublisher, RulesetStore, draftBaseline, pageTitleFor, resolveRunRuleset, type RunRuleset } from './rulesets.js';
 import { ScanStore } from './scans.js';
+import { getSession } from './session.js';
 import { TaskRunner, type TaskRecord } from './taskRunner.js';
 import { clearUploads, listUploads, receiveUpload, resolveUpload } from './uploads.js';
 
@@ -486,6 +490,50 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 					});
 					return;
 				}
+			}
+
+			if (url.pathname === '/api/restore-queue' && req.method === 'GET') {
+				// 队列页在 zh；读正文要登录，失败降级成 500 而不是打挂服务
+				getSession('zh')
+					.then((api) => readPage(api, QUEUE_PAGE).then((remote) => {
+						if (remote.content === null) {
+							sendJson(res, 409, { error: '队列页不存在或无法读取' });
+							return;
+						}
+						let entries: string[];
+						try {
+							entries = parseQueue(remote.content);
+						} catch (error) {
+							sendJson(res, 400, { error: (error as Error).message });
+							return;
+						}
+						sendJson(res, 200, { page: QUEUE_PAGE, revid: remote.revid, content: remote.content, entries });
+					}))
+					.catch((error: Error) => sendJson(res, 500, { error: error.message }));
+				return;
+			}
+
+			if (url.pathname === '/api/restore-queue' && req.method === 'PUT') {
+				readBody(req).then((bodyText) => {
+					let request: ReturnType<typeof parseQueueSaveRequest>;
+					try {
+						request = parseQueueSaveRequest(JSON.parse(bodyText || '{}'));
+					} catch (error) {
+						sendJson(res, 400, { error: (error as Error).message });
+						return;
+					}
+					getSession('zh')
+						.then((api) => writePage(api, {
+							title: QUEUE_PAGE,
+							text: renderQueue(request.entries),
+							baseRevid: request.baseRevid,
+							force: request.force,
+							summary: '机器人：更新还原队列',
+						}))
+						.then((result) => sendJson(res, result.ok ? 200 : 409, result))
+						.catch((error: Error) => sendJson(res, 500, { error: error.message }));
+				});
+				return;
 			}
 
 			// 未匹配到任何接口的 /api/* 一律回 JSON 404：否则会落到 serveStatic 的 SPA 回退，
