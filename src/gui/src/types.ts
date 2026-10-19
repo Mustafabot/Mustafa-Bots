@@ -318,3 +318,18 @@ export interface UploadTaskDraft {
 	content: string;
 	updatedAt: number;
 }
+
+// ── 还原队列（镜像 /api/restore-queue）──
+
+/** 队列页的当前状态；entries 是解析出的文件名 */
+export interface RestoreQueueState {
+	page: string;
+	revid: number | null;
+	content: string;
+	entries: string[];
+}
+
+/** 写回结果：成功给新版本号，冲突带回线上内容供比对 */
+export type PageWriteResult =
+	| { ok: true; revid: number | null }
+	| { ok: false; reason: 'conflict' | 'missing'; remote: string | null; remoteRevid: number | null };

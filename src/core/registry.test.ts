@@ -4,9 +4,9 @@ import { DESCRIPTORS, findDescriptor } from './registry.js';
 import { buildArgv } from './descriptor.js';
 import type { ParamSpec } from './descriptor.js';
 
-test('注册了三个描述符且 id 唯一', () => {
+test('注册了四个描述符且 id 唯一', () => {
 	const ids = DESCRIPTORS.map((d) => d.id);
-	assert.deepEqual(ids, ['text-replace', 'auto-patrol', 'url-upload']);
+	assert.deepEqual(ids, ['text-replace', 'auto-patrol', 'url-upload', 'file-restore']);
 	assert.equal(new Set(ids).size, ids.length);
 });
 
@@ -27,7 +27,7 @@ test('AutoPatrol 用等号风格拼参数，且保留 limit=0', () => {
 	assert.deepEqual(argv, ['--mode=edit', '--wiki=zh', '--days=7', '--limit=0', '--dry-run']);
 });
 
-test('三个描述符都声明了进度开关，且各自声明了配置文件来源', () => {
+test('四个描述符都声明了进度开关，且各自声明了配置文件来源', () => {
 	for (const descriptor of DESCRIPTORS) {
 		assert.equal(descriptor.progressFlag, '--progress-json');
 	}
@@ -40,6 +40,7 @@ test('三个描述符都声明了进度开关，且各自声明了配置文件�
 test('有专属页的任务标出路由名', () => {
 	assert.equal(findDescriptor('text-replace')?.page, 'text-replace');
 	assert.equal(findDescriptor('url-upload')?.page, 'url-upload');
+	assert.equal(findDescriptor('file-restore')?.page, 'file-restore');
 	assert.equal(findDescriptor('auto-patrol')?.page, undefined);
 });
 

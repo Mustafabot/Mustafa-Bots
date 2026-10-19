@@ -961,3 +961,73 @@ button.danger:hover:not(:disabled) {
 	margin: 0.75rem 0;
 	padding: 0.6rem;
 }
+
+/* ── 文件还原页 ── */
+.restore-actions {
+	align-items: center;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.75rem;
+	margin: 0.75rem 0;
+}
+
+.restore-rows {
+	list-style: none;
+	margin: 0.75rem 0;
+	padding: 0;
+}
+
+.restore-row {
+	align-items: flex-start;
+	border: 1px solid rgba(127, 127, 127, 0.35);
+	border-radius: 0.5rem;
+	display: flex;
+	gap: 0.75rem;
+	margin-bottom: 0.5rem;
+	padding: 0.6rem;
+}
+
+.restore-main {
+	display: flex;
+	flex: 1;
+	flex-direction: column;
+	gap: 0.3rem;
+}
+
+.restore-line {
+	align-items: center;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+}
+
+.restore-result {
+	background: rgba(76, 175, 80, 0.15);
+	border-radius: 0.25rem;
+	padding: 0.05rem 0.4rem;
+}
+
+.restore-log {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.5rem;
+	font-size: 0.85em;
+	opacity: 0.85;
+}
+
+.restore-add,
+.restore-conflict {
+	align-items: center;
+	display: flex;
+	flex-wrap: wrap;
+	gap: 0.75rem;
+	margin: 0.75rem 0;
+}
+
+.restore-conflict {
+	align-items: flex-start;
+	border: 1px solid rgba(244, 67, 54, 0.5);
+	border-radius: 0.5rem;
+	flex-direction: column;
+	padding: 0.75rem;
+}

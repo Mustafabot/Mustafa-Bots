@@ -6,8 +6,10 @@ import type {
 	HistoryTaskDetail,
 	HistoryTaskRow,
 	NamespaceList,
+	PageWriteResult,
 	PublishOptions,
 	PublishSuccess,
+	RestoreQueueState,
 	RulesetDraft,
 	RulesetRemote,
 	RulesetSummary,
@@ -115,6 +117,11 @@ export const api = {
 		save: (name: string, content: string, page?: string) =>
 			request<{ draft: RulesetDraft }>(`/api/rulesets/${seg(name)}`, jsonInit('PUT', { content, ...(page === undefined ? {} : { page }) })),
 		publish: (name: string, options: PublishOptions = {}) => request<PublishSuccess>(`/api/rulesets/${seg(name)}/publish`, jsonInit('POST', options)),
+	},
+	restoreQueue: {
+		load: () => request<RestoreQueueState>('/api/restore-queue'),
+		save: (entries: string[], baseRevid: number | null, force = false) =>
+			request<PageWriteResult>('/api/restore-queue', jsonInit('PUT', { entries, baseRevid, force })),
 	},
 	uploads: {
 		/**

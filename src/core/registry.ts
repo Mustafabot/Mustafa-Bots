@@ -92,6 +92,19 @@ export const DESCRIPTORS: TaskDescriptor[] = [
 			{ kind: 'boolean', flag: '--dry-run', label: '空跑，不提交任何上传' },
 		],
 	},
+	{
+		id: 'file-restore',
+		label: '文件还原',
+		entry: 'src/restore/FileRestore.ts',
+		style: 'space',
+		page: 'file-restore',
+		progressFlag: '--progress-json',
+		quietFlag: '--quiet',
+		params: [
+			{ kind: 'boolean', flag: '--dry-run', label: '空跑，只检查不还原' },
+			{ kind: 'boolean', flag: '--no-undo-edit', label: '还原后不撤销最后一笔编辑' },
+		],
+	},
 ];
 
 export function findDescriptor(id: string): TaskDescriptor | undefined {
