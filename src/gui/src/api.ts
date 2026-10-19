@@ -5,6 +5,7 @@ import type {
 	HistoryDiffResult,
 	HistoryTaskDetail,
 	HistoryTaskRow,
+	LinkConfigPage,
 	NamespaceList,
 	PageWriteResult,
 	PublishOptions,
@@ -122,6 +123,11 @@ export const api = {
 		load: () => request<RestoreQueueState>('/api/restore-queue'),
 		save: (entries: string[], baseRevid: number | null, force = false) =>
 			request<PageWriteResult>('/api/restore-queue', jsonInit('PUT', { entries, baseRevid, force })),
+	},
+	linkConfig: {
+		load: (page: string) => request<LinkConfigPage>(`/api/link-config?page=${seg(page)}`),
+		save: (page: string, content: string, baseRevid: number | null, force = false) =>
+			request<PageWriteResult>('/api/link-config', jsonInit('PUT', { page, content, baseRevid, force })),
 	},
 	uploads: {
 		/**

@@ -130,3 +130,26 @@ export function decodeLinkConfig(content: string): LinkConfigForm {
 		: [];
 	return form;
 }
+
+/** 校验表单；返回给人看的错误列表，空数组表示可以保存或运行 */
+export function validateLinkConfigForm(form: LinkConfigForm): string[] {
+	const errors: string[] = [];
+	if (form.replacements.length === 0) errors.push('至少需要一条替换规则');
+	for (const [i, rule] of form.replacements.entries()) {
+		const from = rule.from.trim();
+		const to = rule.to.trim();
+		if (from === '' || to === '') errors.push(`第 ${i + 1} 条规则缺少「从」或「到」`);
+		else if (from.startsWith('#')) errors.push(`第 ${i + 1} 条规则的「从」标题部分不能为空`);
+		else if (to.startsWith('#')) errors.push(`第 ${i + 1} 条规则的「到」标题部分不能为空`);
+		else if (from === to) errors.push(`第 ${i + 1} 条规则的「从」与「到」相同`);
+	}
+	if (form.pages.length === 0 && form.namespaces.length === 0) errors.push('至少要有显式页面，或勾选一个命名空间');
+	for (const [i, row] of form.linkTemplates.entries()) {
+		if (row.name.trim() === '') continue;
+		if (parseParam(row.param) === undefined) errors.push(`第 ${i + 1} 个模板缺少可用的参数位`);
+		if (row.displayParam.trim() !== '' && typeof parseParam(row.displayParam) !== 'number') {
+			errors.push(`第 ${i + 1} 个模板的显示文字参数位必须是单个数字`);
+		}
+	}
+	return errors;
+}

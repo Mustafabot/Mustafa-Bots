@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { decodeLinkConfig, emptyLinkConfig, encodeLinkConfig, type LinkConfigForm } from './linkConfigCodec';
+import { decodeLinkConfig, emptyLinkConfig, encodeLinkConfig, validateLinkConfigForm, type LinkConfigForm } from './linkConfigCodec';
 
 /** 一份填满的表单，供往返用例 */
 function fullForm(): LinkConfigForm {
@@ -102,4 +102,16 @@ test('编解码往返保留填过的内容', () => {
 	assert.equal(back.movetalk, false);
 	assert.deepEqual(back.replacements, form.replacements);
 	assert.deepEqual(back.linkTemplates, form.linkTemplates);
+});
+
+test('表单校验：完整的表单没有错误', () => {
+	assert.deepEqual(validateLinkConfigForm(fullForm()), []);
+});
+
+test('表单校验：缺规则、缺页面来源、from 与 to 相同、纯锚点、模板缺参数都会被拦下', () => {
+	assert.match(validateLinkConfigForm({ ...fullForm(), replacements: [] }).join('；'), /至少需要一条替换规则/);
+	assert.match(validateLinkConfigForm({ ...fullForm(), pages: [], namespaces: [] }).join('；'), /至少要有显式页面/);
+	assert.match(validateLinkConfigForm({ ...fullForm(), replacements: [{ from: '苹果', to: '苹果' }] }).join('；'), /「从」与「到」相同/);
+	assert.match(validateLinkConfigForm({ ...fullForm(), replacements: [{ from: '#锚点', to: '苹果' }] }).join('；'), /标题部分不能为空/);
+	assert.match(validateLinkConfigForm({ ...fullForm(), linkTemplates: [{ name: 'Template:A', param: '', displayParam: '', valueSeparator: '' }] }).join('；'), /缺少可用的参数位/);
 });

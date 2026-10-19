@@ -3,12 +3,13 @@ import { ApiError, api } from './api';
 import { LoginForm } from './components/LoginForm';
 import { FileRestorePage } from './pages/FileRestorePage';
 import { HistoryPage } from './pages/HistoryPage';
+import { LinkReplacePage } from './pages/LinkReplacePage';
 import { RunPage } from './pages/RunPage';
 import { TaskList } from './pages/TaskList';
 import { TextReplacePage } from './pages/TextReplacePage';
 import { UploadPage } from './pages/UploadPage';
 
-type Route = { name: 'list' } | { name: 'task'; id: string } | { name: 'text-replace' } | { name: 'url-upload' } | { name: 'file-restore' } | { name: 'history' };
+type Route = { name: 'list' } | { name: 'task'; id: string } | { name: 'text-replace' } | { name: 'url-upload' } | { name: 'file-restore' } | { name: 'link-replace' } | { name: 'history' };
 
 /** 登录门状态：探测中 / 已认证 / 需登录 / 连不上服务 */
 type Gate = 'checking' | 'authed' | 'login' | 'offline';
@@ -19,6 +20,7 @@ function parseHash(): Route {
 	if (hash.startsWith('/text-replace')) return { name: 'text-replace' };
 	if (hash.startsWith('/url-upload')) return { name: 'url-upload' };
 	if (hash.startsWith('/file-restore')) return { name: 'file-restore' };
+	if (hash.startsWith('/link-replace')) return { name: 'link-replace' };
 	if (hash.startsWith('/history')) return { name: 'history' };
 	return { name: 'list' };
 }
@@ -60,6 +62,7 @@ export function App(): React.JSX.Element {
 					<a href="#/text-replace">文本替换</a>
 					<a href="#/url-upload">上传</a>
 					<a href="#/file-restore">还原</a>
+					<a href="#/link-replace">链接替换</a>
 					<a href="#/history">历史</a>
 				</nav>
 			</header>
@@ -68,6 +71,7 @@ export function App(): React.JSX.Element {
 			{route.name === 'text-replace' && <TextReplacePage />}
 			{route.name === 'url-upload' && <UploadPage />}
 			{route.name === 'file-restore' && <FileRestorePage />}
+			{route.name === 'link-replace' && <LinkReplacePage />}
 			{route.name === 'history' && <HistoryPage />}
 		</main>
 	);

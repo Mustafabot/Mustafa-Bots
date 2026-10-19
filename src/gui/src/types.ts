@@ -333,3 +333,12 @@ export interface RestoreQueueState {
 export type PageWriteResult =
 	| { ok: true; revid: number | null }
 	| { ok: false; reason: 'conflict' | 'missing'; remote: string | null; remoteRevid: number | null };
+
+// ── 链接替换配置页（镜像 /api/link-config）──
+
+/** 配置页的当前内容；content 是 JSON 原文，交给 linkConfigCodec 解码 */
+export interface LinkConfigPage {
+	page: string;
+	revid: number | null;
+	content: string;
+}
