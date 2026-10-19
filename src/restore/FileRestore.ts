@@ -1,12 +1,13 @@
 import { MediaWikiApi } from 'wiki-saikou';
 import type { ApiEditResponse, ApiPage, ApiQueryResponse, ApiUndeleteResponse } from 'types-mediawiki-response';
 import process from 'process';
+import { readFileSync } from 'node:fs';
 import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
 import { QUEUE_PAGE, parseQueue, renderQueue } from './queueFormat.js';
 import { createEmitter, type EmitProgress } from '../core/progress.js';
-import { checkModerationQueued, checkModerationQueuedError } from '../utils/retry.js';
+import { checkModerationQueued, checkModerationQueuedError, extractApiError } from '../utils/retry.js';
 
 interface RestoreResult {
 	filename: string;
@@ -22,6 +23,8 @@ interface CliArgs {
 	dryRun: boolean;
 	verbose: boolean;
 	noUndoEdit: boolean;
+	/** 只处理清单里的文件；缺省处理整个队列 */
+	submitFile?: string;
 }
 
 const zhApi = createZhApi();
@@ -52,27 +55,60 @@ async function fetchQueue(api: MediaWikiApi, pageTitle: string): Promise<{ entri
 	return { entries: parseQueue(content), content, revid };
 }
 
-/** 把剩余条目写回队列页；内容没变就不写 */
-async function writeQueue(api: MediaWikiApi, pageTitle: string, entries: string[], originalContent: string): Promise<void> {
+/**
+ * 把剩余条目写回队列页。
+ * 带基线上写：队列页在运行期间被别人改过就不写，交给人在界面上处理。
+ */
+async function writeQueue(
+	api: MediaWikiApi,
+	pageTitle: string,
+	entries: string[],
+	originalContent: string,
+	baseRevid: number | null,
+	emit: EmitProgress,
+): Promise<'unchanged' | 'written' | 'conflict'> {
 	const text = renderQueue(entries);
 	if (text === originalContent) {
 		console.log('  队列内容没有变化，无需写回');
-		return;
+		return 'unchanged';
 	}
-	await api.postWithToken('csrf', {
-		action: 'edit',
-		title: pageTitle,
-		text,
-		summary: '机器人：更新还原队列',
-		bot: true,
-		notminor: true,
-		tags: 'Bot',
-		watchlist: 'nochange',
-	}, {
-		retry: 500,
-		noCache: true,
-	});
+	let data: unknown;
+	try {
+		({ data } = await api.postWithToken('csrf', {
+			action: 'edit',
+			title: pageTitle,
+			text,
+			summary: '机器人：更新还原队列',
+			bot: true,
+			notminor: true,
+			tags: 'Bot',
+			watchlist: 'nochange',
+			...(baseRevid === null ? {} : { baserevid: baseRevid }),
+		}, {
+			retry: 500,
+			noCache: true,
+		}) as { data: unknown });
+	} catch (error) {
+		if (checkModerationQueuedError(error as Error)) {
+			emit({ type: 'log', level: 'info', message: '队列更新已进入审核队列（视为成功）' });
+			return 'written';
+		}
+		throw error;
+	}
+	if (checkModerationQueued(data)) {
+		emit({ type: 'log', level: 'info', message: '队列更新已进入审核队列（视为成功）' });
+		return 'written';
+	}
+	const apiError = extractApiError(data);
+	if (apiError?.code === 'editconflict') {
+		emit({ type: 'log', level: 'warn', message: '队列页已被他人改动，未写回' });
+		return 'conflict';
+	}
+	if (apiError) throw new Error(`[${apiError.code}] ${apiError.info}`);
+	const edit = (data as { edit?: { result?: string } } | null)?.edit;
+	if (edit?.result !== 'Success') throw new Error(`编辑响应异常: ${JSON.stringify(data)}`);
 	console.log('  队列已更新');
+	return 'written';
 }
 
 async function fetchDeletedRevisions(
@@ -374,17 +410,31 @@ function parseArgs(args: string[]): CliArgs {
 		noUndoEdit: false,
 	};
 
-	for (const arg of args) {
+	for (let i = 0; i < args.length; i++) {
+		const arg = args[i];
 		if (arg === '--dry-run') {
 			result.dryRun = true;
 		} else if (arg === '--quiet') {
 			result.verbose = false;
 		} else if (arg === '--no-undo-edit') {
 			result.noUndoEdit = true;
+		} else if (arg === '--submit' && args[i + 1] !== undefined) {
+			result.submitFile = args[i + 1];
+			i++;
 		}
 	}
 
 	return result;
+}
+
+/** 读提交清单：一行一个文件名，去空去重 */
+function readSubmitList(path: string): string[] {
+	const content = readFileSync(path, 'utf-8');
+	const names = content
+		.split(/\r?\n/)
+		.map((line) => line.trim())
+		.filter((line) => line !== '');
+	return [...new Set(names)];
 }
 
 async function main(): Promise<void> {
@@ -413,17 +463,28 @@ async function main(): Promise<void> {
 		process.exit(1);
 	}
 
-	if (queue.entries.length === 0) {
-		console.error('队列里没有待还原的文件');
+	// 工作清单：给了 --submit 就是清单里的文件（可能不在队列里），否则是整个队列
+	const workList = args.submitFile === undefined
+		? queue.entries
+		: (() => {
+				try {
+					return readSubmitList(args.submitFile!);
+				} catch (error) {
+					console.error(`读取提交清单失败: ${(error as Error).message}`);
+					process.exit(1);
+				}
+			})();
+
+	if (workList.length === 0) {
+		console.error('没有要处理的文件');
 		process.exit(1);
 	}
-	const filenames = queue.entries;
 
 	emit({ type: 'phase', name: '还原' });
-	emit({ type: 'progress', done: 0, total: filenames.length, message: '待还原' });
+	emit({ type: 'progress', done: 0, total: workList.length, message: '待还原' });
 
 	const comment = DEFAULT_COMMENT;
-	const total = filenames.length;
+	const total = workList.length;
 
 	console.log(`配置解析成功，共 ${total} 个文件待还原`);
 	if (args.dryRun) {
@@ -436,7 +497,7 @@ async function main(): Promise<void> {
 	const results: RestoreResult[] = [];
 
 	for (let i = 0; i < total; i++) {
-		const result = await processFile(cmApi, filenames[i], comment, args, emit, i + 1, total);
+		const result = await processFile(cmApi, workList[i], comment, args, emit, i + 1, total);
 		results.push(result);
 		emit({ type: 'progress', done: i + 1, total, message: '已处理' });
 	}
@@ -486,11 +547,21 @@ async function main(): Promise<void> {
 		},
 	});
 
-	console.log('\n正在清空队列...');
-	if (!args.dryRun) {
-		await writeQueue(zhApi, QUEUE_PAGE, [], queue.content);
+	// 只把处理成功的条目从队列里移除：失败的与未选中的都留着
+	const succeeded = new Set(undeleteSuccess.map((r) => r.filename));
+	const remaining = queue.entries.filter((entry) => {
+		const normalized = entry.startsWith('File:') ? entry : `File:${entry}`;
+		return !succeeded.has(normalized);
+	});
+
+	console.log('\n正在更新队列...');
+	if (args.dryRun) {
+		console.log('  [试运行模式] 不修改队列');
 	} else {
-		console.log('  [试运行模式] 不清空队列');
+		const outcome = await writeQueue(zhApi, QUEUE_PAGE, remaining, queue.content, queue.revid, emit);
+		if (outcome === 'conflict') {
+			console.error('  队列页已被他人改动，本次不写回；请刷新后重试');
+		}
 	}
 
 	console.log(`\nEnd time: ${new Date().toISOString()}`);
