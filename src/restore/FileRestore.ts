@@ -1,10 +1,10 @@
 import { MediaWikiApi } from 'wiki-saikou';
 import type { ApiEditResponse, ApiPage, ApiQueryResponse, ApiUndeleteResponse } from 'types-mediawiki-response';
-import Parser from 'wikiparser-node';
 import process from 'process';
 import { createZhApi, createCmApi } from '../utils/createApi.js';
 import config from '../config.js';
 import clientlogin from '../clientlogin.js';
+import { QUEUE_PAGE, parseQueue, renderQueue } from './queueFormat.js';
 import { createEmitter, type EmitProgress } from '../core/progress.js';
 import { checkModerationQueued, checkModerationQueuedError } from '../utils/retry.js';
 
@@ -24,20 +24,18 @@ interface CliArgs {
 	noUndoEdit: boolean;
 }
 
-Parser.config = 'moegirl';
-
 const zhApi = createZhApi();
 const cmApi = createCmApi();
 
 const MAX_RETRIES = 3;
 const DEFAULT_COMMENT = '机器人：还原被删除的文件';
-const CONFIG_PAGE = 'User:没有羽翼的格雷塔/BotConfig/FileRestore';
 
-async function fetchFileList(api: MediaWikiApi, pageTitle: string): Promise<string[]> {
+/** 读队列页：条目、正文与版本号（写回时要用正文做"没变就不写"的比较，用版本号做冲突检测） */
+async function fetchQueue(api: MediaWikiApi, pageTitle: string): Promise<{ entries: string[]; content: string; revid: number | null }> {
 	const { data } = await api.post<ApiQueryResponse>({
 		action: 'query',
 		prop: 'revisions',
-		rvprop: 'content',
+		rvprop: 'ids|content',
 		titles: pageTitle,
 	}, {
 		retry: 15,
@@ -46,62 +44,26 @@ async function fetchFileList(api: MediaWikiApi, pageTitle: string): Promise<stri
 	const pages = data.query.pages as ApiPage[];
 	const page = Object.values(pages)[0];
 	if (!page || !page.revisions) {
-		throw new Error(`配置页面 "${pageTitle}" 不存在或无法获取内容`);
+		throw new Error(`队列页 "${pageTitle}" 不存在或无法获取内容`);
 	}
-
-	const content = page.revisions[0].content as string;
-	const parsed = Parser.parse(content, pageTitle);
-	const poemNodes = parsed.querySelectorAll<Parser.ExtToken>('ext#poem');
-
-	if (poemNodes.length === 0) {
-		throw new Error(`配置页面 "${pageTitle}" 中未找到 <poem> 标签`);
-	}
-
-	const filenames: string[] = [];
-	for (const node of poemNodes) {
-		const innerText: string | undefined = node.innerText;
-		if (!innerText) continue;
-		for (const line of innerText.split('\n')) {
-			const trimmed = line.trim();
-			if (trimmed) {
-				filenames.push(trimmed);
-			}
-		}
-	}
-
-	return [...new Set(filenames)];
+	const revision = page.revisions[0] as { content?: unknown; revid?: unknown };
+	const content = typeof revision.content === 'string' ? revision.content : '';
+	const revid = typeof revision.revid === 'number' ? revision.revid : null;
+	return { entries: parseQueue(content), content, revid };
 }
 
-async function clearPoemQueue(api: MediaWikiApi, pageTitle: string): Promise<void> {
-	const { data } = await api.post<ApiQueryResponse>({
-		action: 'query',
-		prop: 'revisions',
-		rvprop: 'content',
-		titles: pageTitle,
-	}, {
-		retry: 15,
-	} as Parameters<typeof api.post>[1]);
-
-	const pages = data.query.pages as ApiPage[];
-	const page = Object.values(pages)[0];
-	if (!page || !page.revisions) {
-		console.error('  无法读取配置页面内容，跳过清空队列');
+/** 把剩余条目写回队列页；内容没变就不写 */
+async function writeQueue(api: MediaWikiApi, pageTitle: string, entries: string[], originalContent: string): Promise<void> {
+	const text = renderQueue(entries);
+	if (text === originalContent) {
+		console.log('  队列内容没有变化，无需写回');
 		return;
 	}
-
-	const content = page.revisions[0].content as string;
-	const newContent = "{{用户 允许他人编辑}}\n需要还原的文件请填入下方<code><nowiki><poem></nowiki></code>标签中，一行一个，带File前缀。填写后请联系[[User talk:没有羽翼的格雷塔|操作者]]手动运行脚本。\n----\n<poem>\n</poem>";
-
-	if (newContent === content) {
-		console.log('  配置页面中无 poem 标签，无需清空');
-		return;
-	}
-
 	await api.postWithToken('csrf', {
 		action: 'edit',
 		title: pageTitle,
-		text: newContent,
-		summary: '机器人：清空还原队列',
+		text,
+		summary: '机器人：更新还原队列',
 		bot: true,
 		notminor: true,
 		tags: 'Bot',
@@ -110,8 +72,7 @@ async function clearPoemQueue(api: MediaWikiApi, pageTitle: string): Promise<voi
 		retry: 500,
 		noCache: true,
 	});
-
-	console.log('  队列已清空');
+	console.log('  队列已更新');
 }
 
 async function fetchDeletedRevisions(
@@ -443,19 +404,20 @@ async function main(): Promise<void> {
 	console.log('zh站登录成功', zhResult);
 	console.log('commons站登录成功', cmResult);
 
-	console.log(`\n正在读取配置页面: ${CONFIG_PAGE}`);
-	let filenames: string[];
+	console.log(`\n正在读取队列页: ${QUEUE_PAGE}`);
+	let queue: { entries: string[]; content: string; revid: number | null };
 	try {
-		filenames = await fetchFileList(zhApi, CONFIG_PAGE);
+		queue = await fetchQueue(zhApi, QUEUE_PAGE);
 	} catch (error) {
-		console.error(`读取配置失败: ${(error as Error).message}`);
+		console.error(`读取队列失败: ${(error as Error).message}`);
 		process.exit(1);
 	}
 
-	if (filenames.length === 0) {
-		console.error('配置中未找到待还原的文件');
+	if (queue.entries.length === 0) {
+		console.error('队列里没有待还原的文件');
 		process.exit(1);
 	}
+	const filenames = queue.entries;
 
 	emit({ type: 'phase', name: '还原' });
 	emit({ type: 'progress', done: 0, total: filenames.length, message: '待还原' });
@@ -526,7 +488,7 @@ async function main(): Promise<void> {
 
 	console.log('\n正在清空队列...');
 	if (!args.dryRun) {
-		await clearPoemQueue(zhApi, CONFIG_PAGE);
+		await writeQueue(zhApi, QUEUE_PAGE, [], queue.content);
 	} else {
 		console.log('  [试运行模式] 不清空队列');
 	}
