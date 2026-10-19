@@ -51,6 +51,8 @@ interface BotConfig {
 
 interface CliArgs {
 	configPage: string;
+	/** 本地配置文件；给了它就不读配置页 */
+	configFile?: string;
 	dryRun: boolean;
 	quiet: boolean;
 	interval: number;
@@ -59,6 +61,7 @@ interface CliArgs {
 }
 
 interface Checkpoint {
+	/** 配置标识：给了配置页标题时即该标题，否则是配置文件路径（字段名保持不变，旧断点文件仍能匹配） */
 	configPage: string;
 	fingerprint: string;
 	completed: string[];
@@ -68,7 +71,8 @@ interface Checkpoint {
 const api = createZhApi();
 
 const DEFAULT_SUMMARY = '机器人：批量替换链接目标';
-const USAGE = '用法: npx tsx src/replace/LinkReplace.ts <JSON配置页标题> [--dry-run] [--quiet] [--interval <ms>] [--summary <文本>] [--reset]';
+const USAGE = '用法: npx tsx src/replace/LinkReplace.ts [配置页标题] [--config-file <本地 JSON>] [--dry-run] [--quiet] [--interval <ms>] [--summary <文本>] [--reset]\n'
+	+ '配置页标题与 --config-file 至少给一个；两个都给时，配置取自文件，标题用作断点标识。';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -833,11 +837,14 @@ function parseArgs(args: string[]): CliArgs | null {
 		} else if (arg === '--summary' && args[i + 1]) {
 			result.summary = args[i + 1];
 			i++;
+		} else if (arg === '--config-file' && args[i + 1] !== undefined) {
+			result.configFile = args[i + 1];
+			i++;
 		} else if (!arg.startsWith('-')) {
 			result.configPage = arg;
 		}
 	}
-	if (!result.configPage) {
+	if (result.configFile === undefined && result.configPage === '') {
 		console.error(USAGE);
 		return null;
 	}
@@ -898,7 +905,19 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 	try {
 		await clientlogin(api, config.zh.bot.clientUsername!, config.zh.bot.clientPassword!);
 
-		const cfg = await fetchJsonConfig(cliArgs.configPage);
+		// 断点标识：给了配置页标题就用它（界面跑临时配置时也带标题，断点因此跨次可续），
+		// 否则用配置文件路径。
+		const configIdentity = cliArgs.configPage !== '' ? cliArgs.configPage : (cliArgs.configFile ?? '未命名配置');
+
+		let cfg: BotConfig;
+		try {
+			cfg = cliArgs.configFile !== undefined
+				? JSON.parse(readFileSync(cliArgs.configFile, 'utf-8')) as BotConfig
+				: await fetchJsonConfig(cliArgs.configPage);
+		} catch (error) {
+			console.error(`读取配置失败：${(error as Error).message}`);
+			process.exit(1);
+		}
 		const validationError = validateConfig(cfg);
 		if (validationError) throw new Error(`配置校验失败: ${validationError}`);
 		const mode = cfg.mode ?? 'replace';
@@ -926,7 +945,7 @@ function saveCheckpoint(checkpoint: Checkpoint): void {
 		log(`待处理页面共 ${pages.length} 个`);
 
 		emit({ type: 'phase', name: '替换阶段' });
-		const checkpoint = loadCheckpoint(cliArgs.configPage, configFingerprint(cfg), cliArgs);
+		const checkpoint = loadCheckpoint(configIdentity, configFingerprint(cfg), cliArgs);
 		let changed = 0;
 		let unchanged = 0;
 		let failed = 0;
