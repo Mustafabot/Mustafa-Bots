@@ -1,8 +1,12 @@
 // 全站文本替换页：填规则 → 扫描看命中 → 勾选提交。
 //
 // 流程（规格）：
-//   站点下拉 → 规则表单（一行一条，只留正则勾选）→ 命名空间复选框
+//   站点下拉 → 规则表单（一行一条，只留正则勾选）→ 页面/分类清单 → 命名空间复选框
 //   → [扫描] [空跑] → 命中结果（内联展开匹配行）→ [提交选中的 N 页]
+//
+// 清单模式可以不扫描：文本里一行一个页面，分类行带 分类:/Category:/Cat: 前缀，
+// [空跑清单]/[替换清单] 由脚本展开分类后逐页重取最新内容替换（不读镜像）。
+// 结果只给顶部汇总与日志，不再逐页生成结果卡片。
 //
 // [扫描] 只搜不改（`--scan-only --no-sync`），结果落盘后按 resultFile 取命中；
 // [空跑] 按规则真跑一遍但不提交（`--dry-run`），已勾选的页面只空跑这些；
@@ -20,13 +24,13 @@ import { RuleEditor } from '../components/RuleEditor';
 import { useTaskRun, type TaskDoneInfo } from '../hooks/useTaskRun';
 import { decodeRuleset, encodeRuleset, type RuleFormState } from '../rulesetCodec';
 import { configPageFor } from '../rulesetNaming';
-import type { NamespaceList, ParamValue, ProgressEvent, RulesetSummary, ScanPageHit, ScanResultMeta, StartTaskBody, TaskDescriptor } from '../types';
+import type { NamespaceList, ParamValue, RulesetSummary, ScanPageHit, ScanResultMeta, StartTaskBody, TaskDescriptor } from '../types';
 
 /** 命中结果每页取多少条（服务端单次上限 1000，这里取个小批量便于增量加载） */
 const PAGE_SIZE = 200;
 
 /** 本次要跑的动作：决定 values 与完成后的处理 */
-type Action = 'scan' | 'dryrun' | 'submit' | 'sync';
+type Action = 'scan' | 'dryrun' | 'submit' | 'sync' | 'targets' | 'targets-dry';
 
 /** 页面级状态提示 */
 interface Notice {
@@ -48,25 +52,6 @@ function describeSummary(summary: Record<string, number>): string {
 		.filter(([, value]) => value !== 0 || Object.keys(summary).length === 1)
 		.map(([key, value]) => `${SUMMARY_LABEL[key] ?? key} ${value}`);
 	return parts.length > 0 ? parts.join('，') : '无变化';
-}
-
-/** 数一条 edit 事件 message 里的替换处数（形如 `苹果 → 梨 ×3`）；读不到计 1 处 */
-function countReplacements(message: string | undefined): number {
-	if (message === undefined) return 0;
-	let total = 0;
-	for (const match of message.matchAll(/×(\d+)/g)) total += Number(match[1]);
-	return total;
-}
-
-/** 从提交任务的事件里汇总"每个页面改了多少处"，供命中列表标绿 */
-function appliedFromEvents(events: ProgressEvent[]): Map<string, number> {
-	const applied = new Map<string, number>();
-	for (const event of events) {
-		if (event.type !== 'edit' || event.status !== 'changed') continue;
-		const count = countReplacements(event.message);
-		applied.set(event.title, count > 0 ? count : 1);
-	}
-	return applied;
 }
 
 /** 发布冲突时给用户看的文案；远端正文另外用 <details> 展开 */
@@ -100,7 +85,8 @@ export function TextReplacePage(): React.JSX.Element {
 	const [hits, setHits] = useState<ScanPageHit[]>([]);
 	const [hitTotal, setHitTotal] = useState(0);
 	const [selected, setSelected] = useState<Set<string>>(new Set());
-	const [applied, setApplied] = useState<Map<string, number>>(new Map());
+	// 页面/分类清单原文：一行一个，分类行带 分类:/Category:/Cat: 前缀
+	const [targetList, setTargetList] = useState('');
 	const [loadingMore, setLoadingMore] = useState(false);
 	const [fetchingNs, setFetchingNs] = useState(false);
 	// 记录本次启动的是哪个动作：done 回调据此决定做什么
@@ -183,7 +169,6 @@ export function TextReplacePage(): React.JSX.Element {
 	/** 取扫描结果并载入第一页命中 */
 	const loadScanResult = useCallback(async (name: string): Promise<void> => {
 		setScanName(name);
-		setApplied(new Map());
 		try {
 			const slice = await api.scans.page(name, 0, PAGE_SIZE);
 			setHits(slice.hits);
@@ -206,8 +191,9 @@ export function TextReplacePage(): React.JSX.Element {
 			}
 			void loadScanResult(info.resultFile);
 		} else if (action === 'submit') {
-			setApplied(appliedFromEvents(info.events));
 			setNotice({ text: `提交完成：${describeSummary(info.summary)}。`, kind: 'info' });
+		} else if (action === 'targets' || action === 'targets-dry') {
+			setNotice({ text: `清单替换完成：${describeSummary(info.summary)}。`, kind: 'info' });
 		} else if (action === 'dryrun') {
 			setNotice({ text: '空跑完成，未提交任何编辑（日志中带 [DRY-RUN] 的行即"将会修改"）。', kind: 'info' });
 		} else if (action === 'sync') {
@@ -232,6 +218,24 @@ export function TextReplacePage(): React.JSX.Element {
 			// 因此不带规则、不落草稿：用户往往在配规则之前就要先把镜像弄热
 			values['--sync-only'] = true;
 			if (addNamespace !== undefined) values['--add-namespaces'] = [String(addNamespace)];
+		} else if (action === 'targets' || action === 'targets-dry') {
+			// 清单模式逐页重取最新内容，不读镜像；规则照常下发，命名空间只用于断点指纹
+			const cleanedRules = form.rules.filter((rule) => rule.from !== '');
+			if (cleanedRules.length === 0) {
+				setNotice({ text: '请至少填一条规则（「从」不能为空）。', kind: 'error' });
+				return;
+			}
+			const text = targetList.trim();
+			if (text === '') {
+				setNotice({ text: '请先填页面/分类清单（一行一个）。', kind: 'error' });
+				return;
+			}
+			values['--namespace'] = form.namespaces.map((ns) => String(ns));
+			if (action === 'targets-dry') values['--dry-run'] = true;
+			body.rulesetContent = encodeRuleset({ ...form, rules: cleanedRules });
+			const label = configPage.trim() !== '' ? configPage.trim() : presetName.trim();
+			if (label !== '') body.rulesetName = label;
+			body.targets = text;
 		} else {
 			// 空规则行没意义，先滤掉
 			const cleanedRules = form.rules.filter((rule) => rule.from !== '');
@@ -364,6 +368,27 @@ export function TextReplacePage(): React.JSX.Element {
 						<h3>规则（从 → 到）</h3>
 						<RuleEditor rules={form.rules} disabled={running} onChange={(rules) => setForm((prev) => ({ ...prev, rules }))} />
 
+						<h3>页面 / 分类清单</h3>
+						<p className="hint">
+							一行一个页面标题；分类行以 分类: / Category: / Cat: 开头，展开其直属页面成员（不递归子分类）。用清单时不必先扫描，也不读镜像。
+						</p>
+						<textarea
+							className="tr-targets"
+							rows={6}
+							value={targetList}
+							disabled={running}
+							placeholder={'苹果\nCategory:Vocaloid'}
+							onChange={(event) => setTargetList(event.target.value)}
+						/>
+						<div className="tr-actions">
+							<button type="button" disabled={running || busy} onClick={() => void startAction('targets-dry')}>
+								空跑清单
+							</button>
+							<button type="button" className="primary" disabled={running || busy} onClick={() => void startAction('targets')}>
+								替换清单
+							</button>
+						</div>
+
 						<h3>命名空间</h3>
 						<NamespacePicker
 							namespaces={nsList?.namespaces ?? []}
@@ -431,7 +456,6 @@ export function TextReplacePage(): React.JSX.Element {
 								hits={hits}
 								total={hitTotal}
 								selected={selected}
-								applied={applied}
 								loadingMore={loadingMore}
 								onToggle={(title, checked) => {
 									const next = new Set(selected);

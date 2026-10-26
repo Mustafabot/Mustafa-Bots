@@ -11,6 +11,8 @@ import { SiteMirror, syncMirror, DEFAULT_MIRROR_NAMESPACES, type MirrorSyncResul
 import { checkModerationQueued, checkModerationQueuedError, extractApiError, isPermissionDeniedError } from '../utils/retry.js';
 import { createEmitter, type EmitProgress } from '../core/progress.js';
 import { collectMatchLines, writeScanResult, type ScanPageHit } from './scanResult.js';
+import { fetchCategoryMembers } from './categoryMembers.js';
+import { parseTargetList } from './targetList.js';
 import { computeFingerprint, describeRule, prepareRule, trunc, validateRule, type PreparedRule, type ReplaceRule } from './replaceRules.js';
 
 /** JSON 配置页结构 */
@@ -48,6 +50,8 @@ interface CliArgs {
 	noSync: boolean;
 	/** 提交模式：从文件读选中页面清单，逐页重取最新内容后替换编辑 */
 	submit?: string;
+	/** 清单模式：从文件读页面/分类清单（一行一个，分类行带前缀），展开后逐页重取最新内容替换 */
+	targets?: string;
 	syncOnly: boolean;
 	reset: boolean;
 	resync: boolean;
@@ -98,11 +102,13 @@ const USAGE = [
 	'  npx tsx src/replace/TextReplace.ts --config <JSON配置页标题>',
 	'  npx tsx src/replace/TextReplace.ts --config-file <本地JSON路径>',
 	'  npx tsx src/replace/TextReplace.ts --config-file <本地JSON路径> --submit <选中页面清单>',
+	'  npx tsx src/replace/TextReplace.ts --config-file <本地JSON路径> --targets <页面/分类清单>',
 	'通用参数:',
 	'  [--wiki zh|cm]          目标站点，默认 zh（决定 API、镜像库与默认命名空间：zh=0，cm=6）',
 	'  [--namespace <ns,ns>]   替换时筛选的命名空间，须为镜像已覆盖范围',
 	'  [--scan-only]           只扫描不编辑，命中结果写入 data/gui/scans/ 供预览',
 	'  [--submit <文件>]       提交模式：读选中页面清单（每行一个标题），逐页重取最新内容后替换编辑',
+	'  [--targets <文件>]      页面/分类清单模式（每行一个；分类行写 分类:/Category:/Cat:，展开其直属页面成员）',
 	'  [--add-namespaces <ns,ns>] 把命名空间加进镜像覆盖范围并抓取（"未同步"命名空间的入口）',
 	'  [--no-sync]             跳过镜像同步，直接用现有镜像搜索',
 	'  [--sync-only]           仅同步本地镜像，不执行替换',
@@ -115,6 +121,7 @@ const USAGE = [
 	'说明:',
 	'  - 首次运行先全量同步镜像（耗时较长、可断点续传），之后每次运行增量同步后本地搜索，只编辑命中页',
 	'  - 替换在原始 wikitext 上进行，语义与 ReplaceText 一致（不感知语法、不做繁简转换）',
+	'  - --submit 与 --targets 都不读镜像；--targets 的分类只展开直属页面成员（不递归子分类、不含文件）',
 	'  - regex 模式时 from 必须写成 /模式/flags 正则字面量（如 /苹果/gi），to 支持 $1 等替换引用',
 ].join('\n');
 
@@ -199,6 +206,9 @@ function parseArgs(argv: string[]): CliArgs | null {
 				break;
 			case '--submit':
 				result.submit = readValue() ?? '';
+				break;
+			case '--targets':
+				result.targets = readValue() ?? '';
 				break;
 			case '--scan-only':
 				result.scanOnly = true;
@@ -286,6 +296,26 @@ function parseArgs(argv: string[]): CliArgs | null {
 	}
 	if (result.submit !== undefined && result.resync) {
 		console.error('--submit 与 --resync 不能同时使用（提交模式不碰镜像，清空镜像也无从重建）');
+		return null;
+	}
+	if (result.targets !== undefined && result.targets === '') {
+		console.error('--targets 需要页面/分类清单文件路径');
+		return null;
+	}
+	if (result.targets !== undefined && result.submit !== undefined) {
+		console.error('--targets 与 --submit 不能同时使用');
+		return null;
+	}
+	if (result.targets !== undefined && result.scanOnly) {
+		console.error('--targets 与 --scan-only 不能同时使用');
+		return null;
+	}
+	if (result.targets !== undefined && result.syncOnly) {
+		console.error('--targets 不同步镜像，不能与 --sync-only 同时使用');
+		return null;
+	}
+	if (result.targets !== undefined && result.resync) {
+		console.error('--targets 与 --resync 不能同时使用（清单模式不碰镜像，清空镜像也无从重建）');
 		return null;
 	}
 	if (result.configFile !== undefined && result.configFile === '') {
@@ -427,6 +457,22 @@ function readSubmitList(file: string): string[] {
 	return [...new Set(titles)];
 }
 
+/**
+ * 读取页面/分类清单：每行一个，分类行带 `分类:` / `Category:` / `Cat:` 前缀。
+ * 拆分交给 parseTargetList（纯逻辑、有单测），这里只负责读文件与空清单报错。
+ */
+function readTargetList(file: string): ReturnType<typeof parseTargetList> {
+	let raw: string;
+	try {
+		raw = readFileSync(file, 'utf-8');
+	} catch (error) {
+		throw new Error(`页面/分类清单 "${file}" 读取失败: ${(error as Error).message}`, { cause: error });
+	}
+	const parsed = parseTargetList(raw);
+	if (parsed.pages.length === 0 && parsed.categories.length === 0) throw new Error('页面/分类清单为空');
+	return parsed;
+}
+
 /** 组装替换任务：CLI 单条规则或 JSON 配置页多条规则，统一做校验与指纹计算 */
 async function buildTask(api: MediaWikiApi, cliArgs: CliArgs, defaultNamespaces: number[], log: (msg: string) => void): Promise<ReplaceTask> {
 	let rules: ReplaceRule[];
@@ -555,8 +601,8 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		const siteConfig = config[cliArgs.wiki];
 		await clientlogin(api, siteConfig.bot.clientUsername!, siteConfig.bot.clientPassword!, siteConfig.api);
 
-		// 提交模式逐页重取最新内容，既不读镜像也不写镜像，因此整段镜像逻辑都跳过
-		const usesMirror = cliArgs.submit === undefined;
+		// 提交/清单模式逐页重取最新内容，既不读镜像也不写镜像，因此整段镜像逻辑都跳过
+		const usesMirror = cliArgs.submit === undefined && cliArgs.targets === undefined;
 		let coveredNamespaces = DEFAULT_MIRROR_NAMESPACES[cliArgs.wiki];
 		if (usesMirror) {
 			mirror = new SiteMirror(resolve(MIRROR_DIR, `${cliArgs.wiki}.db`));
@@ -626,6 +672,28 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 			titles = readSubmitList(cliArgs.submit);
 			console.log(`提交模式：共 ${titles.length} 页，逐页重取最新内容后替换${cliArgs.dryRun ? '（dry-run）' : ''}`);
 			emit({ type: 'phase', name: '提交编辑' });
+		} else if (cliArgs.targets !== undefined) {
+			const targets = readTargetList(cliArgs.targets);
+			emit({ type: 'phase', name: '展开分类' });
+			const expanded: string[] = [];
+			for (const [index, category] of targets.categories.entries()) {
+				const members = await fetchCategoryMembers(api, category);
+				log(`分类 ${category}：${members.length} 页`);
+				if (members.length === 0) log('  （空分类，没有页面成员）');
+				expanded.push(...members);
+				emit({ type: 'progress', done: index + 1, total: targets.categories.length, message: '展开分类' });
+			}
+			// 页面在前、分类成员在后，统一去重；顺序便于对照用户输入
+			titles = [...new Set([...targets.pages, ...expanded])];
+			console.log(
+				`清单模式：页面 ${targets.pages.length} 个，分类 ${targets.categories.length} 个展开 ${expanded.length} 页，去重后共 ${titles.length} 页，逐页重取最新内容后替换${cliArgs.dryRun ? '（dry-run）' : ''}`,
+			);
+			if (titles.length === 0) {
+				console.log('清单里没有可处理的页面，结束');
+				emit({ type: 'done', summary: { changed: 0, staleSkipped: 0, failed: 0 } });
+				return;
+			}
+			emit({ type: 'phase', name: '提交编辑' });
 		} else {
 			log(`开始本地搜索（镜像 ${mirror!.getPageCount()} 页）…`);
 			emit({ type: 'phase', name: '本地搜索' });
@@ -688,15 +756,17 @@ function saveCheckpoint(file: string, checkpoint: LoadedCheckpoint): void {
 		// #endregion
 
 		// #region 逐页重拉最新内容并替换编辑
-		const submitMode = cliArgs.submit !== undefined;
-		// 提交模式不挑规则：选中的页面把规则集里的每条都试一遍；扫描结果只记命中过的规则
+		const submitMode = cliArgs.submit !== undefined || cliArgs.targets !== undefined;
+		// 提交/清单模式不挑规则：选中的页面把规则集里的每条都试一遍；扫描结果只记命中过的规则
 		const ruleIndexesFor = (title: string): number[] => (submitMode ? task.rules.map((_, i) => i) : candidates.get(title) ?? []);
-		// 提交模式的断点把选中清单一并算进指纹：换一批页面提交不会踩到上一批的断点，
+		// 提交/清单模式的断点把页面清单一并算进指纹：换一批页面提交不会踩到上一批的断点，
 		// 同一批页面重复提交则续跑或跳过，避免 to 仍含 from 的规则被叠加替换
 		const fingerprint = submitMode
 			? computeFingerprint({ wiki: cliArgs.wiki, namespaces: task.namespaces, rules: task.rules.map((prepared) => prepared.rule), titles: [...titles].sort() })
 			: task.fingerprint;
-		const checkpointLabel = submitMode ? `${task.checkpointLabel}:submit:${fingerprint.slice(0, 12)}` : task.checkpointLabel;
+		// 两种清单模式用不同标签，互不覆盖对方的断点
+		const listKind = cliArgs.targets !== undefined ? 'targets' : 'submit';
+		const checkpointLabel = submitMode ? `${task.checkpointLabel}:${listKind}:${fingerprint.slice(0, 12)}` : task.checkpointLabel;
 		const checkpoint = loadCheckpoint(cliArgs, { ...task, fingerprint, checkpointLabel });
 		const checkpointPath = checkpointFile(checkpointLabel);
 		emit({ type: 'progress', done: 0, total: titles.length, message: '准备编辑' });

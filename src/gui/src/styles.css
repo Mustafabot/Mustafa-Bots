@@ -387,6 +387,16 @@ button.danger:hover:not(:disabled) {
 	border-radius: 6px;
 	font-size: 14px;
 }
+.tr-targets {
+	width: 100%;
+	box-sizing: border-box;
+	padding: 8px 10px;
+	border: 1px solid #cbd5e1;
+	border-radius: 6px;
+	font-family: ui-monospace, Consolas, "Courier New", monospace;
+	font-size: 13px;
+	resize: vertical;
+}
 .tr-actions,
 .tr-submit {
 	display: flex;
@@ -560,9 +570,6 @@ button.danger:hover:not(:disabled) {
 	border-top: 1px solid #f1f5f9;
 	padding: 8px 0;
 }
-.hit-item.hit-applied {
-	background: #f0fdf4;
-}
 .hit-line {
 	display: flex;
 	align-items: center;
@@ -578,11 +585,6 @@ button.danger:hover:not(:disabled) {
 .hit-count {
 	color: #64748b;
 	font-size: 13px;
-}
-.hit-applied-badge {
-	color: #15803d;
-	font-size: 13px;
-	font-weight: 600;
 }
 .hit-diff-btn {
 	margin-left: auto;
@@ -1067,34 +1069,4 @@ button.danger:hover:not(:disabled) {
 	flex-wrap: wrap;
 	gap: 0.5rem;
 	margin-bottom: 0.4rem;
-}
-
-.lr-results {
-	list-style: none;
-	margin: 0.75rem 0;
-	padding: 0;
-}
-
-.lr-result {
-	border: 1px solid rgba(127, 127, 127, 0.35);
-	border-radius: 0.5rem;
-	margin-bottom: 0.5rem;
-	padding: 0.6rem;
-}
-
-.lr-status {
-	border-radius: 0.25rem;
-	padding: 0.05rem 0.4rem;
-}
-
-.lr-status-changed {
-	background: rgba(76, 175, 80, 0.15);
-}
-
-.lr-status-skipped {
-	background: rgba(127, 127, 127, 0.15);
-}
-
-.lr-status-failed {
-	background: rgba(244, 67, 54, 0.15);
 }

@@ -24,14 +24,12 @@ interface HitListProps {
 	onToggle: (title: string, checked: boolean) => void;
 	onSelectAll: () => void;
 	onSelectNone: () => void;
-	/** 已提交成功的页面 → 已改处数，命中标记变绿 */
-	applied: Map<string, number>;
 	onLoadMore: () => void;
 	loadingMore?: boolean;
 }
 
 /** 命中结果列表 */
-export function HitList({ scanName, hits, total, selected, onToggle, onSelectAll, onSelectNone, applied, onLoadMore, loadingMore = false }: HitListProps): React.JSX.Element {
+export function HitList({ scanName, hits, total, selected, onToggle, onSelectAll, onSelectNone, onLoadMore, loadingMore = false }: HitListProps): React.JSX.Element {
 	const [diffs, setDiffs] = useState<Record<string, DiffState>>({});
 	const [open, setOpen] = useState<Set<string>>(new Set());
 
@@ -85,15 +83,13 @@ export function HitList({ scanName, hits, total, selected, onToggle, onSelectAll
 
 			<ul className="hit-items">
 				{hits.map((hit) => {
-					const appliedCount = applied.get(hit.title);
 					const truncated = hit.hits > hit.matches.length;
 					return (
-						<li className={`hit-item${appliedCount !== undefined ? ' hit-applied' : ''}`} key={hit.title}>
+						<li className="hit-item" key={hit.title}>
 							<div className="hit-line">
 								<input type="checkbox" checked={selected.has(hit.title)} onChange={(event) => onToggle(hit.title, event.target.checked)} />
 								<span className="hit-title">{hit.title}</span>
 								<span className="hit-count">命中 {hit.hits} 处</span>
-								{appliedCount !== undefined && <span className="hit-applied-badge">已改 {appliedCount} 处</span>}
 								<button type="button" className="hit-diff-btn" onClick={() => toggleDiff(hit.title)}>
 									{open.has(hit.title) ? '收起 diff' : '看 diff'}
 								</button>

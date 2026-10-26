@@ -1,4 +1,5 @@
 import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash } from 'node:crypto';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { dirname, extname, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -116,12 +117,13 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 			if (url.pathname === '/api/task' && req.method === 'POST') {
 				readBody(req).then((body) => {
 					try {
-						const { descriptorId, values, rulesetName, rulesetContent, submitTitles } = JSON.parse(body || '{}') as {
+						const { descriptorId, values, rulesetName, rulesetContent, submitTitles, targets } = JSON.parse(body || '{}') as {
 							descriptorId: string;
 							values: Record<string, string | number | boolean | string[]>;
 							rulesetName?: string;
 							rulesetContent?: string;
 							submitTitles?: string[];
+							targets?: string;
 						};
 						const descriptor = findDescriptor(descriptorId);
 						if (!descriptor) throw new Error(`未知任务 ${descriptorId}`);
@@ -142,8 +144,11 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 							const syncOnly = values?.['--sync-only'] === true;
 							rulesetSnapshot = resolveRunRuleset(draftStoreFor(descriptor.configSource), { rulesetName, rulesetContent, syncOnly });
 							if (rulesetSnapshot) {
-								// 文件名只用时间戳：配置名可能是页面标题，带 / 与 : 会拼出非法路径
-								const tempFile = resolve('data/gui/runtime', `config-${Date.now()}.json`);
+								// 文件名用配置内容的哈希，不用时间戳或配置名：
+								// - 脚本拿这个路径当断点标识，同一规则集必须落到同一路径，重跑才能续跑；
+								// - 配置名可能是页面标题，带 / 与 : 会拼出非法路径。
+								const digest = createHash('sha1').update(rulesetSnapshot.content).digest('hex').slice(0, 12);
+								const tempFile = resolve('data/gui/runtime', `config-${digest}.json`);
 								mkdirSync(dirname(tempFile), { recursive: true });
 								writeFileSync(tempFile, rulesetSnapshot.content, 'utf-8');
 								injected.push(descriptor.configFileFlag, tempFile);
@@ -152,12 +157,22 @@ export function createRouter(config: ServerConfig, runner: TaskRunner = new Task
 						// 界面勾选的页面清单：脚本要读文件，所以由服务端落一个临时清单
 						if (submitTitles !== undefined) {
 							if (!Array.isArray(submitTitles) || submitTitles.length === 0) throw new Error('submitTitles 必须是非空数组');
+							if (targets !== undefined) throw new Error('submitTitles 与 targets 不能同时下发');
 							const titles = submitTitles.map((title) => (typeof title === 'string' ? title.trim() : '')).filter((title) => title !== '');
 							if (titles.length === 0) throw new Error('submitTitles 里没有有效的页面标题');
 							const selectionFile = resolve('data/gui/runtime', `selection-${Date.now()}.txt`);
 							mkdirSync(dirname(selectionFile), { recursive: true });
 							writeFileSync(selectionFile, `${[...new Set(titles)].join('\n')}\n`, 'utf-8');
 							injected.push('--submit', selectionFile);
+						}
+						// 页面/分类清单：原样落文件，拆分与分类展开交给脚本（CLI 也能直接用 --targets）
+						if (targets !== undefined) {
+							const text = typeof targets === 'string' ? targets.trim() : '';
+							if (text === '') throw new Error('targets 不能为空');
+							const targetsFile = resolve('data/gui/runtime', `targets-${Date.now()}.txt`);
+							mkdirSync(dirname(targetsFile), { recursive: true });
+							writeFileSync(targetsFile, `${text}\n`, 'utf-8');
+							injected.push('--targets', targetsFile);
 						}
 						// GUI 拉起的任务一律静默：逐页人类可读日志既刷屏，
 						// 又会挤占事件缓冲的名额，结构化事件里已带全部信息

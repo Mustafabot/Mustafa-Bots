@@ -69,6 +69,8 @@ export interface StartTaskBody {
 	rulesetContent?: string;
 	/** 提交选中的页面清单（服务端落成临时文件后注入 --submit） */
 	submitTitles?: string[];
+	/** 页面/分类清单原文，一行一个；服务端落文件后注入 --targets（与 submitTitles 互斥） */
+	targets?: string;
 }
 
 // ── 进度事件（镜像 src/core/progress.ts）──

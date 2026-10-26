@@ -1,16 +1,16 @@
-// 链接替换页：把配置页的 JSON 表单化，直接在界面上改、运行、看逐页改动。
+// 链接替换页：把配置页的 JSON 表单化，直接在界面上改、运行，结果看顶部汇总与日志。
+// 逐页改动与 diff 不铺在本页（几十页会把页面撑长），统一到历史页按任务查看。
 //
 // 配置的权威形状在 src/replace/LinkReplace.ts；界面用 linkConfigCodec 镜像一份。
 // 配置页只在「保存到配置页」时才写回，运行走 --config-file（服务端落临时文件）。
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { ApiError, api } from '../api';
-import { DiffView } from '../components/DiffView';
 import { LinkRuleList } from '../components/LinkRuleList';
 import { LogView } from '../components/LogView';
 import { ProgressPanel } from '../components/ProgressPanel';
 import { useTaskRun } from '../hooks/useTaskRun';
 import { decodeLinkConfig, encodeLinkConfig, emptyLinkConfig, validateLinkConfigForm, type LinkConfigForm } from '../linkConfigCodec';
-import type { DiffLine, LinkConfigPage, NamespaceInfo, PageWriteResult, TaskDescriptor } from '../types';
+import type { LinkConfigPage, NamespaceInfo, PageWriteResult, TaskDescriptor } from '../types';
 
 /** 配置页的默认标题 */
 const DEFAULT_CONFIG_PAGE = 'User:没有羽翼的格雷塔/BotConfig/LinkReplace.json';
@@ -81,59 +81,6 @@ export function LinkReplacePage(): React.JSX.Element {
 	// 任务编排（SSE + 启动/中止 + 状态）与其它页面共用一份
 	const { task, events, busy, error, start, abort } = useTaskRun();
 	const running = task?.status === 'running';
-	// 当前任务的 id，渲染时同步；toggleDiff 拿它判断在途响应是否已属于上一轮任务
-	const taskIdRef = useRef<string | null>(null);
-	taskIdRef.current = task?.id ?? null;
-
-	/** 一次运行里逐页的结果：title → { status, message, newRevid }；newRevid 为 null 表示没产生新版本 */
-	const results = useMemo(() => {
-		const map = new Map<string, { status: string; message: string; newRevid: number | null }>();
-		for (const event of events) {
-			if (event.type !== 'edit') continue;
-			map.set(event.title, { status: event.status, message: event.message ?? '', newRevid: event.newRevid });
-		}
-		return map;
-	}, [events]);
-
-	/** 打开或收起某页的 diff；任务结束后历史已落库，走按新旧 revid 取正文那条路 */
-	const [openDiffs, setOpenDiffs] = useState<Set<string>>(new Set());
-	const [diffLines, setDiffLines] = useState<Record<string, DiffLine[]>>({});
-	const [diffError, setDiffError] = useState<Record<string, string>>({});
-
-	// 换一次运行就清空上回的 diff 状态：否则同名页面会直接复用上一次的行，空跑留下的错误文案也会串到真跑。
-	// 依赖 task?.id（原始字符串）而非 task 对象——SSE 每帧都会换一个新的 task 对象，依赖对象会每帧清空。
-	useEffect(() => {
-		setOpenDiffs(new Set());
-		setDiffLines({});
-		setDiffError({});
-	}, [task?.id]);
-
-	const toggleDiff = (title: string): void => {
-		const next = new Set(openDiffs);
-		if (next.has(title)) {
-			next.delete(title);
-			setOpenDiffs(next);
-			return;
-		}
-		next.add(title);
-		setOpenDiffs(next);
-		if (task === null || diffLines[title] !== undefined) return;
-		// 闭包住发起时的任务号：响应回来时若已换了一轮任务（状态已被清空），一律丢弃，
-		// 否则在途响应会把上一轮的 diff 写进新任务的表，新任务便不再重取、显示旧内容。
-		const startedFor = task.id;
-		api.history
-			.diff(task.id, title)
-			.then((result) => {
-				if (taskIdRef.current !== startedFor) return;
-				setDiffLines((prev) => ({ ...prev, [title]: result.lines }));
-			})
-			.catch((reason: unknown) => {
-				if (taskIdRef.current !== startedFor) return;
-				const reasonCode = reason instanceof ApiError ? (reason.body as { reason?: string } | null)?.reason : undefined;
-				const text = reasonCode === 'unchanged' ? '这一页没有实际改动' : reasonCode === 'missing' ? '线上已找不到这个页面' : reason instanceof ApiError ? reason.message : '取 diff 失败';
-				setDiffError((prev) => ({ ...prev, [title]: text }));
-			});
-	};
 
 	/** 启动一次运行：空跑带 --dry-run；另按需带 --reset。表单先过一遍校验再下发 */
 	const startRun = async (dryRun: boolean): Promise<void> => {
@@ -320,31 +267,11 @@ export function LinkReplacePage(): React.JSX.Element {
 				</button>
 			</div>
 
-			{results.size > 0 && (
-				<ul className="lr-results">
-					{[...results.entries()].map(([title, result]) => {
-						// 任务还在跑时历史尚未落库、无从取 diff；此外只有「没产生新版本」的行才点不出 diff——
-						// 空跑、移动成功（newRevid 为 null）都是这种；被跳过（如「无匹配」）的行仍带 newRevid === oldRevid，可对比
-						const blocked = running ? '任务结束后才能看 diff' : result.newRevid === null ? '该动作没有产生新版本，无法对比' : null;
-						return (
-							<li className="lr-result" key={title}>
-								<div className="restore-line">
-									<span className="restore-title">{title}</span>
-									<span className={`lr-status lr-status-${result.status}`}>{result.status === 'changed' ? '修改' : result.status === 'skipped' ? '跳过' : '失败'}</span>
-									{result.message !== '' && <span className="hint">{result.message}</span>}
-									<button type="button" disabled={blocked !== null} title={blocked ?? undefined} onClick={() => toggleDiff(title)}>
-										{openDiffs.has(title) ? '收起 diff' : '看 diff'}
-									</button>
-								</div>
-								{openDiffs.has(title) && (
-									<div className="hit-diff">
-										{diffLines[title] !== undefined ? <DiffView lines={diffLines[title]} /> : <p className="hint">{diffError[title] ?? '正在取 diff…'}</p>}
-									</div>
-								)}
-							</li>
-						);
-					})}
-				</ul>
+			{/* 逐页结果与 diff 不再铺在这里（几十页会把页面撑长），统一到历史页按任务查看 */}
+			{task !== null && (
+				<p className="hint">
+					逐页结果与 diff 请在<a href="#/history">历史页</a>查看。
+				</p>
 			)}
 
 			<LogView events={events} />
