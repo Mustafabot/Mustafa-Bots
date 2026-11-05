@@ -35,10 +35,27 @@ function renderField(spec: AnySpec, values: Record<string, ParamValue>, onChange
 	const id = `param-${key.replace(/^-+/, '')}`;
 	const danger = 'danger' in spec && spec.danger === true;
 
-	let control: React.JSX.Element;
+	// 布尔参数走整行开关：标签、说明与控件同一行，点击整行都能切换
 	if (spec.kind === 'boolean') {
-		control = <input id={id} type="checkbox" checked={value === true} disabled={disabled} onChange={(event) => onChange(setKey(values, key, event.target.checked))} />;
-	} else if (spec.kind === 'number') {
+		return (
+			<label className={`field field-toggle${danger ? ' field-danger' : ''}`} key={key} htmlFor={id}>
+				<span className="toggle-copy">
+					<span className="toggle-label">{spec.label}</span>
+					{spec.description !== undefined && <span className="hint">{spec.description}</span>}
+					{danger && <span className="hint danger">危险参数，请确认后再使用。</span>}
+				</span>
+				<span className="switch">
+					<input id={id} type="checkbox" checked={value === true} disabled={disabled} onChange={(event) => onChange(setKey(values, key, event.target.checked))} />
+					<span className="switch-track" aria-hidden="true">
+						<span className="switch-thumb" />
+					</span>
+				</span>
+			</label>
+		);
+	}
+
+	let control: React.JSX.Element;
+	if (spec.kind === 'number') {
 		control = (
 			<input
 				id={id}

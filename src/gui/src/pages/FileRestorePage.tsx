@@ -154,7 +154,6 @@ export function FileRestorePage(): React.JSX.Element {
 		<section className="restore-page">
 			<div className="page-head">
 				<a href="#/">← 返回任务列表</a>
-				<h2>文件还原</h2>
 			</div>
 
 			{error !== null && <p className="error">{error}</p>}

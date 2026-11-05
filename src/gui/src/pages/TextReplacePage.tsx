@@ -345,7 +345,6 @@ export function TextReplacePage(): React.JSX.Element {
 		<section className="text-replace-page">
 			<div className="page-head">
 				<a href="#/">← 返回任务列表</a>
-				<h2>全站文本替换</h2>
 			</div>
 
 			{shownError !== null && <p className="error">{shownError}</p>}

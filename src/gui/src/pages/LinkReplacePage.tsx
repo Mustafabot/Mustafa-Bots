@@ -153,7 +153,6 @@ export function LinkReplacePage(): React.JSX.Element {
 		<section className="link-replace-page">
 			<div className="page-head">
 				<a href="#/">← 返回任务列表</a>
-				<h2>链接替换</h2>
 			</div>
 
 			{error !== null && <p className="error">{error}</p>}

@@ -3,6 +3,7 @@
 // 该阶段没有任何 progress（如「跳过同步」）则留静态空槽，不转圈。阶段由 phase 事件分组。
 import { useEffect, useState } from 'react';
 import type { ProgressEvent, TaskRecord, TaskStatus } from '../types';
+import { Icon } from './Icon';
 import { barMode, formatDuration } from './progressText';
 
 interface ProgressPanelProps {
@@ -72,7 +73,14 @@ function PhaseBar({ row }: { row: PhaseRow }): React.JSX.Element {
 	return (
 		<div className="phase-row">
 			<div className="phase-name">{row.name}</div>
-			<div className={`bar${mode === 'indeterminate' ? ' bar-indeterminate' : ''}`}>
+			<div
+				className={`bar${mode === 'indeterminate' ? ' bar-indeterminate' : ''}`}
+				role="progressbar"
+				aria-label={row.name}
+				aria-valuemin={0}
+				aria-valuemax={mode === 'determinate' ? row.total : undefined}
+				aria-valuenow={mode === 'determinate' ? row.done : undefined}
+			>
 				<div className="bar-fill" style={mode === 'determinate' ? { width: `${percent}%` } : undefined} />
 			</div>
 			<div className="phase-count">{row.hasProgress ? (row.total === undefined ? `${row.done}` : `${row.done}/${row.total}`) : ''}</div>
@@ -100,11 +108,20 @@ export function ProgressPanel({ task, events, onAbort, aborting = false }: Progr
 	return (
 		<section className="progress-panel">
 			<div className="status-line">
-				<span className={`status-badge status-${task.status}`}>{STATUS_LABEL[task.status]}</span>
-				<span className="task-label">{task.label}</span>
-				<span className="duration">用时 {duration}</span>
+				<span className={`status-badge status-${task.status}`}>
+					<span className="status-dot" aria-hidden="true" />
+					{STATUS_LABEL[task.status]}
+				</span>
+				<div className="status-main">
+					<span className="task-label">{task.label}</span>
+					<span className="duration">
+						<Icon name="clock" size={14} />
+						用时 {duration}
+					</span>
+				</div>
 				{running && (
 					<button type="button" className="danger" onClick={onAbort} disabled={aborting}>
+						<Icon name="stop" size={14} />
 						{aborting ? '中止中…' : '中止'}
 					</button>
 				)}
@@ -117,9 +134,17 @@ export function ProgressPanel({ task, events, onAbort, aborting = false }: Progr
 				</div>
 			)}
 			{(counts.changed > 0 || counts.skipped > 0 || counts.failed > 0) && (
-				<p className="counts">
-					修改 {counts.changed} · 跳过 {counts.skipped} · 失败 {counts.failed}
-				</p>
+				<div className="counts">
+					<span className="count-chip">
+						<b>{counts.changed}</b> 修改
+					</span>
+					<span className="count-chip">
+						<b>{counts.skipped}</b> 跳过
+					</span>
+					<span className="count-chip count-chip-danger">
+						<b>{counts.failed}</b> 失败
+					</span>
+				</div>
 			)}
 		</section>
 	);

@@ -213,7 +213,6 @@ export function UploadPage(): React.JSX.Element {
 		<section className="upload-page">
 			<div className="page-head">
 				<a href="#/">← 返回任务列表</a>
-				<h2>URL 上传</h2>
 			</div>
 			{shownError !== null && <p className="error">{shownError}</p>}
 			{notice !== null && <p className={notice.kind === 'error' ? 'error' : 'hint'}>{notice.text}</p>}

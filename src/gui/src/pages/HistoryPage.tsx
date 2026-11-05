@@ -292,7 +292,6 @@ export function HistoryPage(): React.JSX.Element {
 		<section className="history-page">
 			<div className="page-head">
 				<a href="#/">← 返回任务列表</a>
-				<h2>历史记录</h2>
 			</div>
 
 			{listError !== null && <p className="error">{listError}</p>}

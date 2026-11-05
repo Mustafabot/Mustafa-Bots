@@ -2,6 +2,7 @@
 // 默认自动滚到底；用户往上滚即暂停跟随（给「回到底部」按钮）；「清空」只清本地显示，「复制」写剪贴板。
 import { useEffect, useRef, useState } from 'react';
 import type { ProgressEvent } from '../types';
+import { Icon } from './Icon';
 import { eventToLine } from './progressText';
 
 interface LogViewProps {
@@ -87,27 +88,43 @@ export function LogView({ events }: LogViewProps): React.JSX.Element {
 	return (
 		<section className="log-view">
 			<div className="log-toolbar">
-				<span className="log-title">日志</span>
+				<span className="log-title">
+					<Icon name="terminal" size={15} />
+					日志
+				</span>
 				<span className="log-count">{entries.length} 行</span>
-				<button type="button" onClick={copy}>
-					{copied ? '已复制' : '复制'}
-				</button>
-				<button type="button" onClick={clear}>
-					清空
-				</button>
-				{!following && (
-					<button type="button" className="primary" onClick={backToBottom}>
-						回到底部
+				<div className="log-actions">
+					<button type="button" onClick={copy}>
+						<Icon name="copy" size={14} />
+						{copied ? '已复制' : '复制'}
 					</button>
-				)}
+					<button type="button" onClick={clear}>
+						<Icon name="trash" size={14} />
+						清空
+					</button>
+					{!following && (
+						<button type="button" className="primary" onClick={backToBottom}>
+							回到底部
+						</button>
+					)}
+				</div>
 			</div>
 			<div className="log-body" ref={containerRef} onScroll={onScroll}>
 				{entries.map((entry, index) => (
 					<div key={index} className={`log-line log-${entry.level}`}>
+						<span className="log-mark" aria-hidden="true" />
 						{entry.text}
 					</div>
 				))}
-				{entries.length === 0 && <div className="hint">暂无日志。</div>}
+				{entries.length === 0 && (
+					<div className="log-empty">
+						<span className="log-empty-icon">
+							<Icon name="terminal" size={22} />
+						</span>
+						<p>暂无日志</p>
+						<span className="hint">启动任务后，运行输出会实时出现在这里。</span>
+					</div>
+				)}
 			</div>
 		</section>
 	);
