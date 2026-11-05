@@ -121,6 +121,32 @@ export const DESCRIPTORS: TaskDescriptor[] = [
 			{ kind: 'positional', name: 'configPage', label: '配置页标题（用作断点标识）', index: 0 },
 		],
 	},
+	{
+		id: 'purge-backlinks',
+		label: '链入刷新',
+		entry: 'src/purge/PurgeBacklinks.ts',
+		style: 'space',
+		progressFlag: '--progress-json',
+		quietFlag: '--quiet',
+		params: [
+			{
+				kind: 'positional',
+				name: 'title',
+				label: '目标页面标题',
+				index: 0,
+				required: true,
+				description: '刷新链入该页与嵌入该页的页面缓存',
+			},
+			{
+				kind: 'boolean',
+				flag: '--nulledit',
+				label: '零编辑代替 purge',
+				description: '逐页发一次空编辑；purge 无效时使用，较慢且会留下编辑日志',
+			},
+			{ kind: 'number', flag: '--concurrency', label: '并发数', default: 3, min: 1, max: 16, description: '每批 50 页，批间固定间隔 1 秒' },
+			{ kind: 'boolean', flag: '--dry-run', label: '空跑，不提交任何刷新' },
+		],
+	},
 ];
 
 export function findDescriptor(id: string): TaskDescriptor | undefined {

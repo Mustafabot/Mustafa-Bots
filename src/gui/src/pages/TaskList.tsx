@@ -18,6 +18,7 @@ const TASK_ICON: Record<string, IconName> = {
 	'url-upload': 'upload',
 	'file-restore': 'rotate',
 	'link-replace': 'link',
+	'purge-backlinks': 'refresh',
 };
 
 /** 任务卡片列表 */

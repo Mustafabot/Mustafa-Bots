@@ -62,6 +62,9 @@ const FLAG_LABEL: Record<string, string> = {
 	'--days': '回溯天数',
 	'--limit': '数量上限',
 	'--mode': '模式',
+	'--concurrency': '并发数',
+	'--nulledit': '零编辑刷新',
+	title: '目标页面',
 };
 
 /** 一个页面展开的 diff 状态 */

@@ -8,6 +8,7 @@ export type IconName =
 	| 'link'
 	| 'upload'
 	| 'rotate'
+	| 'refresh'
 	| 'history'
 	| 'arrowLeft'
 	| 'arrowRight'
@@ -74,6 +75,12 @@ const PATHS: Record<IconName, React.ReactNode> = {
 			<path d="M3.5 12a8.5 8.5 0 1 0 2.6-6.1" />
 			<path d="M3.5 4.5V10H9" />
 			<path d="M12 7.5V12l3.2 1.9" />
+		</>
+	),
+	refresh: (
+		<>
+			<path d="M20.5 12a8.5 8.5 0 1 1-2.6-6.1" />
+			<path d="M20.5 4.5V10H15" />
 		</>
 	),
 	arrowLeft: (
