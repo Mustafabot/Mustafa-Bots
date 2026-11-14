@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # 根目录 npm 依赖。策略：机械低风险的更新（dev 依赖、patch/minor）按月打包；
+  # 会直接影响线上编辑行为的运行时依赖，大版本拦下由人工看 changelog + 验证。
+  - package-ecosystem: npm
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 3
+    groups:
+      dev-dependencies:
+        dependency-type: development
+    ignore:
+      # API 客户端与解析器的大版本会改变每一次真实编辑的行为，须人工验证
+      - dependency-name: "wiki-saikou"
+        update-types: ["version-update:semver-major"]
+      - dependency-name: "wikiparser-node"
+        update-types: ["version-update:semver-major"]
+      # 仅控制台颜色与 profile，更新价值低
+      - dependency-name: "@bhsd/nodejs"
+
+  # GUI 子工程是独立的 package.json，必须单独声明；合并后需本地重跑 npm run build:gui
+  - package-ecosystem: npm
+    directory: "/src/gui"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 2
+
+  # 只更新 uses: 引用（如 actions/checkout@v6），不碰 with: 里的 node-version
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly

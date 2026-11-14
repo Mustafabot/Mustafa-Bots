@@ -1,0 +1,42 @@
+name: PR Check
+
+# 只读校验：typecheck + 定向 lint + 单测。绝不在这里跑 AutoPatrol / SiteStatistics
+# 等会向线上萌百做真实编辑的脚本——那两个工作流只允许 schedule + workflow_dispatch。
+on:
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-check-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v6
+      - name: Set Node Version
+        uses: actions/setup-node@v6
+        with:
+          # 与 AutoPatrol.yml / SiteStatistics.yml 保持一致：写死 24.4.1，
+          # 该版本 TLS 指纹能过 Cloudflare 校验，别改成宽版本
+          node-version: 24.4.1
+          cache: npm
+          cache-dependency-path: |
+            package-lock.json
+            src/gui/package-lock.json
+      - name: Install root dependencies
+        run: npm ci
+      - name: Install GUI dependencies
+        run: npm --prefix src/gui ci
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Lint
+        # 不用 npm run lint：它对 temp/ 等目录必然 exit 1，见 CLAUDE.md
+        run: npx eslint src
+      - name: Unit tests
+        run: npm run test:unit
