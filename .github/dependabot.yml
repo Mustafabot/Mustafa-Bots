@@ -18,6 +18,11 @@ updates:
         update-types: ["version-update:semver-major"]
       # 仅控制台颜色与 profile，更新价值低
       - dependency-name: "@bhsd/nodejs"
+      # TypeScript 7 是 Go 原生移植版（microsoft/typescript-go），typescript-eslint
+      # 的 peer 上限仍是 <6.1.0，升上去 npm ci 直接 ERESOLVE，且整条 lint/test 链都不执行。
+      # 等 typescript-eslint 松绑后人工验证再放开
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # GUI 子工程是独立的 package.json，必须单独声明；合并后需本地重跑 npm run build:gui
   - package-ecosystem: npm
@@ -25,6 +30,10 @@ updates:
     schedule:
       interval: monthly
     open-pull-requests-limit: 2
+    ignore:
+      # 与根保持一致：界面用的 TS 也先停在 6.x，避免两处 package.json 版本声明分叉
+      - dependency-name: "typescript"
+        update-types: ["version-update:semver-major"]
 
   # 只更新 uses: 引用（如 actions/checkout@v6），不碰 with: 里的 node-version
   - package-ecosystem: github-actions
